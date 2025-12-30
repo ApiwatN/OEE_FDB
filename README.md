@@ -15,19 +15,19 @@
 ### System Architecture
 ```mermaid
 flowchart TB
-    subgraph Frontend["🖥️ Frontend (Next.js)"]
+    subgraph Frontend[Frontend - Next.js]
         UI[Web Application]
         Dashboard[Dashboard]
         Reports[Reports]
     end
     
-    subgraph Backend["⚙️ Backend (Express.js)"]
+    subgraph Backend[Backend - Express.js]
         API[REST API]
         Socket[Socket.IO Server]
         Controllers[Controllers]
     end
     
-    subgraph Database["🗄️ Database"]
+    subgraph Database[Database]
         DB[(MySQL/PostgreSQL)]
     end
     
@@ -41,30 +41,30 @@ flowchart TB
 ### User Flow
 ```mermaid
 flowchart LR
-    A[👤 Operator Scan] --> B[เลือกเครื่องจักร]
-    B --> C[เริ่มทำงาน]
-    C --> D[บันทึกข้อมูลผลิต]
-    D --> E[หยุดทำงาน]
-    E --> F[📊 คำนวณ OEE]
-    F --> G[📈 แสดง Dashboard]
+    A[Operator Scan] --> B[Select Machine]
+    B --> C[Start Working]
+    C --> D[Record Production]
+    D --> E[Stop Working]
+    E --> F[Calculate OEE]
+    F --> G[Show Dashboard]
 ```
 
 ### OEE Calculation Flow
 ```mermaid
 flowchart TD
-    A[📥 รับข้อมูลการผลิต] --> B[Availability]
+    A[Production Data] --> B[Availability]
     A --> C[Performance]
     A --> D[Quality]
     
-    B --> |"เวลาเดินเครื่อง/เวลาที่วางแผน"| E[% Availability]
-    C --> |"ชิ้นงานผลิตได้/ชิ้นงานตามมาตรฐาน"| F[% Performance]
-    D --> |"ชิ้นงานดี/ชิ้นงานทั้งหมด"| G[% Quality]
+    B --> E[Availability %]
+    C --> F[Performance %]
+    D --> G[Quality %]
     
-    E --> H[OEE = A × P × Q]
+    E --> H[OEE = A x P x Q]
     F --> H
     G --> H
     
-    H --> I[📊 แสดงผล Dashboard]
+    H --> I[Display Dashboard]
 ```
 
 ## 🛠️ Tech Stack
