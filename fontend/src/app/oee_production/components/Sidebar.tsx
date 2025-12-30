@@ -170,6 +170,30 @@ export default function Sidebar() {
                                 <p style={{ marginLeft: "5px" }}>Machine Report</p>
                             </Link>
                         </li>
+
+                        {/* 🔹 Layout Dashboard */}
+                        <li className="nav-item">
+                            <Link
+                                href="/oee_production/layout_dashboard"
+                                className={`nav-link ${pathname?.startsWith("/oee_production/layout_dashboard") ? "active" : ""
+                                    }`}
+                                style={{
+                                    backgroundColor: pathname?.startsWith("/oee_production/layout_dashboard")
+                                        ? "#3B82F6"
+                                        : "#334155",
+                                    color: "#E2E8F0",
+                                    marginBottom: "4px",
+                                    borderRadius: "6px",
+                                    transition: "all 0.2s ease",
+                                }}
+                            >
+                                <i
+                                    className="nav-icon fas fa-border-all"
+                                    style={{ color: "#60A5FA" }}
+                                ></i>
+                                <p style={{ marginLeft: "5px" }}>Layout Dashboard</p>
+                            </Link>
+                        </li>
                     </ul>
                 </nav>
             </div>

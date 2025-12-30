@@ -82,6 +82,7 @@ app.get("/api/machine/listType/:area", machineController.listType);
 app.get("/api/machine/listMachines/:area/:type", machineController.listMachines);
 app.get("/api/machine/listTypeWithMachines/:area", machineController.listTypeWithMachines);
 app.get("/api/machine/listProcess/:machine_type", machineController.listProcess);
+app.get("/api/machine/listAllMachinesByArea", machineController.listAllMachinesByArea); // 🆕 Layout Dashboard
 
 // ... REPORT ROUTES
 app.get("/api/report/machine-report", reportController.getMachineReport); // 🆕 // ✅ Add Route

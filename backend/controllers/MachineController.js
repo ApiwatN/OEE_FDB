@@ -235,4 +235,48 @@ module.exports = {
       res.status(500).json({ message: "Error fetching processes" });
     }
   },
+
+  // =============================================================
+  // 6) รายชื่อ Machine ทั้งหมดแยกตาม Area (สำหรับ Layout Dashboard)
+  // =============================================================
+  listAllMachinesByArea: async (req, res) => {
+    try {
+      // ดึง machine ทั้งหมดที่ active
+      const machines = await prisma.tbm_machine.findMany({
+        where: { status: "active" },
+        orderBy: [
+          { machine_area: "asc" },
+          { machine_type: "asc" },
+          { machine_name: "asc" }
+        ],
+        select: {
+          id: true,
+          machine_area: true,
+          machine_type: true,
+          machine_name: true,
+        }
+      });
+
+      // Group by Area
+      const grouped = {};
+      for (const m of machines) {
+        if (!grouped[m.machine_area]) {
+          grouped[m.machine_area] = {
+            area: m.machine_area,
+            machines: []
+          };
+        }
+        grouped[m.machine_area].machines.push({
+          id: m.id,
+          type: m.machine_type,
+          name: m.machine_name
+        });
+      }
+
+      res.json({ results: Object.values(grouped) });
+    } catch (e) {
+      console.error("❌ listAllMachinesByArea error:", e);
+      res.status(500).json({ message: e.message });
+    }
+  },
 };
