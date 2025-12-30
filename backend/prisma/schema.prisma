@@ -1,0 +1,196 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+model tbm_operator {
+  id                  Int                  @id @default(autoincrement())
+  operator_name       String
+  emp_no              String               @unique
+  picture_path        String
+  status              String               @default("active")
+  tb_history_workings tb_history_working[]
+}
+
+model tbm_machine {
+  id           Int    @id @default(autoincrement())
+  machine_area String
+  machine_type String
+  machine_name String @unique
+  status       String @default("active")
+}
+
+model tbm_model {
+  id         Int    @id @default(autoincrement())
+  model_name String
+  status     String
+}
+
+model tbm_model_type {
+  id         Int     @id @default(autoincrement())
+  model_type String?
+  status     String  @default("active")
+}
+
+model tbm_process {
+  id           Int     @id @default(autoincrement())
+  machine_type String
+  process_name String?
+  status       String  @default("active")
+}
+
+model tb_output_target {
+  id                Int      @id @default(autoincrement())
+  date              DateTime @db.Date
+  machine_name      String?
+  model_name        String?
+  model_type        String?
+  process_name      String?
+  pc_target         Int
+  cycle_time_target Float
+  eff_target        Float
+  target_07         Int?     @default(0)
+  target_08         Int?     @default(0)
+  target_09         Int?     @default(0)
+  target_10         Int?     @default(0)
+  target_11         Int?     @default(0)
+  target_12         Int?     @default(0)
+  target_13         Int?     @default(0)
+  target_14         Int?     @default(0)
+  target_15         Int?     @default(0)
+  target_16         Int?     @default(0)
+  target_17         Int?     @default(0)
+  target_18         Int?     @default(0)
+  target_19         Int?     @default(0)
+  target_20         Int?     @default(0)
+  target_21         Int?     @default(0)
+  target_22         Int?     @default(0)
+  target_23         Int?     @default(0)
+  target_00         Int?     @default(0)
+  target_01         Int?     @default(0)
+  target_02         Int?     @default(0)
+  target_03         Int?     @default(0)
+  target_04         Int?     @default(0)
+  target_05         Int?     @default(0)
+  target_06         Int?     @default(0)
+  accum_target      Int?     @default(0)
+  Work_hour         Int?
+}
+
+model tb_output_actual {
+  id           Int      @id @default(autoincrement())
+  date         DateTime @db.Date
+  machine_name String
+  actual_07    Int?     @default(0)
+  actual_08    Int?     @default(0)
+  actual_09    Int?     @default(0)
+  actual_10    Int?     @default(0)
+  actual_11    Int?     @default(0)
+  actual_12    Int?     @default(0)
+  actual_13    Int?     @default(0)
+  actual_14    Int?     @default(0)
+  actual_15    Int?     @default(0)
+  actual_16    Int?     @default(0)
+  actual_17    Int?     @default(0)
+  actual_18    Int?     @default(0)
+  actual_19    Int?     @default(0)
+  actual_20    Int?     @default(0)
+  actual_21    Int?     @default(0)
+  actual_22    Int?     @default(0)
+  actual_23    Int?     @default(0)
+  actual_00    Int?     @default(0)
+  actual_01    Int?     @default(0)
+  actual_02    Int?     @default(0)
+  actual_03    Int?     @default(0)
+  actual_04    Int?     @default(0)
+  actual_05    Int?     @default(0)
+  actual_06    Int?     @default(0)
+}
+
+model tb_cycle_time_actual {
+  id           Int      @id @default(autoincrement())
+  date         DateTime @db.Date
+  machine_name String
+  cycle_07     Float?   @default(0)
+  cycle_08     Float?   @default(0)
+  cycle_09     Float?   @default(0)
+  cycle_10     Float?   @default(0)
+  cycle_11     Float?   @default(0)
+  cycle_12     Float?   @default(0)
+  cycle_13     Float?   @default(0)
+  cycle_14     Float?   @default(0)
+  cycle_15     Float?   @default(0)
+  cycle_16     Float?   @default(0)
+  cycle_17     Float?   @default(0)
+  cycle_18     Float?   @default(0)
+  cycle_19     Float?   @default(0)
+  cycle_20     Float?   @default(0)
+  cycle_21     Float?   @default(0)
+  cycle_22     Float?   @default(0)
+  cycle_23     Float?   @default(0)
+  cycle_00     Float?   @default(0)
+  cycle_01     Float?   @default(0)
+  cycle_02     Float?   @default(0)
+  cycle_03     Float?   @default(0)
+  cycle_04     Float?   @default(0)
+  cycle_05     Float?   @default(0)
+  cycle_06     Float?   @default(0)
+  cycle_time   Float?   @default(0)
+}
+
+model tb_efficiency_actual {
+  id           Int      @id @default(autoincrement())
+  date         DateTime @db.Date
+  machine_name String
+  eff_07       Float?   @default(0)
+  eff_08       Float?   @default(0)
+  eff_09       Float?   @default(0)
+  eff_10       Float?   @default(0)
+  eff_11       Float?   @default(0)
+  eff_12       Float?   @default(0)
+  eff_13       Float?   @default(0)
+  eff_14       Float?   @default(0)
+  eff_15       Float?   @default(0)
+  eff_16       Float?   @default(0)
+  eff_17       Float?   @default(0)
+  eff_18       Float?   @default(0)
+  eff_19       Float?   @default(0)
+  eff_20       Float?   @default(0)
+  eff_21       Float?   @default(0)
+  eff_22       Float?   @default(0)
+  eff_23       Float?   @default(0)
+  eff_00       Float?   @default(0)
+  eff_01       Float?   @default(0)
+  eff_02       Float?   @default(0)
+  eff_03       Float?   @default(0)
+  eff_04       Float?   @default(0)
+  eff_05       Float?   @default(0)
+  eff_06       Float?   @default(0)
+  eff_actual   Float?   @default(0)
+}
+
+model tb_oee {
+  id           Int      @id @default(autoincrement())
+  date         DateTime @db.Date
+  machine_name String
+  oee_value    Float?   @default(0)
+  ng_qty       Int?     @default(0)
+  availability Float?   @default(0)
+  performance  Float?   @default(0)
+  quality      Float?   @default(0)
+}
+
+model tb_history_working {
+  id           Int           @id @default(autoincrement())
+  date         DateTime      @db.Date
+  machine_name String
+  emp_no       String?
+  shift        String
+  start_time   DateTime
+  end_time     DateTime?
+  tbm_operator tbm_operator? @relation(fields: [emp_no], references: [emp_no])
+}
