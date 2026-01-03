@@ -31,9 +31,9 @@ const MACHINE_POSITIONS: { [area: string]: { [machineName: string]: { row: numbe
         'Chydos2': { row: 1, col: 0 }, 'DLC-003': { row: 1, col: 1 }, 'DLC-010': { row: 1, col: 2 },
         'DLC-004': { row: 2, col: 1 }, 'DLC-011': { row: 2, col: 2 },
         'DLC-005': { row: 3, col: 1 }, 'DLC-012': { row: 3, col: 2 },
-        'DLC-006': { row: 4, col: 0 },
-        'DLC-007': { row: 6, col: 0 },
-        'DLC-008': { row: 7, col: 0 },
+        'DLC-006': { row: 4, col: 1 },
+        'DLC-007': { row: 5, col: 1 },
+        'DLC-008': { row: 6, col: 1 },
     },
     ECM: {
         'ACR-001': { row: 0, col: 0 }, 'AHV-001': { row: 0, col: 1 }, 'AQS-009': { row: 0, col: 2 },
@@ -44,71 +44,77 @@ const MACHINE_POSITIONS: { [area: string]: { [machineName: string]: { row: numbe
         'ACR-006': { row: 5, col: 0 }, 'AHV-006': { row: 5, col: 1 }, 'WTM-002': { row: 5, col: 2 },
     },
     CLASS1000: {
-        'ACI-001': { row: 0, col: 0 }, 'ASI-001': { row: 0, col: 1 }, 'LSM-003': { row: 0, col: 2 }, 'WSM-001': { row: 0, col: 4 }, 'VCM-001': { row: 0, col: 5 },
-        'ACI-002': { row: 1, col: 0 }, 'ASI-002': { row: 1, col: 1 }, 'LSM-004': { row: 1, col: 2 }, 'WSM-002': { row: 1, col: 4 }, 'VCM-002': { row: 1, col: 5 },
+        'ACI-001': { row: 0, col: 0 }, 'ASI-001': { row: 0, col: 1 }, 'LSM-003': { row: 0, col: 2 }, 'WSM-001': { row: 0, col: 3 }, 'VCM-001': { row: 0, col: 4 },
+        'ACI-002': { row: 1, col: 0 }, 'ASI-002': { row: 1, col: 1 }, 'LSM-004': { row: 1, col: 2 }, 'WSM-002': { row: 1, col: 3 }, 'VCM-002': { row: 1, col: 4 },
         'ACI-003': { row: 2, col: 0 }, 'ASI-003': { row: 2, col: 1 }, 'LSM-006': { row: 2, col: 2 },
     },
     CLASS100: {
-        // Row 0
-        'ABR-001': { row: 0, col: 0 }, 'ACP-002': { row: 0, col: 1 }, 'AIU-001': { row: 0, col: 2 }, 'ARA-001': { row: 0, col: 3 }, 'ATX-001': { row: 0, col: 4 },
-        'GE2-001': { row: 0, col: 5 }, 'GE2-016': { row: 0, col: 6 }, 'GES-001': { row: 0, col: 7 }, 'HEL-001': { row: 0, col: 8 }, 'HEL-040': { row: 0, col: 9 },
-        'LSM-001': { row: 0, col: 10 }, 'LSW-001': { row: 0, col: 11 }, 'LSW-028': { row: 0, col: 12 }, 'VNS-001': { row: 0, col: 13 }, 'VNS-016': { row: 0, col: 14 },
-        // Row 1
-        'ABR-002': { row: 1, col: 0 }, 'ACP-003': { row: 1, col: 1 }, 'AIU-002': { row: 1, col: 2 }, 'ARA-002': { row: 1, col: 3 }, 'ATX-002': { row: 1, col: 4 },
-        'GE2-002': { row: 1, col: 5 }, 'GE3-017': { row: 1, col: 6 }, 'GES-003': { row: 1, col: 7 }, 'HEL-002': { row: 1, col: 8 }, 'HEL-041': { row: 1, col: 9 },
-        'LSM-002': { row: 1, col: 10 }, 'LSW-002': { row: 1, col: 11 }, 'LSW-029': { row: 1, col: 12 }, 'VNS-002': { row: 1, col: 13 }, 'VNS-017': { row: 1, col: 14 },
-        // Row 2
-        'ABR-003': { row: 2, col: 0 }, 'ACP-004': { row: 2, col: 1 }, 'ART-004': { row: 2, col: 3 }, 'ATX-003': { row: 2, col: 4 },
-        'GE2-003': { row: 2, col: 5 }, 'GE2-018': { row: 2, col: 6 }, 'GES-007': { row: 2, col: 7 }, 'HEL-003': { row: 2, col: 8 }, 'HEL-043': { row: 2, col: 9 },
-        'LSM-005': { row: 2, col: 10 }, 'LSW-003': { row: 2, col: 11 }, 'LSW-030': { row: 2, col: 12 }, 'VNS-003': { row: 2, col: 13 }, 'VNS-018': { row: 2, col: 14 },
-        // Row 3
-        'ABR-004': { row: 3, col: 0 }, 'ACP-005': { row: 3, col: 1 }, 'ART-005': { row: 3, col: 3 }, 'ATX-004': { row: 3, col: 4 },
-        'GE2-004': { row: 3, col: 5 }, 'GE2-019': { row: 3, col: 6 }, 'GES-008': { row: 3, col: 7 }, 'HEL-004': { row: 3, col: 8 }, 'HEL-044': { row: 3, col: 9 },
-        'LSW-004': { row: 3, col: 11 }, 'LSW-031': { row: 3, col: 12 }, 'VNS-004': { row: 3, col: 13 }, 'VNS-019': { row: 3, col: 14 },
-        // Row 4
-        'ABR-005': { row: 4, col: 0 }, 'ACP-006': { row: 4, col: 1 }, 'ART-009': { row: 4, col: 3 },
-        'GE2-005': { row: 4, col: 5 }, 'GE2-020': { row: 4, col: 6 }, 'GES-009': { row: 4, col: 7 }, 'HEL-005': { row: 4, col: 8 }, 'HEL-046': { row: 4, col: 9 },
-        'LSW-005': { row: 4, col: 11 }, 'LSW-032': { row: 4, col: 12 }, 'VNS-005': { row: 4, col: 13 }, 'VNS-020': { row: 4, col: 14 },
-        // Row 5
-        'ABR-006': { row: 5, col: 0 }, 'ACP-007': { row: 5, col: 1 }, 'ART-010': { row: 5, col: 3 },
-        'GE2-006': { row: 5, col: 5 }, 'GE2-021': { row: 5, col: 6 }, 'GES-010': { row: 5, col: 7 }, 'HEL-006': { row: 5, col: 8 }, 'HEL-047': { row: 5, col: 9 },
-        'LSW-006': { row: 5, col: 11 }, 'LSW-033': { row: 5, col: 12 }, 'VNS-006': { row: 5, col: 13 }, 'VNS-021': { row: 5, col: 14 },
-        // Row 6
-        'ACP-008': { row: 6, col: 1 }, 'ART-011': { row: 6, col: 3 },
-        'GE2-007': { row: 6, col: 5 }, 'GE2-022': { row: 6, col: 6 }, 'HEL-007': { row: 6, col: 8 }, 'HEL-048': { row: 6, col: 9 },
-        'LSW-009': { row: 6, col: 11 }, 'LSW-034': { row: 6, col: 12 }, 'VNS-007': { row: 6, col: 13 }, 'VNS-022': { row: 6, col: 14 },
-        // Row 7
-        'ACP-009': { row: 7, col: 1 }, 'ART-013': { row: 7, col: 3 },
-        'GE2-008': { row: 7, col: 5 }, 'GE2-033': { row: 7, col: 6 }, 'HEL-017': { row: 7, col: 8 }, 'HEL-049': { row: 7, col: 9 },
-        'LSW-017': { row: 7, col: 11 }, 'LSW-035': { row: 7, col: 12 }, 'VNS-008': { row: 7, col: 13 }, 'VNS-023': { row: 7, col: 14 },
-        // Row 8
-        'ACP-010': { row: 8, col: 1 }, 'AOC-001': { row: 8, col: 2 }, 'ART-015': { row: 8, col: 3 },
-        'GE2-009': { row: 8, col: 5 }, 'GE2-034': { row: 8, col: 6 }, 'HEL-018': { row: 8, col: 8 }, 'HEL-050': { row: 8, col: 9 },
-        'LSW-019': { row: 8, col: 11 }, 'VNS-009': { row: 8, col: 13 }, 'VNS-024': { row: 8, col: 14 },
-        // Row 9
-        'ACP-011': { row: 9, col: 1 }, 'AOC-002': { row: 9, col: 2 }, 'ART-016': { row: 9, col: 3 },
-        'GE2-010': { row: 9, col: 5 }, 'GE2-035': { row: 9, col: 6 }, 'HEL-025': { row: 9, col: 8 }, 'HEL-051': { row: 9, col: 9 },
-        'LSW-024': { row: 9, col: 11 }, 'VNS-010': { row: 9, col: 13 }, 'VNS-025': { row: 9, col: 14 },
-        // Row 10
-        'ACP-012': { row: 10, col: 1 }, 'AOC-003': { row: 10, col: 2 }, 'ART-018': { row: 10, col: 3 },
-        'GE2-011': { row: 10, col: 5 }, 'GE2-036': { row: 10, col: 6 }, 'HEL-028': { row: 10, col: 8 }, 'HEL-052': { row: 10, col: 9 },
-        'LSW-025': { row: 10, col: 11 }, 'VNS-012': { row: 10, col: 13 }, 'VNS-026': { row: 10, col: 14 },
-        // Row 11
-        'AFU-002': { row: 11, col: 0 }, 'AOC-004': { row: 11, col: 2 }, 'ART-019': { row: 11, col: 3 },
-        'GE2-012': { row: 11, col: 5 }, 'GE2-038': { row: 11, col: 6 }, 'HEL-030': { row: 11, col: 8 }, 'HEL-053': { row: 11, col: 9 },
-        'LSW-026': { row: 11, col: 11 },
-        // Row 12
-        'AFU-003': { row: 12, col: 0 }, 'AOC-005': { row: 12, col: 2 }, 'ART-021': { row: 12, col: 3 },
-        'GE2-013': { row: 12, col: 5 }, 'GE2-039': { row: 12, col: 6 }, 'HEL-032': { row: 12, col: 8 }, 'HEL-055': { row: 12, col: 9 },
-        'LSW-027': { row: 12, col: 11 }, 'VNS-013': { row: 12, col: 13 },
-        // Row 13
-        'AFU-004': { row: 13, col: 0 }, 'AOC-006': { row: 13, col: 2 },
-        'GE2-014': { row: 13, col: 5 }, 'GE2-040': { row: 13, col: 6 }, 'HEL-033': { row: 13, col: 8 }, 'HEL-056': { row: 13, col: 9 },
-        'VNS-014': { row: 13, col: 13 },
-        // Row 14
-        'AOC-007': { row: 14, col: 2 }, 'FSPZ': { row: 14, col: 4 },
-        'HEL-036': { row: 14, col: 8 }, 'HEL-057': { row: 14, col: 9 },
-        'VNS-015': { row: 14, col: 13 },
+        // Col 0
+        'ABR-001': { row: 0, col: 0 }, 'ABR-002': { row: 1, col: 0 }, 'ABR-003': { row: 2, col: 0 }, 'ABR-004': { row: 3, col: 0 }, 'ABR-005': { row: 4, col: 0 }, 'ABR-006': { row: 5, col: 0 },
+
+        // Col 1
+        'ACP-002': { row: 0, col: 1 }, 'ACP-003': { row: 1, col: 1 }, 'ACP-004': { row: 2, col: 1 }, 'ACP-005': { row: 3, col: 1 }, 'ACP-006': { row: 4, col: 1 }, 'ACP-007': { row: 5, col: 1 },
+        'ACP-008': { row: 6, col: 1 }, 'ACP-009': { row: 7, col: 1 }, 'ACP-011': { row: 8, col: 1 }, 'ACP-012': { row: 9, col: 1 },
+        'AFU-002': { row: 12, col: 1 }, 'AFU-003': { row: 13, col: 1 }, 'AFU-004': { row: 14, col: 1 },
+
+        // Col 2
+        'AIU-001': { row: 0, col: 2 }, 'AIU-002': { row: 1, col: 2 },
+        'AOC-001': { row: 8, col: 2 }, 'AOC-002': { row: 9, col: 2 }, 'AOC-003': { row: 10, col: 2 }, 'AOC-004': { row: 11, col: 2 },
+        'AOC-005': { row: 12, col: 2 }, 'AOC-006': { row: 13, col: 2 }, 'AOC-007': { row: 14, col: 2 },
+
+        // Col 3
+        'ARA-001': { row: 0, col: 3 }, 'ARA-002': { row: 1, col: 3 },
+        'ART-004': { row: 2, col: 3 }, 'ART-006': { row: 3, col: 3 }, 'ART-009': { row: 4, col: 3 }, 'ART-010': { row: 5, col: 3 }, 'ART-011': { row: 6, col: 3 },
+        'ART-013': { row: 7, col: 3 }, 'ART-015': { row: 8, col: 3 }, 'ART-016': { row: 9, col: 3 }, 'ART-018': { row: 10, col: 3 }, 'ART-019': { row: 11, col: 3 }, 'ART-021': { row: 12, col: 3 },
+
+        // Col 4
+        'ATX-001': { row: 0, col: 4 }, 'ATX-002': { row: 1, col: 4 }, 'ATX-003': { row: 2, col: 4 }, 'ATX-004': { row: 3, col: 4 },
+        'FSPZ': { row: 14, col: 4 },
+
+        // Col 5
+        'GE2-001': { row: 0, col: 5 }, 'GE2-002': { row: 1, col: 5 }, 'GE2-003': { row: 2, col: 5 }, 'GE2-004': { row: 3, col: 5 }, 'GE2-005': { row: 4, col: 5 },
+        'GE2-006': { row: 5, col: 5 }, 'GE2-007': { row: 6, col: 5 }, 'GE2-008': { row: 7, col: 5 }, 'GE2-009': { row: 8, col: 5 }, 'GE2-010': { row: 9, col: 5 },
+        'GE2-011': { row: 10, col: 5 }, 'GE2-012': { row: 11, col: 5 }, 'GE2-013': { row: 12, col: 5 }, 'GE2-014': { row: 13, col: 5 }, 'GE2-015': { row: 14, col: 5 },
+
+        // Col 6
+        'GE2-016': { row: 0, col: 6 }, 'GE2-017': { row: 1, col: 6 }, 'GE2-018': { row: 2, col: 6 }, 'GE2-019': { row: 3, col: 6 }, 'GE2-020': { row: 4, col: 6 },
+        'GE2-021': { row: 5, col: 6 }, 'GE2-022': { row: 6, col: 6 }, 'GE2-033': { row: 7, col: 6 }, 'GE2-034': { row: 8, col: 6 }, 'GE2-035': { row: 9, col: 6 },
+        'GE2-036': { row: 10, col: 6 }, 'GE2-038': { row: 11, col: 6 }, 'GE2-039': { row: 12, col: 6 }, 'GE2-040': { row: 13, col: 6 },
+
+        // Col 7
+        'GE3-001': { row: 0, col: 7 }, 'GE3-003': { row: 1, col: 7 }, 'GE3-007': { row: 2, col: 7 }, 'GE3-008': { row: 3, col: 7 }, 'GE3-009': { row: 4, col: 7 }, 'GE3-010': { row: 5, col: 7 },
+
+        // Col 8
+        'HEL-001': { row: 0, col: 8 }, 'HEL-002': { row: 1, col: 8 }, 'HEL-003': { row: 2, col: 8 }, 'HEL-004': { row: 3, col: 8 }, 'HEL-005': { row: 4, col: 8 },
+        'HEL-006': { row: 5, col: 8 }, 'HEL-007': { row: 6, col: 8 }, 'HEL-017': { row: 7, col: 8 }, 'HEL-018': { row: 8, col: 8 }, 'HEL-026': { row: 9, col: 8 },
+        'HEL-028': { row: 10, col: 8 }, 'HEL-030': { row: 11, col: 8 }, 'HEL-032': { row: 12, col: 8 }, 'HEL-033': { row: 13, col: 8 }, 'HEL-036': { row: 14, col: 8 },
+
+        // Col 9
+        'HEL-040': { row: 0, col: 9 }, 'HEL-041': { row: 1, col: 9 }, 'HEL-043': { row: 2, col: 9 }, 'HEL-044': { row: 3, col: 9 }, 'HEL-046': { row: 4, col: 9 },
+        'HEL-047': { row: 5, col: 9 }, 'HEL-048': { row: 6, col: 9 }, 'HEL-049': { row: 7, col: 9 }, 'HEL-050': { row: 8, col: 9 }, 'HEL-051': { row: 9, col: 9 },
+        'HEL-052': { row: 10, col: 9 }, 'HEL-053': { row: 11, col: 9 }, 'HEL-055': { row: 12, col: 9 }, 'HEL-056': { row: 13, col: 9 }, 'HEL-057': { row: 14, col: 9 },
+
+        // Col 10
+        'LSM-001': { row: 0, col: 10 }, 'LSM-002': { row: 1, col: 10 }, 'LSM-005': { row: 2, col: 10 },
+
+        // Col 11
+        'LSW-001': { row: 0, col: 11 }, 'LSW-002': { row: 1, col: 11 }, 'LSW-003': { row: 2, col: 11 }, 'LSW-004': { row: 3, col: 11 }, 'LSW-005': { row: 4, col: 11 },
+        'LSW-006': { row: 5, col: 11 }, 'LSW-009': { row: 6, col: 11 }, 'LSW-017': { row: 7, col: 11 }, 'LSW-019': { row: 8, col: 11 }, 'LSW-021': { row: 9, col: 11 },
+        'LSW-024': { row: 10, col: 11 }, 'LSW-025': { row: 11, col: 11 }, 'LSW-026': { row: 12, col: 11 }, 'LSW-027': { row: 13, col: 11 },
+
+        // Col 12
+        'LSW-028': { row: 0, col: 12 }, 'LSW-029': { row: 1, col: 12 }, 'LSW-030': { row: 2, col: 12 }, 'LSW-031': { row: 3, col: 12 }, 'LSW-032': { row: 4, col: 12 },
+        'LSW-033': { row: 5, col: 12 }, 'LSW-034': { row: 6, col: 12 }, 'LSW-035': { row: 7, col: 12 },
+
+        // Col 13
+        'VNS-001': { row: 0, col: 13 }, 'VNS-002': { row: 1, col: 13 }, 'VNS-003': { row: 2, col: 13 }, 'VNS-004': { row: 3, col: 13 }, 'VNS-005': { row: 4, col: 13 },
+        'VNS-006': { row: 5, col: 13 }, 'VNS-007': { row: 6, col: 13 }, 'VNS-008': { row: 7, col: 13 }, 'VNS-009': { row: 8, col: 13 }, 'VNS-010': { row: 9, col: 13 },
+        'VNS-011': { row: 10, col: 13 }, 'VNS-012': { row: 11, col: 13 }, 'VNS-013': { row: 12, col: 13 }, 'VNS-014': { row: 13, col: 13 }, 'VNS-015': { row: 14, col: 13 },
+
+        // Col 14
+        'VNS-016': { row: 0, col: 14 }, 'VNS-017': { row: 1, col: 14 }, 'VNS-018': { row: 2, col: 14 }, 'VNS-019': { row: 3, col: 14 }, 'VNS-020': { row: 4, col: 14 },
+        'VNS-021': { row: 5, col: 14 }, 'VNS-022': { row: 6, col: 14 }, 'VNS-023': { row: 7, col: 14 }, 'VNS-024': { row: 8, col: 14 }, 'VNS-025': { row: 9, col: 14 },
+        'VNS-026': { row: 10, col: 14 },
     }
 };
 
@@ -133,6 +139,7 @@ export default function LayoutDashboard() {
     const [selectedMachine, setSelectedMachine] = useState<MachineData | null>(null);
     const [showPopup, setShowPopup] = useState(false);
     const [popoverPosition, setPopoverPosition] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+    const [countdown, setCountdown] = useState<number>(300); // 5 minutes in seconds
     const class100Ref = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -142,18 +149,42 @@ export default function LayoutDashboard() {
         return () => window.removeEventListener('resize', checkMobile);
     }, []);
 
-    // ดึงข้อมูลเครื่องจักร
+    // ฟังก์ชันดึงข้อมูลเครื่องจักร
+    const fetchMachines = async () => {
+        try {
+            const res = await axios.get(`${apiServer}/api/machine/getMachinesWithTodayData`);
+            setMachinesData(res.data.results || []);
+        } catch (error) {
+            console.error('Error fetching machines:', error);
+        }
+    };
+
+    // ดึงข้อมูลเครื่องจักรครั้งแรก
     useEffect(() => {
-        const fetchMachines = async () => {
-            try {
-                const res = await axios.get(`${apiServer}/api/machine/getMachinesWithTodayData`);
-                setMachinesData(res.data.results || []);
-            } catch (error) {
-                console.error('Error fetching machines:', error);
-            }
-        };
         fetchMachines();
     }, []);
+
+    // Auto-refresh ทุก 5 นาที พร้อม countdown
+    useEffect(() => {
+        const timer = setInterval(() => {
+            setCountdown((prev) => {
+                if (prev <= 1) {
+                    fetchMachines(); // Refresh data
+                    return 300; // Reset to 5 minutes
+                }
+                return prev - 1;
+            });
+        }, 1000);
+
+        return () => clearInterval(timer);
+    }, []);
+
+    // Format countdown to mm:ss
+    const formatCountdown = (seconds: number) => {
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${mins}:${secs.toString().padStart(2, '0')}`;
+    };
 
     // คำนวณความสูงของ cell จาก CLASS100
     useEffect(() => {
@@ -408,7 +439,7 @@ export default function LayoutDashboard() {
                         <button
                             className="btn btn-primary btn-sm"
                             onClick={() => {
-                                router.push(`/oee_production/layout_dashboard/daily_report/${selectedMachine.id}`);
+                                router.push(`/oee_production/daily_report?machine=${selectedMachine.name}`);
                                 setShowPopup(false);
                             }}
                             style={{ flex: 1, fontSize: '12px' }}
@@ -418,7 +449,7 @@ export default function LayoutDashboard() {
                         <button
                             className="btn btn-success btn-sm"
                             onClick={() => {
-                                router.push(`/oee_production/layout_dashboard/monthly_report/${selectedMachine.id}`);
+                                router.push(`/oee_production/monthly_report?machine=${selectedMachine.name}`);
                                 setShowPopup(false);
                             }}
                             style={{ flex: 1, fontSize: '12px' }}
@@ -432,9 +463,9 @@ export default function LayoutDashboard() {
     };
 
     return (
-        <div className="content">
+        <div className="content" style={{ overflow: 'hidden', height: 'calc(100vh - 60px)' }}>
             <Popover />
-            <div className="card mt-1" style={{ height: 'calc(100vh - 70px)', display: 'flex', flexDirection: 'column' }}>
+            <div className="card mt-1" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
                 {/* Header */}
                 <div
                     className="card-header d-flex flex-wrap align-items-center"
@@ -461,12 +492,27 @@ export default function LayoutDashboard() {
                     </div>
 
                     <div
-                        className="d-flex gap-2"
+                        className="d-flex gap-2 align-items-center"
                         style={{
                             marginLeft: isMobile ? '0' : 'auto',
                             flexWrap: 'wrap',
                         }}
                     >
+                        {/* Countdown Timer */}
+                        <div
+                            className="d-flex align-items-center gap-1"
+                            style={{
+                                backgroundColor: '#f8f9fa',
+                                padding: '4px 10px',
+                                borderRadius: '4px',
+                                fontSize: isMobile ? '0.7rem' : '0.8rem',
+                                color: countdown <= 30 ? '#dc3545' : '#495057',
+                                fontWeight: 500,
+                            }}
+                        >
+                            <i className="fas fa-sync-alt" style={{ fontSize: '0.7rem' }}></i>
+                            <span>{formatCountdown(countdown)}</span>
+                        </div>
                         <button
                             className={`btn btn-sm ${activeButton === 'OUTPUT' ? 'btn-primary' : 'btn-outline-secondary'}`}
                             onClick={() => setActiveButton('OUTPUT')}
@@ -496,7 +542,8 @@ export default function LayoutDashboard() {
                     className="card-body p-2"
                     style={{
                         flex: 1,
-                        height: 'auto',
+                        height: '0',
+                        minHeight: 0,
                         overflow: 'hidden',
                     }}
                 >
