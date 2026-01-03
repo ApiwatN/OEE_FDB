@@ -244,4 +244,75 @@ module.exports = {
             });
         }
     },
+
+    // =========================================================
+    // 🔄 5. ดึง Operator ที่ทำงานข้ามวัน (Cross-Day Active Operator)
+    // - เริ่มก่อนวันที่เลือก และ (ยังไม่จบ หรือ จบหลังวันที่เลือก)
+    // =========================================================
+    getActiveCrossDayOperator: async (req, res) => {
+        try {
+            const { machine_name, date } = req.query;
+            if (!machine_name || !date) {
+                return res.status(400).json({ message: "machine_name and date are required" });
+            }
+
+            // วันที่เลือก (เริ่มต้นของวัน)
+            const targetDate = new Date(date);
+            targetDate.setUTCHours(0, 0, 0, 0);
+
+            // วันถัดไป (สิ้นสุดของวันที่เลือก)
+            const nextDay = new Date(targetDate);
+            nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+
+            // หา operator ที่:
+            // 1. เริ่มทำงานก่อนวันที่เลือก (date < targetDate)
+            // 2. ยังไม่จบ (end_time = null) หรือ จบหลังจากเริ่มวันที่เลือก (end_time >= targetDate)
+            const history = await prisma.tb_history_working.findFirst({
+                where: {
+                    machine_name,
+                    date: {
+                        lt: targetDate, // เริ่มก่อนวันที่เลือก
+                    },
+                    OR: [
+                        { end_time: null }, // ยังไม่จบงาน
+                        { end_time: { gte: targetDate } } // จบหลังจากเริ่มวันที่เลือก
+                    ]
+                },
+                orderBy: {
+                    date: "desc", // เอา record ล่าสุด
+                },
+                include: {
+                    tbm_operator: {
+                        select: {
+                            operator_name: true,
+                            picture_path: true,
+                        },
+                    },
+                },
+            });
+
+            if (!history) {
+                return res.json({ results: null });
+            }
+
+            return res.json({
+                results: {
+                    id: history.id,
+                    emp_no: history.emp_no,
+                    operator_name: history.tbm_operator?.operator_name || null,
+                    picture_path: history.tbm_operator?.picture_path || null,
+                    machine_name,
+                    date: history.date,
+                    start_time: history.start_time,
+                    end_time: history.end_time,
+                },
+            });
+        } catch (error) {
+            console.error("❌ getActiveCrossDayOperator error:", error);
+            return res.status(500).json({
+                message: "Error fetching cross-day operator",
+                error: error.message,
+            });
+        }
+    },
 };

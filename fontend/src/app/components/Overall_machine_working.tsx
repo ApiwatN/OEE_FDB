@@ -101,16 +101,25 @@ export default function OverallMachineCard({ machineName, date }: OverallMachine
 
             let activeCrossDayOp = null;
 
-            // ✅ If today, fetch active operator (who might have started yesterday)
-            if (isToday) {
-                try {
+            // ✅ Fetch cross-day operator for ANY date (not just today)
+            // This handles the case where an operator started working on a previous day
+            // and hasn't logged out yet (or logged out after the selected date)
+            try {
+                if (isToday) {
+                    // For today: use getOperatorIdWorking (real-time active operator)
                     const resActive = await axios.get(`${config.apiServer}/api/historyWorking/getOperatorIdWorking/${machineName}?t=${timestamp}`);
                     if (resActive.data && resActive.data.results) {
                         activeCrossDayOp = resActive.data.results;
                     }
-                } catch (e) {
-                    console.error("Error fetching active operator:", e);
+                } else {
+                    // For historical dates: use getActiveCrossDayOperator
+                    const resCrossDay = await axios.get(`${config.apiServer}/api/historyWorking/getActiveCrossDayOperator?machine_name=${machineName}&date=${date}&t=${timestamp}`);
+                    if (resCrossDay.data && resCrossDay.data.results) {
+                        activeCrossDayOp = resCrossDay.data.results;
+                    }
                 }
+            } catch (e) {
+                console.error("Error fetching cross-day operator:", e);
             }
 
             // --- 1. Process Operator ---

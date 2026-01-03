@@ -71,6 +71,7 @@ app.get("/api/outputTarget/listOutputTarget/:area/:type/:machine_name", outputTa
 // =========================================
 app.get("/api/historyWorking/getOperatorIdWorking/:machine_name", historyWorkingController.getOperatorIdWorking);
 app.get("/api/historyWorking/getHistoryByDate", historyWorkingController.getHistoryByDate); // ✅ Add Route
+app.get("/api/historyWorking/getActiveCrossDayOperator", historyWorkingController.getActiveCrossDayOperator); // ✅ Cross-Day Operator
 app.post("/api/historyWorking/createStartTime", historyWorkingController.createStartTime);
 app.put("/api/historyWorking/updateEndTime/:id", historyWorkingController.updateEndTime);
 
