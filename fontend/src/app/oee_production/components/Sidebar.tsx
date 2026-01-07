@@ -104,11 +104,11 @@ export default function Sidebar() {
                         {/* 🔹 OEE Dashboard */}
                         <li className="nav-item">
                             <Link
-                                href="/oee_production/machine_area"
-                                className={`nav-link ${isActive("/oee_production/machine_area") ? "active" : ""
+                                href="/oee_production/machine_area/"
+                                className={`nav-link ${isActive("/oee_production/machine_area/") ? "active" : ""
                                     }`}
                                 style={{
-                                    backgroundColor: isActive("/oee_production/machine_area")
+                                    backgroundColor: isActive("/oee_production/machine_area/")
                                         ? "#3B82F6"
                                         : "#334155",
                                     color: "#E2E8F0",
@@ -127,11 +127,11 @@ export default function Sidebar() {
 
                         <li className="nav-item">
                             <Link
-                                href="/oee_production/production_planing"
-                                className={`nav-link ${isActive("/oee_production/production_planing") ? "active" : ""
+                                href="/oee_production/production_planing/"
+                                className={`nav-link ${isActive("/oee_production/production_planing/") ? "active" : ""
                                     }`}
                                 style={{
-                                    backgroundColor: isActive("/oee_production/production_planing")
+                                    backgroundColor: isActive("/oee_production/production_planing/")
                                         ? "#3B82F6"
                                         : "#334155",
                                     color: "#E2E8F0",
@@ -150,11 +150,11 @@ export default function Sidebar() {
 
                         <li className="nav-item">
                             <Link
-                                href="/oee_production/machine_report"
-                                className={`nav-link ${isActive("/oee_production/machine_report") ? "active" : ""
+                                href="/oee_production/machine_report/"
+                                className={`nav-link ${isActive("/oee_production/machine_report/") ? "active" : ""
                                     }`}
                                 style={{
-                                    backgroundColor: isActive("/oee_production/machine_report")
+                                    backgroundColor: isActive("/oee_production/machine_report/")
                                         ? "#3B82F6"
                                         : "#334155",
                                     color: "#E2E8F0",
@@ -174,7 +174,7 @@ export default function Sidebar() {
                         {/* 🔹 Layout Dashboard */}
                         <li className="nav-item">
                             <Link
-                                href="/oee_production/layout_dashboard"
+                                href="/oee_production/layout_dashboard/"
                                 className={`nav-link ${pathname?.startsWith("/oee_production/layout_dashboard") ? "active" : ""
                                     }`}
                                 style={{

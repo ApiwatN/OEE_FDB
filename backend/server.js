@@ -16,7 +16,7 @@ app.set("io", io);
 const cors = require("cors");
 const fileUpload = require("express-fileupload");
 const bodyParser = require("body-parser");
-const port = 5001;
+const port = 5005;
 
 // 1️⃣ ต้อง parse JSON ก่อน (สำคัญสุด)
 app.use(express.json());
@@ -34,6 +34,10 @@ app.use(fileUpload());
 
 // 5️⃣ Static files
 app.use("/image", express.static("image"));
+
+// ✅ Serve Static Frontend
+const path = require("path");
+app.use(express.static(path.join(__dirname, "../fontend/out"), { extensions: ["html"] }));
 
 // ✅ Controllers//
 const oeeDashboardController = require("./controllers/OeeDashboardController");
@@ -89,6 +93,11 @@ app.get("/api/machine/getMachinesWithTodayData", machineController.getMachinesWi
 // ... REPORT ROUTES
 app.get("/api/report/machine-report", reportController.getMachineReport); // 🆕 // ✅ Add Route
 
+
+// ✅ Catch-All Route for SPA (must be last)
+app.get(/(.*)/, (req, res) => {
+  res.sendFile(path.join(__dirname, "../fontend/out/index.html"));
+});
 
 // ✅ SERVER START
 server.listen(port, () => {
