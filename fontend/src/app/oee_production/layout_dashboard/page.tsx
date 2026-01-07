@@ -227,9 +227,9 @@ export default function LayoutDashboard() {
     const MachineCard = ({ machine }: { machine: MachineData }) => {
         const getValue = () => {
             switch (activeButton) {
-                case 'OUTPUT': return machine.output !== '--' ? `${machine.output}` : '--';
-                case 'EFFICIENCY': return machine.efficiency !== '--' ? `${(machine.efficiency as number).toFixed(0)}%` : '--';
-                case 'CYCLE_TIME': return machine.cycleTime !== '--' ? `${(machine.cycleTime as number).toFixed(1)}` : '--';
+                case 'OUTPUT': return machine.output !== '--' ? `${machine.output} pcs` : '--';
+                case 'EFFICIENCY': return machine.efficiency !== '--' ? `${(machine.efficiency as number).toFixed(0)} %` : '--';
+                case 'CYCLE_TIME': return machine.cycleTime !== '--' ? `${(machine.cycleTime as number).toFixed(1)} s` : '--';
                 default: return '--';
             }
         };
@@ -277,19 +277,20 @@ export default function LayoutDashboard() {
                     whiteSpace: 'nowrap',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
-                    fontSize: '7px',
+                    fontSize: '10px',
+                    color: 'black',
                 }}>
                     {machine.name}
                 </div>
                 {/* Content */}
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-                    <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: '#666' }}>
+                    <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'black', fontSize: '8px' }}>
                         {machine.model}
                     </div>
-                    <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: '#666' }}>
+                    <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'black', fontSize: '8px' }}>
                         {machine.process}
                     </div>
-                    <div style={{ fontWeight: 'bold', color: '#1565C0', fontSize: '7px' }}>
+                    <div style={{ fontWeight: 'bold', color: 'black', fontSize: '10px' }}>
                         {getValue()}
                     </div>
                 </div>
