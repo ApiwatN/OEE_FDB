@@ -57,7 +57,7 @@ export default function Navbar() {
                         onMouseEnter={(e) => (e.currentTarget.style.color = "#38BDF8")}
                         onMouseLeave={(e) => (e.currentTarget.style.color = "#E2E8F0")}
                     >
-                        หน้าหลัก
+                        Home
                     </a>
                 </li>
             </ul>

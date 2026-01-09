@@ -38,6 +38,10 @@ export default function page() {
     const [countdown, setCountdown] = useState(300);
     const [refreshTime, setRefreshTime] = useState(300);
 
+    // ✅ State และ Ref สำหรับคำนวณความกว้างสูงสุดของปุ่ม machine_type
+    const [maxButtonWidth, setMaxButtonWidth] = useState<number | null>(null);
+    const buttonRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
     useEffect(() => {
         const init = async () => {
             if (localStorage.getItem("operatorLocal")) {
@@ -130,6 +134,26 @@ export default function page() {
         return () => clearTimeout(timer);
     }, [operatorCode]);
 
+    // ✅ Effect สำหรับคำนวณความกว้างสูงสุดของปุ่ม machine_type
+    useEffect(() => {
+        // Reset maxButtonWidth เมื่อ types เปลี่ยน
+        setMaxButtonWidth(null);
+        
+        // รอให้ DOM render เสร็จก่อน
+        const timer = setTimeout(() => {
+            if (buttonRefs.current.length > 0) {
+                const validButtons = buttonRefs.current.filter(btn => btn !== null);
+                if (validButtons.length > 0) {
+                    // ใช้ offsetWidth เพื่อวัดความกว้างจริงของปุ่ม
+                    const widths = validButtons.map(btn => btn!.offsetWidth);
+                    const maxWidth = Math.max(...widths);
+                    // Cap maxWidth ไว้ไม่ให้เกิน 600px เพื่อไม่ให้ล้น
+                    setMaxButtonWidth(Math.min(maxWidth, 600));
+                }
+            }
+        }, 150);
+        return () => clearTimeout(timer);
+    }, [types]);
 
     const fetchDataMachineTypesWithName = async (area: any) => {
         try {
@@ -356,7 +380,7 @@ export default function page() {
                     </select>
 
                     <div className="d-flex flex-column gap-3">
-                        {types.map((itemType: any) => (
+                        {types.map((itemType: any, index: number) => (
                             <div
                                 key={itemType.machine_type}
                                 className="d-flex flex-column mt-3 gap-3 p-3 rounded-3 shadow-sm"
@@ -366,16 +390,19 @@ export default function page() {
                                 }}
                             >
                                 <button
-                                    className="btn fw-bold text-uppercase d-flex justify-content-center align-items-center rounded-3 border-0"
+                                    ref={(el) => { buttonRefs.current[index] = el; }}
+                                    className="btn fw-bold d-flex justify-content-center align-items-center rounded-3 border-0"
                                     style={{
-                                        minWidth: "180px",
-                                        maxWidth: "200px",
+                                        width: maxButtonWidth ? `${maxButtonWidth}px` : "fit-content",
                                         height: "52px",
                                         background: "linear-gradient(135deg, #007bff 0%, #0056b3 100%)",
                                         color: "white",
                                         boxShadow: "0 3px 6px rgba(0,0,0,0.15)",
                                         letterSpacing: "0.5px",
                                         cursor: "pointer",
+                                        whiteSpace: "nowrap",
+                                        paddingLeft: "24px",
+                                        paddingRight: "24px",
                                     }}
                                     onClick={() => {
                                         if (!selectedDate) {
@@ -386,7 +413,7 @@ export default function page() {
                                         router.push(`/overall_machine_working?area=${areaSelected}&type=${itemType.machine_type}&date=${currentUtcDate}`);
                                     }}
                                 >
-                                    {itemType.machine_type} <i className="fas fa-external-link-alt ms-2"></i>
+                                    {itemType.machine_type} {itemType.full_machine_type ? `(${itemType.full_machine_type})` : ''} <i className="fas fa-external-link-alt ms-2"></i>
                                 </button>
 
                                 <div className="d-flex flex-wrap gap-3">
@@ -549,7 +576,7 @@ export default function page() {
                                 ref={empInputRef}
                                 className="form-control text-center mb-2"
                                 style={{ width: "250px", textTransform: "uppercase", fontSize: "1.1rem" }}
-                                placeholder={isSubmitting ? "กำลังตรวจสอบ..." : "สแกนรหัสพนักงาน..."}
+                                placeholder={isSubmitting ? "Verifying..." : "Scan Employee ID..."}
                                 value={operatorCode}
                                 disabled={isSubmitting}
                                 onChange={(e) => setOperatorCode(e.target.value.toUpperCase())}
@@ -566,7 +593,7 @@ export default function page() {
                                 disabled={isSubmitting || operatorCode.length < 3}
                             >
                                 <i className="fas fa-sign-in-alt me-2"></i>
-                                เข้าสู่ระบบ
+                                Login
                             </button>
                         </div>
                     )}
@@ -576,7 +603,7 @@ export default function page() {
                         <div className="d-flex flex-column justify-content-center align-items-center text-center fade-in">
 
                             <div className="mb-4">
-                                <label className="form-label mb-1 fw-bold">เลือกวันที่ต้องการดูข้อมูล</label>
+                                <label className="form-label mb-1 fw-bold">Select date to view data</label>
                                 <input
                                     type="date"
                                     className="form-control text-center border-primary"
@@ -605,7 +632,7 @@ export default function page() {
                                 }}
                             >
                                 <i className="fas fa-eye me-2"></i>
-                                ดูข้อมูล (View Data)
+                                View Data
                             </button>
                         </div>
                     )}

@@ -527,7 +527,7 @@ function MachineWorkingInner() {
 
         const result = await Swal.fire({
             title: "Sign out?",
-            text: `ต้องการลงชื่อออก: ${tableData.operatorCode}?`,
+            text: `Sign out: ${tableData.operatorCode}?`,
             icon: "warning",
             showCancelButton: true,
             confirmButtonColor: "#d33",

@@ -46,6 +46,7 @@ module.exports = {
           id: true,
           machine_name: true,
           machine_type: true,
+          full_machine_type: true,
           status: true,
         },
       });
@@ -101,6 +102,7 @@ module.exports = {
         if (!grouped[m.machine_type]) {
           grouped[m.machine_type] = {
             machine_type: m.machine_type,
+            full_machine_type: m.full_machine_type || m.machine_type,
             machines: [],
           };
         }

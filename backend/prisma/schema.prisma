@@ -17,11 +17,12 @@ model tbm_operator {
 }
 
 model tbm_machine {
-  id           Int    @id @default(autoincrement())
-  machine_area String
-  machine_type String
-  machine_name String @unique
-  status       String @default("active")
+  id                Int     @id @default(autoincrement())
+  machine_area      String
+  machine_type      String
+  full_machine_type String?
+  machine_name      String  @unique
+  status            String  @default("active")
 }
 
 model tbm_model {
