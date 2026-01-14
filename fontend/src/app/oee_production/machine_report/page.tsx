@@ -47,6 +47,7 @@ function MachineReportPage() {
 
     const [reportData, setReportData] = useState<any[]>([]);
     const [loading, setLoading] = useState(false);
+    const [countdown, setCountdown] = useState(5 * 60); // 5 minutes in seconds
 
     // ==========================
     // 🔸 Init
@@ -74,6 +75,30 @@ function MachineReportPage() {
         };
         init();
     }, []);
+
+    // ==========================
+    // 🔸 Auto Refresh (every 5 minutes) with Countdown
+    // ==========================
+    useEffect(() => {
+        const REFRESH_INTERVAL = 5 * 60; // 5 minutes in seconds
+        setCountdown(REFRESH_INTERVAL); // Reset countdown when filters change
+
+        // Countdown timer (every 1 second)
+        const countdownId = setInterval(() => {
+            setCountdown(prev => {
+                if (prev <= 1) {
+                    // Time to refresh
+                    console.log("[Auto Refresh] Fetching report data...");
+                    fetchReport(selectedMonth, selectedArea, selectedType);
+                    return REFRESH_INTERVAL; // Reset countdown
+                }
+                return prev - 1;
+            });
+        }, 1000);
+
+        // Cleanup interval on unmount
+        return () => clearInterval(countdownId);
+    }, [selectedMonth, selectedArea, selectedType]);
 
     // ==========================
     // 🔸 API Calls
@@ -299,6 +324,31 @@ function MachineReportPage() {
     const daysInMonth = dayjs(selectedMonth).daysInMonth();
     const daysArray = Array.from({ length: daysInMonth }, (_, i) => i + 1);
 
+    // Check if selected month is current month
+    const isCurrentMonth = dayjs(selectedMonth).format("YYYY-MM") === dayjs().format("YYYY-MM");
+    const currentDay = dayjs().date();
+
+    // Helper: Check if a specific day is a future day (not yet reached)
+    const isFutureDay = (day: number): boolean => {
+        if (!isCurrentMonth) return false; // Past/future months: all days are valid
+        return day > currentDay;
+    };
+
+    // Helper: Check if a specific day has NO data (output_actual, eff_actual, cycle_actual are all empty/zero)
+    const isDayEmpty = (dailyData: Record<string, any>, day: number): boolean => {
+        const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
+        const data = dailyData[dateKey];
+        if (!data) return true;
+
+        const outputActual = data.output_actual;
+        const effActual = data.eff_actual;
+        const cycleActual = data.cycle_actual;
+
+        const isEmpty = (val: any) => val === undefined || val === null || val === 0 || val === '';
+
+        return isEmpty(outputActual) && isEmpty(effActual) && isEmpty(cycleActual);
+    };
+
     const renderCell = (val: any, isPercent: boolean = false) => {
         if (val === undefined || val === null) return "\u00A0";
         if (val === 0) return "\u00A0";
@@ -339,144 +389,165 @@ function MachineReportPage() {
                                 <i className="fas fa-file-excel me-1"></i> Export Excel
                             </button>
                         </div>
+                        <div className="d-flex align-items-center" style={{ fontSize: "0.85rem", color: "#666", minWidth: "120px" }}>
+                            <i className="fas fa-sync-alt me-1" style={{ fontSize: "0.75rem" }}></i>
+                            <span>Refresh: {Math.floor(countdown / 60)}:{String(countdown % 60).padStart(2, '0')}</span>
+                        </div>
                     </div>
                 </div>
-                <div className="card-body p-0">
-                    {loading ? (
-                        <div className="text-center p-5"><div className="spinner-border text-primary"></div></div>
-                    ) : (
-                        // 🆕 Split Table Layout - Outer wrapper handles vertical scroll
-                        <div className="table-outer-wrapper" style={{ overflow: "hidden", border: "1px solid #dee2e6", height: "calc(100vh - 140px)", display: "flex", flexDirection: "column" }}>
-                            <div className="table-wrapper" style={{ display: "grid", gridTemplateColumns: "auto 1fr", flex: 1, overflow: "hidden" }}>
+            </div>
+            <div className="card-body p-0">
+                {loading ? (
+                    <div className="text-center p-5"><div className="spinner-border text-primary"></div></div>
+                ) : (
+                    // 🆕 Split Table Layout - Outer wrapper handles vertical scroll
+                    <div className="table-outer-wrapper" style={{ overflow: "hidden", border: "1px solid #dee2e6", height: "calc(100vh - 140px)", display: "flex", flexDirection: "column" }}>
+                        <div className="table-wrapper" style={{ display: "grid", gridTemplateColumns: "auto 1fr", flex: 1, overflow: "hidden" }}>
 
-                                {/* 🔹 Fixed Left Table */}
-                                <div ref={leftTableRef} className="fixed-table" style={{ overflowY: "hidden", overflowX: "hidden", background: "white", zIndex: 2, boxShadow: "2px 0 5px rgba(0,0,0,0.1)", height: "100%" }} onWheel={(e) => {
-                                    if (rightTableRef.current) {
-                                        rightTableRef.current.scrollTop += e.deltaY;
-                                    }
-                                }}>
-                                    <table className="table table-bordered table-sm text-center align-middle mb-0" style={{ fontSize: "0.8rem", width: "max-content", borderCollapse: "separate", borderSpacing: 0, tableLayout: "fixed" }}>
-                                        <thead className="table-light" style={{ position: "sticky", top: 0, zIndex: 10 }}>
-                                            <tr>
-                                                <th style={{ minWidth: "100px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000", textAlign: "center", verticalAlign: "middle" }}>Machine No</th>
-                                                <th style={{ minWidth: "100px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000" }}>Model Type</th>
-                                                <th style={{ minWidth: "120px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000" }}>Model Name</th>
-                                                <th style={{ minWidth: "80px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000" }}>Process</th>
-                                                <th style={{ minWidth: "150px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000" }}>Data</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {reportData.map((machine, idx) => {
-                                                const { machine_name, model_info } = machine;
-                                                const rows = [
-                                                    { label: "Output (Target)" }, { label: "Output" },
-                                                    { label: "Efficiency (Target)" }, { label: "Efficiency" },
-                                                    { label: "Cycle time (Target)" }, { label: "Cycle time" },
-                                                    { label: "NG Qty" }, { label: "Availability" },
-                                                    { label: "Performance" }, { label: "Quality" },
-                                                    { label: "OEE" }
-                                                ];
+                            {/* 🔹 Fixed Left Table */}
+                            <div ref={leftTableRef} className="fixed-table" style={{ overflowY: "hidden", overflowX: "hidden", background: "white", zIndex: 2, boxShadow: "2px 0 5px rgba(0,0,0,0.1)", height: "100%" }} onWheel={(e) => {
+                                if (rightTableRef.current) {
+                                    rightTableRef.current.scrollTop += e.deltaY;
+                                }
+                            }}>
+                                <table className="table table-bordered table-sm text-center align-middle mb-0" style={{ fontSize: "0.8rem", width: "max-content", borderCollapse: "separate", borderSpacing: 0, tableLayout: "fixed" }}>
+                                    <thead className="table-light" style={{ position: "sticky", top: 0, zIndex: 10 }}>
+                                        <tr>
+                                            <th style={{ minWidth: "100px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000", textAlign: "center", verticalAlign: "middle" }}>Machine No</th>
+                                            <th style={{ minWidth: "100px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000" }}>Model Type</th>
+                                            <th style={{ minWidth: "120px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000" }}>Model Name</th>
+                                            <th style={{ minWidth: "80px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000" }}>Process</th>
+                                            <th style={{ minWidth: "150px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000" }}>Data</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {reportData.map((machine, idx) => {
+                                            const { machine_name, model_info } = machine;
+                                            const rows = [
+                                                { label: "Output (Target)" }, { label: "Output" },
+                                                { label: "Efficiency (Target)" }, { label: "Efficiency" },
+                                                { label: "Cycle time (Target)" }, { label: "Cycle time" },
+                                                { label: "NG Qty" }, { label: "Availability" },
+                                                { label: "Performance" }, { label: "Quality" },
+                                                { label: "OEE" }
+                                            ];
 
-                                                return rows.map((row, rIdx) => {
-                                                    const isLastRow = rIdx === rows.length - 1;
-                                                    const borderBottomStyle = isLastRow ? "2px solid #333" : "1px solid #dee2e6";
-                                                    const rowStyle = { height: "30px", lineHeight: "30px" };
+                                            return rows.map((row, rIdx) => {
+                                                const isLastRow = rIdx === rows.length - 1;
+                                                const borderBottomStyle = isLastRow ? "2px solid #333" : "1px solid #dee2e6";
+                                                const rowStyle = { height: "30px", lineHeight: "30px" };
 
-                                                    return (
-                                                        <tr key={`${machine_name}-${rIdx}`} style={rowStyle}>
-                                                            {rIdx === 0 && (
-                                                                <>
-                                                                    <td rowSpan={rows.length} style={{ background: "white", fontWeight: "bold", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{machine_name}</td>
-                                                                    <td rowSpan={rows.length} style={{ background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{model_info.model_type}</td>
-                                                                    <td rowSpan={rows.length} style={{ background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{model_info.model_name}</td>
-                                                                    <td rowSpan={rows.length} style={{ background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{model_info.process_name}</td>
-                                                                </>
-                                                            )}
-                                                            <td style={{ textAlign: "left", paddingLeft: "10px", borderRight: "2px solid #000", borderBottom: borderBottomStyle, fontWeight: "500", background: "#fcfcfc", height: "30px", boxSizing: "border-box", padding: "0 10px" }}>{row.label}</td>
-                                                        </tr>
-                                                    );
-                                                });
-                                            })}
-                                            {reportData.length === 0 && (
-                                                <tr><td colSpan={5} className="text-center p-4 text-muted" style={{ height: "100px" }}>No Data</td></tr>
-                                            )}
-                                        </tbody>
-                                    </table>
-                                </div>
-
-                                {/* 🔹 Scrollable Right Table */}
-                                <div ref={rightTableRef} className="scrollable-table hide-scrollbar" style={{ overflowX: "auto", overflowY: "scroll", height: "100%" }} onScroll={() => {
-                                    if (leftTableRef.current && rightTableRef.current) {
-                                        leftTableRef.current.scrollTop = rightTableRef.current.scrollTop;
-                                    }
-                                    if (horizontalScrollRef.current && rightTableRef.current) {
-                                        if (horizontalScrollRef.current.scrollLeft !== rightTableRef.current.scrollLeft) {
-                                            horizontalScrollRef.current.scrollLeft = rightTableRef.current.scrollLeft;
-                                        }
-                                    }
-                                }}>
-                                    <table className="table table-bordered table-sm text-center align-middle mb-0" style={{ fontSize: "0.8rem", width: "max-content", borderCollapse: "separate", borderSpacing: 0, tableLayout: "fixed" }}>
-                                        <thead className="table-light" style={{ position: "sticky", top: 0, zIndex: 10 }}>
-                                            <tr>
-                                                {daysArray.map(d => (
-                                                    <th key={d} style={{ minWidth: "60px", height: "40px", background: "#f8f9fa", borderBottom: "3px double #000", position: "sticky", top: 0, zIndex: 10 }}>{d}-{dayjs(selectedMonth).format("MMM")}</th>
-                                                ))}
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {reportData.map((machine, idx) => {
-                                                const { machine_name, daily_data } = machine;
-                                                const rows = [
-                                                    { key: "output_target", isPercent: false },
-                                                    { key: "output_actual", isPercent: false },
-                                                    { key: "eff_target", isPercent: true },
-                                                    { key: "eff_actual", isPercent: true },
-                                                    { key: "cycle_target", isPercent: false },
-                                                    { key: "cycle_actual", isPercent: false },
-                                                    { key: "ng_qty", isPercent: false },
-                                                    { key: "availability", isPercent: true },
-                                                    { key: "performance", isPercent: true },
-                                                    { key: "quality", isPercent: true },
-                                                    { key: "oee", isPercent: true },
-                                                ];
-
-                                                return rows.map((row, rIdx) => {
-                                                    const isLastRow = rIdx === rows.length - 1;
-                                                    const borderBottomStyle = isLastRow ? "2px solid #333" : "1px solid #dee2e6";
-                                                    const rowStyle = { height: "30px", lineHeight: "30px" };
-
-                                                    return (
-                                                        <tr key={`${machine_name}-${row.key}`} style={rowStyle}>
-                                                            {daysArray.map(day => {
-                                                                const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
-                                                                const data = daily_data[dateKey];
-                                                                const val = data ? data[row.key] : undefined;
-                                                                return <td key={day} style={{ borderBottom: borderBottomStyle, height: "30px", boxSizing: "border-box", padding: "0 4px" }}>{renderCell(val, row.isPercent)}</td>;
-                                                            })}
-                                                        </tr>
-                                                    );
-                                                });
-                                            })}
-                                            {reportData.length === 0 && (
-                                                <tr><td colSpan={daysArray.length} className="text-center p-4 text-muted" style={{ height: "100px" }}>No Data</td></tr>
-                                            )}
-                                        </tbody>
-                                    </table>
-                                </div>
+                                                return (
+                                                    <tr key={`${machine_name}-${rIdx}`} style={rowStyle}>
+                                                        {rIdx === 0 && (
+                                                            <>
+                                                                <td rowSpan={rows.length} style={{ background: "white", fontWeight: "bold", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{machine_name}</td>
+                                                                <td rowSpan={rows.length} style={{ background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{model_info.model_type}</td>
+                                                                <td rowSpan={rows.length} style={{ background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{model_info.model_name}</td>
+                                                                <td rowSpan={rows.length} style={{ background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{model_info.process_name}</td>
+                                                            </>
+                                                        )}
+                                                        <td style={{ textAlign: "left", paddingLeft: "10px", borderRight: "2px solid #000", borderBottom: borderBottomStyle, fontWeight: "500", background: "#fcfcfc", height: "30px", boxSizing: "border-box", padding: "0 10px" }}>{row.label}</td>
+                                                    </tr>
+                                                );
+                                            });
+                                        })}
+                                        {reportData.length === 0 && (
+                                            <tr><td colSpan={5} className="text-center p-4 text-muted" style={{ height: "100px" }}>No Data</td></tr>
+                                        )}
+                                    </tbody>
+                                </table>
                             </div>
-                            {/* 🔹 Horizontal Scrollbar at Bottom */}
-                            <div ref={horizontalScrollRef} className="horizontal-scroll-wrapper" style={{ overflowX: "auto", overflowY: "hidden", marginLeft: "auto", width: "calc(100% - 550px)" }} onScroll={() => {
-                                if (rightTableRef.current && horizontalScrollRef.current) {
-                                    if (rightTableRef.current.scrollLeft !== horizontalScrollRef.current.scrollLeft) {
-                                        rightTableRef.current.scrollLeft = horizontalScrollRef.current.scrollLeft;
+
+                            {/* 🔹 Scrollable Right Table */}
+                            <div ref={rightTableRef} className="scrollable-table hide-scrollbar" style={{ overflowX: "auto", overflowY: "scroll", height: "100%" }} onScroll={() => {
+                                if (leftTableRef.current && rightTableRef.current) {
+                                    leftTableRef.current.scrollTop = rightTableRef.current.scrollTop;
+                                }
+                                if (horizontalScrollRef.current && rightTableRef.current) {
+                                    if (horizontalScrollRef.current.scrollLeft !== rightTableRef.current.scrollLeft) {
+                                        horizontalScrollRef.current.scrollLeft = rightTableRef.current.scrollLeft;
                                     }
                                 }
                             }}>
-                                <div style={{ width: `${daysArray.length * 60}px`, height: "1px" }}></div>
+                                <table className="table table-bordered table-sm text-center align-middle mb-0" style={{ fontSize: "0.8rem", width: "max-content", borderCollapse: "separate", borderSpacing: 0, tableLayout: "fixed" }}>
+                                    <thead className="table-light" style={{ position: "sticky", top: 0, zIndex: 10 }}>
+                                        <tr>
+                                            {daysArray.map(d => (
+                                                <th key={d} style={{ minWidth: "60px", height: "40px", background: "#f8f9fa", borderBottom: "3px double #000", position: "sticky", top: 0, zIndex: 10 }}>{d}-{dayjs(selectedMonth).format("MMM")}</th>
+                                            ))}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {reportData.map((machine, idx) => {
+                                            const { machine_name, daily_data } = machine;
+                                            const rows = [
+                                                { key: "output_target", isPercent: false },
+                                                { key: "output_actual", isPercent: false },
+                                                { key: "eff_target", isPercent: true },
+                                                { key: "eff_actual", isPercent: true },
+                                                { key: "cycle_target", isPercent: false },
+                                                { key: "cycle_actual", isPercent: false },
+                                                { key: "ng_qty", isPercent: false },
+                                                { key: "availability", isPercent: true },
+                                                { key: "performance", isPercent: true },
+                                                { key: "quality", isPercent: true },
+                                                { key: "oee", isPercent: true },
+                                            ];
+
+                                            return rows.map((row, rIdx) => {
+                                                const isLastRow = rIdx === rows.length - 1;
+                                                const borderBottomStyle = isLastRow ? "2px solid #333" : "1px solid #dee2e6";
+                                                const rowStyle = { height: "30px", lineHeight: "30px" };
+
+                                                return (
+                                                    <tr key={`${machine_name}-${row.key}`} style={rowStyle}>
+                                                        {daysArray.map(day => {
+                                                            const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
+                                                            const data = daily_data[dateKey];
+                                                            const val = data ? data[row.key] : undefined;
+                                                            const dayEmpty = isDayEmpty(daily_data, day);
+                                                            const futureDay = isFutureDay(day);
+
+                                                            // Future day: show empty (no color)
+                                                            // Past day with no data: show light red background
+                                                            const cellStyle: React.CSSProperties = {
+                                                                borderBottom: borderBottomStyle,
+                                                                height: "30px",
+                                                                boxSizing: "border-box",
+                                                                padding: "0 4px",
+                                                                ...(futureDay ? {} : (dayEmpty ? { backgroundColor: "#ffcccc" } : {})) // Light red only for past empty days
+                                                            };
+
+                                                            return (
+                                                                <td key={day} style={cellStyle}>
+                                                                    {(futureDay || dayEmpty) ? "\u00A0" : renderCell(val, row.isPercent)}
+                                                                </td>
+                                                            );
+                                                        })}
+                                                    </tr>
+                                                );
+                                            });
+                                        })}
+                                        {reportData.length === 0 && (
+                                            <tr><td colSpan={daysArray.length} className="text-center p-4 text-muted" style={{ height: "100px" }}>No Data</td></tr>
+                                        )}
+                                    </tbody>
+                                </table>
                             </div>
                         </div>
-                    )}
-                </div>
+                        {/* 🔹 Horizontal Scrollbar at Bottom */}
+                        <div ref={horizontalScrollRef} className="horizontal-scroll-wrapper" style={{ overflowX: "auto", overflowY: "hidden", marginLeft: "auto", width: "calc(100% - 550px)" }} onScroll={() => {
+                            if (rightTableRef.current && horizontalScrollRef.current) {
+                                if (rightTableRef.current.scrollLeft !== horizontalScrollRef.current.scrollLeft) {
+                                    rightTableRef.current.scrollLeft = horizontalScrollRef.current.scrollLeft;
+                                }
+                            }
+                        }}>
+                            <div style={{ width: `${daysArray.length * 60}px`, height: "1px" }}></div>
+                        </div>
+                    </div>
+                )}
             </div>
         </div>
     );
