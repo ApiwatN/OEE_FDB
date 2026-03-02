@@ -20,9 +20,9 @@ model tbm_machine {
   id                Int     @id @default(autoincrement())
   machine_area      String
   machine_type      String
-  full_machine_type String?
   machine_name      String  @unique
   status            String  @default("active")
+  full_machine_type String?
 }
 
 model tbm_model {
@@ -49,8 +49,6 @@ model tb_output_target {
   date              DateTime @db.Date
   machine_name      String?
   model_name        String?
-  model_type        String?
-  process_name      String?
   pc_target         Int
   cycle_time_target Float
   eff_target        Float
@@ -79,13 +77,19 @@ model tb_output_target {
   target_05         Int?     @default(0)
   target_06         Int?     @default(0)
   accum_target      Int?     @default(0)
+  model_type        String?
+  process_name      String?
   Work_hour         Int?
+
+  @@index([machine_name, date])
+  @@index([machine_name, date, model_name])
 }
 
 model tb_output_actual {
   id           Int      @id @default(autoincrement())
   date         DateTime @db.Date
   machine_name String
+  model_name   String?
   actual_07    Int?     @default(0)
   actual_08    Int?     @default(0)
   actual_09    Int?     @default(0)
@@ -110,6 +114,10 @@ model tb_output_actual {
   actual_04    Int?     @default(0)
   actual_05    Int?     @default(0)
   actual_06    Int?     @default(0)
+  Overall      Int?
+
+  @@unique([machine_name, date])
+  @@index([machine_name, date])
 }
 
 model tb_cycle_time_actual {
@@ -141,6 +149,9 @@ model tb_cycle_time_actual {
   cycle_05     Float?   @default(0)
   cycle_06     Float?   @default(0)
   cycle_time   Float?   @default(0)
+
+  @@unique([machine_name, date])
+  @@index([machine_name, date])
 }
 
 model tb_efficiency_actual {
@@ -172,6 +183,9 @@ model tb_efficiency_actual {
   eff_05       Float?   @default(0)
   eff_06       Float?   @default(0)
   eff_actual   Float?   @default(0)
+
+  @@unique([machine_name, date])
+  @@index([machine_name, date])
 }
 
 model tb_oee {
@@ -179,10 +193,13 @@ model tb_oee {
   date         DateTime @db.Date
   machine_name String
   oee_value    Float?   @default(0)
-  ng_qty       Int?     @default(0)
   availability Float?   @default(0)
+  ng_qty       Int?     @default(0)
   performance  Float?   @default(0)
   quality      Float?   @default(0)
+
+  @@unique([machine_name, date])
+  @@index([machine_name, date])
 }
 
 model tb_history_working {
@@ -194,4 +211,80 @@ model tb_history_working {
   start_time   DateTime
   end_time     DateTime?
   tbm_operator tbm_operator? @relation(fields: [emp_no], references: [emp_no])
+
+  @@index([machine_name, date])
+  @@index([emp_no])
+}
+
+model tb_MCStatus {
+  ID       BigInt   @id(map: "PK_tb_MCStatus") @default(autoincrement())
+  Datetime DateTime
+  MC       String   @db.NVarChar(50)
+  MCStatus String   @db.NVarChar(50)
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model tb_MCStatusDuration {
+  MachineName String   @db.NVarChar(50)
+  ModelName   String?  @db.NVarChar(50)
+  StateName   String   @db.NVarChar(100)
+  StartTime   DateTime @db.DateTime
+  EndTime     DateTime @db.DateTime
+  Duration    DateTime @db.Time
+  Criteria    String?  @db.NVarChar(255)
+  Reason      String?  @db.NVarChar(255)
+
+  @@ignore
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model tb_MCStatusSum {
+  ID                  Int       @default(autoincrement())
+  FactoryDate         DateTime? @db.Date
+  MachineName         String?   @db.NVarChar(50)
+  ModelName           String?   @db.NVarChar(50)
+  Signal_Lost         DateTime? @db.Time
+  MM_Repair           DateTime? @db.Time
+  Setter_Check_Master DateTime? @db.Time
+  Prod_Check_Master   DateTime? @db.Time
+  MM_Preventive       DateTime? @db.Time
+  QC_Qualify          DateTime? @db.Time
+  Break_Time          DateTime? @db.Time
+  MM_Check_Master     DateTime? @db.Time
+  QC_Check_Master     DateTime? @db.Time
+  Plan_Stop           DateTime? @db.Time
+  Setter_Adjust       DateTime? @db.Time
+  Prod_Cleaning       DateTime? @db.Time
+  Job_Done            DateTime? @db.Time
+  Setter_Preventive   DateTime? @db.Time
+  Wait_Part           DateTime? @db.Time
+  Run_Time            DateTime? @db.Time
+  MC_Stop             DateTime? @db.Time
+  MC_Alarm            DateTime? @db.Time
+  Cut_Lot             DateTime? @db.Time
+
+  @@ignore
+}
+
+model tb_machine_plan_config {
+  id                Int      @id @default(autoincrement())
+  machine_name      String   @unique
+  eff_target        Float
+  cycle_time_target Float
+  process_name      String?
+  model_name        String?
+  model_type        String?
+  active_hours      String   @db.NVarChar(1000) // JSON: {"07":true,"08":true,...}
+  oee_mode          String   @default("manual") @db.NVarChar(10) // "auto" | "manual"
+  updated_at        DateTime @default(now()) @updatedAt
+}
+
+model tb_machine_holiday {
+  id           Int      @id @default(autoincrement())
+  machine_name String
+  holiday_date DateTime @db.Date
+  created_at   DateTime @default(now())
+
+  @@unique([machine_name, holiday_date])
+  @@index([machine_name])
 }

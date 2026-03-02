@@ -51,6 +51,7 @@ module.exports = {
                     date: history.date,
                     shift: history.shift,
                     start_time: history.start_time,
+                    end_time: history.end_time,
                 },
             });
         } catch (error) {
@@ -92,23 +93,38 @@ module.exports = {
             // ❌ ไม่มี output_target_id ใน schema
             // ดังนั้นตัดส่วนนี้ออก (เพราะ schema ไม่มี field นี้)
 
-            // ✅ Check duplicate: ตรวจสอบว่ามี record ที่ยังไม่จบงานของเครื่องนี้อยู่แล้วหรือไม่
-            const existingHistory = await prisma.tb_history_working.findFirst({
+            // ✅ 1. Strict Active Session Check (Prevent Multi-User/Multi-Session on same machine)
+            const activeHistory = await prisma.tb_history_working.findFirst({
                 where: {
                     machine_name,
-                    end_time: null,
+                    end_time: null
                 },
+                include: {
+                    tbm_operator: { select: { operator_name: true } }
+                }
             });
 
-            if (existingHistory) {
-                // ถ้ามีอยู่แล้ว ให้คืนค่า record เดิมกลับไปเลย (หรือจะแจ้ง error ก็ได้ แต่คืนค่าเดิมจะ smooth กว่าสำหรับ frontend)
-                console.log(`⚠️ Found existing active history for ${machine_name}, returning existing record.`);
-                return res.json({
-                    status: "ok",
-                    message: "Existing working history found",
-                    data: existingHistory
-                });
+            if (activeHistory) {
+                // ถ้าเป็นคนเดิม -> คืนค่าเดิมให้ไปทำงานต่อ (ป้องกัน Double Scan/Net Lag)
+                if (activeHistory.emp_no === emp_no) {
+                    console.log(`⚠️ Active session exists for ${emp_no} on ${machine_name}. Returning existing ID: ${activeHistory.id}`);
+                    return res.json({
+                        status: "ok",
+                        message: "Existing working history found",
+                        data: activeHistory // ส่งคืน format เดิม
+                    });
+                }
+
+                // ถ้าเป็นคนอื่น -> แจ้ง Error ว่าเครื่องไม่ว่าง
+                else {
+                    const opName = activeHistory.tbm_operator?.operator_name || activeHistory.emp_no;
+                    return res.status(400).json({
+                        message: `Machine is currently used by ${opName} (${activeHistory.emp_no}). Please logout first.`
+                    });
+                }
             }
+
+            // ✅ ถ้าเครื่องว่าง (activeHistory = null) -> สร้างรายการใหม่ตามปกติ
 
             const newHistory = await prisma.tb_history_working.create({
                 data: {
@@ -167,36 +183,36 @@ module.exports = {
             const now = new Date();
             const utc7 = new Date(now.getTime() + 7 * 60 * 60 * 1000);
 
-            const updated = await prisma.tb_history_working.update({
-                where: { id: history_id },
-                data: { end_time: utc7 },
-                select: {
-                    id: true,
-                    emp_no: true,
-                    machine_name: true,
-                    start_time: true,
-                    end_time: true,
+            // ✅ อัปเดตทุก record ของ machine_name นี้ที่ยังไม่มี end_time
+            // เพื่อป้องกัน ghost session และให้มั่นใจว่าเครื่องนี้ไม่มี session ค้าง
+            const updateResult = await prisma.tb_history_working.updateMany({
+                where: {
+                    machine_name: history.machine_name,
+                    end_time: null
                 },
+                data: { end_time: utc7 },
             });
+
+            console.log(`✅ Closed ${updateResult.count} session(s) for machine: ${history.machine_name}`);
 
             // 🟢 Emit Socket Event
             const io = req.app.get("io");
             if (io) {
                 io.emit("machine_updated", {
-                    machine_name: updated.machine_name,
+                    machine_name: history.machine_name,
                     status: "inactive"
                 });
             }
 
             return res.json({
                 status: "ok",
-                message: "Updated end_time successfully",
+                message: `Updated end_time successfully (${updateResult.count} session(s) closed)`,
                 results: {
-                    id: updated.id,
-                    emp_no: updated.emp_no,
-                    machine_name: updated.machine_name,
-                    start_time_utc7: updated.start_time?.toISOString().replace("Z", "+07:00"),
-                    end_time_utc7: updated.end_time?.toISOString().replace("Z", "+07:00"),
+                    id: history_id,
+                    emp_no: history.emp_no,
+                    machine_name: history.machine_name,
+                    sessions_closed: updateResult.count,
+                    end_time_utc7: utc7.toISOString().replace("Z", "+07:00"),
                 },
             });
         } catch (error) {

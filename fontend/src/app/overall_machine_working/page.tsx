@@ -1,11 +1,13 @@
 "use client";
 
 import { useSearchParams, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import axios from "axios";
 import config from "@/app/config";
 import OverallMachineCard from "../components/Overall_machine_working";
 import Swal from "sweetalert2";
+import { getSocket } from "@/app/lib/socketManager";
+import type { Socket } from "socket.io-client";
 
 import { Suspense } from "react";
 
@@ -19,7 +21,67 @@ function OverallMachineContent() {
 
     const [machines, setMachines] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
-    const [refreshCountdown, setRefreshCountdown] = useState(300);
+    const [refreshTrigger, setRefreshTrigger] = useState(0);
+    const [serverTimeStr, setServerTimeStr] = useState("");
+    const [socketRef, setSocketRef] = useState<Socket | null>(null);
+    const [realtimeData, setRealtimeData] = useState<any>(null);
+    const [activeView, setActiveViewState] = useState<"output" | "status">(() => {
+        if (typeof window !== "undefined") {
+            const saved = localStorage.getItem("overallMachineActiveView");
+            if (saved === "output" || saved === "status") return saved;
+        }
+        return "output";
+    });
+
+    // Wrapper: save to localStorage on every toggle
+    const setActiveView = (view: "output" | "status") => {
+        setActiveViewState(view);
+        localStorage.setItem("overallMachineActiveView", view);
+    };
+
+    // Clear localStorage when leaving the page
+    useEffect(() => {
+        return () => {
+            localStorage.removeItem("overallMachineActiveView");
+        };
+    }, []);
+
+    // Unified countdown timer + MC Status refresh trigger
+    const [countdown, setCountdown] = useState(300);
+    const [mcStatusRefreshTrigger, setMcStatusRefreshTrigger] = useState(0);
+    useEffect(() => {
+        if (activeView !== "status") {
+            setCountdown(300);
+            return;
+        }
+        setCountdown(300);
+        const tickId = setInterval(() => {
+            setCountdown(prev => {
+                if (prev <= 1) {
+                    // Trigger refresh in all cards
+                    setMcStatusRefreshTrigger(t => t + 1);
+                    return 300;
+                }
+                return prev - 1;
+            });
+        }, 1000);
+        return () => clearInterval(tickId);
+    }, [activeView]);
+
+    const formatCountdown = (sec: number) => {
+        const m = Math.floor(sec / 60);
+        const s = sec % 60;
+        return `${m}:${String(s).padStart(2, '0')}`;
+    };
+
+    // Pagination state
+    const ITEMS_PER_PAGE = 6;
+    const [currentPage, setCurrentPage] = useState(1);
+
+    // คำนวณ pagination
+    const totalPages = Math.max(1, Math.ceil(machines.length / ITEMS_PER_PAGE));
+    const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+    const displayedMachines = machines.slice(startIndex, startIndex + ITEMS_PER_PAGE);
 
     useEffect(() => {
         if (!area || !type || !date) {
@@ -34,55 +96,158 @@ function OverallMachineContent() {
         }
 
         fetchMachines();
+
+        // Socket.IO connection
+        const socket = getSocket();
+
+        // 🏠 Join dashboard room (ดูทุกเครื่อง)
+        socket.emit("joinRoom", "dashboard");
+
+        // Server time
+        socket.on("server_time", (isoStr: string) => {
+            const serverTime = new Date(isoStr);
+            setServerTimeStr(serverTime.toLocaleTimeString("en-GB", { hour12: false, timeZone: "Asia/Bangkok" }));
+        });
+        setSocketRef(socket);
+
+        return () => {
+            socket.emit("leaveRoom", "dashboard");
+            socket.off("server_time");
+        };
     }, [area, type, date]);
 
-    // Auto-refresh logic
+    // Socket.IO: Fast production update ทุก 2 วินาที (full production data)
     useEffect(() => {
-        const timer = setInterval(() => {
-            setRefreshCountdown((prev) => {
-                if (prev <= 1) {
-                    fetchMachines();
-                    return 300;
-                }
-                return prev - 1;
-            });
-        }, 1000);
+        if (!socketRef) return;
 
-        return () => clearInterval(timer);
-    }, [area, type]);
+        const fastHandler = (data: any) => {
+            // Store full production data (Output, CT, Eff, Target, Achieve)
+            setRealtimeData((prev: any) => {
+                // First time: store directly
+                if (!prev) return data;
+                // Merge: keep MCStatus fields from slow loop, overwrite production data
+                const merged = { ...data };
+                if (prev.machines && data.machines) {
+                    const mergedMachines = { ...data.machines };
+                    for (const [name, machineData] of Object.entries(mergedMachines)) {
+                        const prevMachine = prev.machines?.[name];
+                        if (prevMachine?.daily?.availability !== undefined) {
+                            // Keep MCStatus fields from previous slow loop data
+                            (machineData as any).daily = {
+                                ...(machineData as any).daily,
+                                availability: prevMachine.daily.availability,
+                                performance: prevMachine.daily.performance,
+                                quality: prevMachine.daily.quality,
+                                oee: prevMachine.daily.oee,
+                            };
+                        }
+                    }
+                    merged.machines = mergedMachines;
+                }
+                return merged;
+            });
+
+            // Date rollover check
+            const serverDate = data.shiftDate;
+            if (serverDate && date && date !== serverDate) {
+                const todayWhenLoaded = date;
+                if (todayWhenLoaded === new Date().toISOString().split("T")[0]) {
+                    console.log(`Date Rollover: ${date} -> ${serverDate}`);
+                    router.replace(`/overall_machine_working?area=${area}&type=${type}&date=${serverDate}`);
+                }
+            }
+        };
+
+        socketRef.on("realtime_output", fastHandler);
+        return () => { socketRef.off("realtime_output", fastHandler); };
+    }, [socketRef, area, type, date, router]);
+
+    // Socket.IO: Slow status update ทุก 5 นาที (เฉพาะ Availability, Performance, Quality, OEE)
+    useEffect(() => {
+        if (!socketRef) return;
+
+        const statusHandler = (data: any) => {
+            setRealtimeData((prev: any) => {
+                if (!prev) return prev;
+                const merged = { ...prev };
+                if (data.machines && prev.machines) {
+                    const mergedMachines = { ...prev.machines };
+                    for (const [name, statusData] of Object.entries(data.machines)) {
+                        if (mergedMachines[name]) {
+                            mergedMachines[name] = {
+                                ...mergedMachines[name],
+                                daily: {
+                                    ...mergedMachines[name].daily,
+                                    ...(statusData as any).daily,
+                                },
+                            };
+                        }
+                    }
+                    merged.machines = mergedMachines;
+                }
+                return merged;
+            });
+        };
+
+        socketRef.on("realtime_update", statusHandler);
+        return () => { socketRef.off("realtime_update", statusHandler); };
+    }, [socketRef]);
 
     const fetchMachines = async () => {
         try {
-            // Don't set loading to true on background refresh to avoid flickering
-            // setLoading(true); 
             const res = await axios.get(`${config.apiServer}/api/machine/listMachines/${area}/${type}`);
             if (res.data && res.data.results) {
                 setMachines(res.data.results);
             }
         } catch (error: any) {
             console.error("Error fetching machines:", error);
-            // Silent error on auto-refresh
         } finally {
             setLoading(false);
         }
     };
 
-    // Calculate grid dimensions
-    const count = machines.length;
-    let cols = 1;
-    let rows = 1;
+    // Reset to page 1 when type/area changes
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [type, area]);
 
-    if (count > 0) {
-        // Simple heuristic: try to keep aspect ratio reasonable
-        // Full HD is 16:9.
-        cols = Math.ceil(Math.sqrt(count));
+    // Clamp currentPage if machines list shrinks
+    useEffect(() => {
+        if (currentPage > totalPages) {
+            setCurrentPage(totalPages);
+        }
+    }, [totalPages, currentPage]);
 
-        // Adjustment for specific counts to better fit wide screen
-        if (count === 2) cols = 2;
-        if (count === 6) cols = 3;
-        if (count === 8) cols = 4; // 4x2
+    // Calculate grid dimensions based on displayed machines on THIS page (max 6)
+    const viewCount = displayedMachines.length;
+    let gridStyle: React.CSSProperties = {
+        display: "grid",
+        gap: "8px",
+        flex: 1,
+        minHeight: 0,
+    };
+    let scaleFactor = 1.0;
 
-        rows = Math.ceil(count / cols);
+    if (viewCount === 1) {
+        // 1 เครื่อง: เต็มจอ
+        gridStyle.gridTemplateColumns = "1fr";
+        gridStyle.gridTemplateRows = "1fr";
+        scaleFactor = 1.0;
+    } else if (viewCount === 2) {
+        // 2 เครื่อง: ซ้าย-ขวา
+        gridStyle.gridTemplateColumns = "1fr 1fr";
+        gridStyle.gridTemplateRows = "1fr";
+        scaleFactor = 1.0;
+    } else if (viewCount <= 4) {
+        // 3-4 เครื่อง: 2×2
+        gridStyle.gridTemplateColumns = "repeat(2, 1fr)";
+        gridStyle.gridTemplateRows = "repeat(2, 1fr)";
+        scaleFactor = 0.9;
+    } else {
+        // 5-6 เครื่อง: 3×2 (max per page)
+        gridStyle.gridTemplateColumns = "repeat(3, 1fr)";
+        gridStyle.gridTemplateRows = "repeat(2, 1fr)";
+        scaleFactor = 0.85;
     }
 
     return (
@@ -110,12 +275,35 @@ function OverallMachineContent() {
                         />
                     </div>
                     <span>Area: <span className="fw-bold text-dark">{area}</span></span>
-                    <span>Refresh in:<span className="fw-bold text-dark"></span></span>
-                    <span className="badge bg-warning text-dark" style={{ width: "40px" }}>{refreshCountdown}</span>
-                    <span>sec<span className="fw-bold text-dark"></span></span>
+                    {/* Toggle: Output / MC Status */}
+                    <div className="btn-group btn-group-sm" role="group">
+                        <button
+                            className={`btn ${activeView === "output" ? "btn-primary" : "btn-outline-primary"} fw-bold px-3`}
+                            onClick={() => setActiveView("output")}
+                        >
+                            <i className="fas fa-chart-bar me-1"></i>Output
+                        </button>
+                        <button
+                            className={`btn ${activeView === "status" ? "btn-primary" : "btn-outline-primary"} fw-bold px-3`}
+                            onClick={() => setActiveView("status")}
+                        >
+                            <i className="fas fa-cogs me-1"></i>MC Status
+                        </button>
+                    </div>
+                    {activeView === "status" ? (
+                        <span className="badge bg-warning text-dark">
+                            <i className="fas fa-sync-alt me-1"></i>{formatCountdown(countdown)}
+                        </span>
+                    ) : (
+                        <span className="badge bg-success">📡 Real-time</span>
+                    )}
+                    {serverTimeStr && <span className="badge bg-info text-dark">{serverTimeStr}</span>}
                     <button
                         className="btn btn-sm btn-outline-secondary me-3"
-                        onClick={() => router.back()}
+                        onClick={() => {
+                            localStorage.removeItem("overallMachineActiveView");
+                            router.back();
+                        }}
                     >
                         <i className="fas fa-arrow-left me-2"></i> Back
                     </button>
@@ -129,31 +317,53 @@ function OverallMachineContent() {
                     </div>
                 </div>
             ) : (
-                <div
-                    style={{
-                        display: "grid",
-                        gridTemplateColumns: `repeat(${cols}, 1fr)`,
-                        gridTemplateRows: `repeat(${rows}, 1fr)`,
-                        gap: "8px",
-                        flexGrow: 1,
-                        minHeight: 0 // Important for flex child scrolling/sizing
-                    }}
-                >
-                    {machines.length > 0 ? (
-                        machines.map((machine) => (
-                            <div key={machine.id} style={{ minWidth: 0, minHeight: 0 }}>
-                                <OverallMachineCard
-                                    machineName={machine.machine_name}
-                                    date={date || ""}
-                                />
+                <>
+                    <div style={gridStyle}>
+                        {displayedMachines.length > 0 ? (
+                            displayedMachines.map((machine) => (
+                                <div key={machine.id} style={{ minWidth: 0, minHeight: 0 }}>
+                                    <OverallMachineCard
+                                        machineName={machine.machine_name}
+                                        date={date || ""}
+                                        refreshTrigger={refreshTrigger}
+                                        realtimeData={realtimeData && realtimeData.machines ? realtimeData.machines[machine.machine_name] : null}
+                                        activeView={activeView}
+                                        mcStatusRefreshTrigger={mcStatusRefreshTrigger}
+                                        scaleFactor={scaleFactor}
+                                    />
+                                </div>
+                            ))
+                        ) : (
+                            <div className="d-flex justify-content-center align-items-center w-100 h-100" style={{ gridColumn: `1 / -1` }}>
+                                <h4 className="text-muted">No machines found for this type.</h4>
                             </div>
-                        ))
-                    ) : (
-                        <div className="d-flex justify-content-center align-items-center w-100 h-100" style={{ gridColumn: `1 / -1` }}>
-                            <h4 className="text-muted">No machines found for this type.</h4>
+                        )}
+                    </div>
+
+                    {/* Pagination */}
+                    {totalPages > 1 && (
+                        <div className="d-flex justify-content-center align-items-center gap-3 py-1" style={{ flexShrink: 0 }}>
+                            <button
+                                className="btn btn-sm btn-outline-primary fw-bold px-3"
+                                disabled={currentPage === 1}
+                                onClick={() => setCurrentPage(p => p - 1)}
+                            >
+                                <i className="fas fa-chevron-left me-1"></i> Prev
+                            </button>
+                            <span className="fw-bold text-secondary" style={{ fontSize: "0.85rem" }}>
+                                Page {currentPage} / {totalPages}
+                                <span className="text-muted ms-2">({machines.length} machines)</span>
+                            </span>
+                            <button
+                                className="btn btn-sm btn-outline-primary fw-bold px-3"
+                                disabled={currentPage === totalPages}
+                                onClick={() => setCurrentPage(p => p + 1)}
+                            >
+                                Next <i className="fas fa-chevron-right ms-1"></i>
+                            </button>
                         </div>
                     )}
-                </div>
+                </>
             )}
         </div>
     );

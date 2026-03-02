@@ -1,0 +1,1 @@
+"C:\IoT_Project\telegraf-1.33.0_windows_amd64\telegraf-1.33.0\telegraf.exe" --config "C:\IoT_Project\telegraf-1.33.0_windows_amd64\telegraf-1.33.0\telegraf.conf" service install

@@ -10,7 +10,7 @@ interface ModalProps {
 const Modal: React.FC<ModalProps> = ({ id, title, modalSize, children }) => {
     return (
         <>
-            <div className="modal fade" id={id} tabIndex={-1}>
+            <div className="modal fade" id={id} tabIndex={-1} data-bs-backdrop="static" data-bs-keyboard="false">
                 <div className={`modal-dialog ${modalSize}`}>
                     <div className="modal-content">
                         <div className="modal-header">

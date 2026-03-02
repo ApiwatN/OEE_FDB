@@ -6,7 +6,7 @@ import axios from "axios";
 import config from "@/app/config";
 import { useRouter } from "next/navigation";
 import dayjs from "dayjs";
-import { io } from "socket.io-client";
+import { getSocket } from "@/app/lib/socketManager";
 
 export default function page() {
     const router = useRouter();
@@ -15,6 +15,7 @@ export default function page() {
     const [types, setTypes] = useState([]);
     const [areaSelected, setAreaSelected] = useState("");
     const [areas, setAreas] = useState([]);
+    const [typeFilter, setTypeFilter] = useState(""); // Machine Type filter
 
     // ✅ 1. เพิ่ม State สำหรับป้องกันการกดซ้ำ
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -35,8 +36,7 @@ export default function page() {
 
     const empInputRef = useRef<HTMLInputElement>(null);
 
-    const [countdown, setCountdown] = useState(300);
-    const [refreshTime, setRefreshTime] = useState(300);
+
 
     // ✅ State และ Ref สำหรับคำนวณความกว้างสูงสุดของปุ่ม machine_type
     const [maxButtonWidth, setMaxButtonWidth] = useState<number | null>(null);
@@ -51,6 +51,8 @@ export default function page() {
 
             await fetchDataMachineArea();
             const savedArea = localStorage.getItem("machineAreaLocal");
+            const savedTypeFilter = localStorage.getItem("machineTypeFilterLocal") || "";
+            setTypeFilter(savedTypeFilter);
             if (savedArea) {
                 setAreaSelected(savedArea);
                 await fetchDataMachineTypesWithName(savedArea);
@@ -84,42 +86,28 @@ export default function page() {
         };
     }, []);
 
+    // ✅ Ref to track latest areaSelected for Socket handler (prevent stale closure)
+    const areaSelectedRef = useRef(areaSelected);
+    useEffect(() => { areaSelectedRef.current = areaSelected; }, [areaSelected]);
+
+    // ✅ Real-time Updates with Socket.io (Shared Connection)
     useEffect(() => {
-        const countdownTimer = setInterval(() => {
-            setCountdown((prev) => {
-                if (prev <= 1) {
-                    if (areaSelected) {
-                        fetchDataMachineTypesWithName(areaSelected);
-                    }
-                    return refreshTime;
-                }
-                return prev - 1;
-            });
-        }, 1000);
+        const socket = getSocket();
 
-        return () => clearInterval(countdownTimer);
-        return () => clearInterval(countdownTimer);
-    }, [refreshTime, areaSelected]);
-
-    // ✅ Real-time Updates with Socket.io
-    useEffect(() => {
-        const socket = io(config.apiServer);
-
-        socket.on("connect", () => {
-            console.log("✅ Connected to Socket.io Server");
-        });
-
-        socket.on("machine_updated", (data: any) => {
+        const handleMachineUpdated = (data: any) => {
             console.log("🔔 Real-time update received:", data);
-            if (areaSelected) {
-                fetchDataMachineTypesWithName(areaSelected);
+            const currentArea = areaSelectedRef.current;
+            if (currentArea && currentArea !== "") {
+                fetchDataMachineTypesWithName(currentArea);
             }
-        });
+        };
+
+        socket.on("machine_updated", handleMachineUpdated);
 
         return () => {
-            socket.disconnect();
+            socket.off("machine_updated", handleMachineUpdated);
         };
-    }, [areaSelected]);
+    }, []);
 
     // ✅ เพิ่ม Debounce Effect สำหรับ Auto Submit
     useEffect(() => {
@@ -138,7 +126,7 @@ export default function page() {
     useEffect(() => {
         // Reset maxButtonWidth เมื่อ types เปลี่ยน
         setMaxButtonWidth(null);
-        
+
         // รอให้ DOM render เสร็จก่อน
         const timer = setTimeout(() => {
             if (buttonRefs.current.length > 0) {
@@ -340,47 +328,61 @@ export default function page() {
                         <div
                             className="d-flex align-items-center px-3 py-1 rounded-pill shadow-sm"
                             style={{
-                                background: "linear-gradient(90deg, #0d6efd 0%, #0b5ed7 100%)",
+                                background: "linear-gradient(90deg, #28a745 0%, #218838 100%)",
                                 color: "white",
                                 fontWeight: 500,
                                 boxShadow: "0 2px 6px rgba(0,0,0,0.15)",
-                                minWidth: "160px",
+                                minWidth: "140px",
                                 justifyContent: "center",
                             }}
                         >
-                            <i className="fas fa-sync-alt me-2"></i>
-                            <span>Refresh in:</span>
-                            <span
-                                className="ms-2 fw-bold"
-                                style={{
-                                    fontVariantNumeric: "tabular-nums",
-                                    letterSpacing: "1px",
-                                }}
-                            >
-                                {Math.floor(countdown / 60)}:
-                                {String(countdown % 60).padStart(2, "0")}
-                            </span>
+                            <span>📡 Real-time</span>
                         </div>
                     </div>
 
                 </div>
                 <div className="card-body">
-                    <div className="fs-5">Select Working Area</div>
-                    <select
-                        className="form-select"
-                        value={areaSelected}
-                        onChange={handleAreaChange}
-                    >
-                        <option value="">-- Select Working Area --</option>
-                        {areas.map((item: any) => (
-                            <option key={item.machine_area} value={item.machine_area}>
-                                {item.machine_area}
-                            </option>
-                        ))}
-                    </select>
+                    <div className="d-flex gap-3 align-items-end mb-2">
+                        {/* Area Filter (Left) */}
+                        <div style={{ flex: 1 }}>
+                            <div className="fs-5 mb-1">Select Working Area</div>
+                            <select
+                                className="form-select"
+                                value={areaSelected}
+                                onChange={handleAreaChange}
+                            >
+                                <option value="">-- Select Working Area --</option>
+                                {areas.map((item: any) => (
+                                    <option key={item.machine_area} value={item.machine_area}>
+                                        {item.machine_area}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+
+                        {/* Machine Type Filter (Right) */}
+                        <div style={{ flex: 1 }}>
+                            <div className="fs-5 mb-1">Filter Machine Type</div>
+                            <select
+                                className="form-select"
+                                value={typeFilter}
+                                onChange={(e) => {
+                                    setTypeFilter(e.target.value);
+                                    localStorage.setItem("machineTypeFilterLocal", e.target.value);
+                                }}
+                            >
+                                <option value="">-- All Types --</option>
+                                {types.map((item: any) => (
+                                    <option key={item.machine_type} value={item.machine_type}>
+                                        {item.machine_type} {item.full_machine_type ? `(${item.full_machine_type})` : ''}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                    </div>
 
                     <div className="d-flex flex-column gap-3">
-                        {types.map((itemType: any, index: number) => (
+                        {types.filter((itemType: any) => !typeFilter || itemType.machine_type === typeFilter).map((itemType: any, index: number) => (
                             <div
                                 key={itemType.machine_type}
                                 className="d-flex flex-column mt-3 gap-3 p-3 rounded-3 shadow-sm"

@@ -40,13 +40,25 @@ module.exports = {
                 },
             };
 
-            const [targets, actuals, effs, cycles, oees] = await Promise.all([
+            const [targets, actuals, effs, cycles, oees, holidays, configs] = await Promise.all([
                 prisma.tb_output_target.findMany({ where: whereClause }),
                 prisma.tb_output_actual.findMany({ where: whereClause }),
                 prisma.tb_efficiency_actual.findMany({ where: whereClause }),
                 prisma.tb_cycle_time_actual.findMany({ where: whereClause }),
                 prisma.tb_oee.findMany({ where: whereClause }),
+                prisma.tb_machine_holiday.findMany({
+                    where: {
+                        machine_name: { in: machineNames },
+                        holiday_date: { gte: startDate, lte: endDate },
+                    },
+                    select: { machine_name: true, holiday_date: true },
+                }),
+                prisma.tb_machine_plan_config.findMany({
+                    where: { machine_name: { in: machineNames } },
+                    select: { machine_name: true, oee_mode: true },
+                }),
             ]);
+            const modeMap = new Map(configs.map(c => [c.machine_name, c.oee_mode || "manual"]));
 
             // 3. Aggregate Data
             const reportData = machines.map((machine) => {
@@ -67,9 +79,19 @@ module.exports = {
                 // For now, let's pick the latest one or distinct.
                 const latestTarget = mTargets.sort((a, b) => b.date - a.date)[0];
 
+                // ✅ Phase 1: Collect ALL distinct model names from both Target and Actual
+                const modelNamesSet = new Set();
+                // From targets
+                mTargets.forEach(t => { if (t.model_name) modelNamesSet.add(t.model_name); });
+                // From actuals (Cron writes model_name from InfluxDB)
+                const mActuals = actuals.filter(a => a.machine_name === mName);
+                mActuals.forEach(a => { if (a.model_name) modelNamesSet.add(a.model_name); });
+
+                const allModelNames = [...modelNamesSet];
+
                 const modelInfo = {
                     model_type: latestTarget?.model_type || "-",
-                    model_name: latestTarget?.model_name || "-",
+                    model_name: allModelNames.length > 0 ? allModelNames.join(", ") : "-",
                     process_name: latestTarget?.process_name || "-",
                 };
 
@@ -136,7 +158,11 @@ module.exports = {
                 return {
                     machine_name: mName,
                     model_info: modelInfo,
-                    daily_data: dailyData
+                    daily_data: dailyData,
+                    oee_mode: modeMap.get(mName) || "manual",
+                    holidays: holidays
+                        .filter(h => h.machine_name === mName)
+                        .map(h => dayjs(h.holiday_date).format("YYYY-MM-DD")),
                 };
             });
 

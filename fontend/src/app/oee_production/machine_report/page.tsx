@@ -3,7 +3,10 @@ import { Suspense, useEffect, useState, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import axios from "axios";
 import dayjs from "dayjs";
+import utc from "dayjs/plugin/utc";
+dayjs.extend(utc);
 import * as XLSX from "xlsx-js-style";
+import { io as socketIO } from "socket.io-client";
 import config from "@/app/config";
 
 export default function Page() {
@@ -48,6 +51,8 @@ function MachineReportPage() {
     const [reportData, setReportData] = useState<any[]>([]);
     const [loading, setLoading] = useState(false);
     const [countdown, setCountdown] = useState(5 * 60); // 5 minutes in seconds
+    const [serverTimeStr, setServerTimeStr] = useState("");
+    const [socketConnected, setSocketConnected] = useState(false);
 
     // ==========================
     // 🔸 Init
@@ -89,7 +94,7 @@ function MachineReportPage() {
                 if (prev <= 1) {
                     // Time to refresh
                     console.log("[Auto Refresh] Fetching report data...");
-                    fetchReport(selectedMonth, selectedArea, selectedType);
+                    fetchReport(selectedMonth, selectedArea, selectedType, false);
                     return REFRESH_INTERVAL; // Reset countdown
                 }
                 return prev - 1;
@@ -101,6 +106,96 @@ function MachineReportPage() {
     }, [selectedMonth, selectedArea, selectedType]);
 
     // ==========================
+    // 🔸 Socket.IO Real-time (output, eff, ct, availability, performance)
+    // ==========================
+    useEffect(() => {
+        const socket = socketIO(config.apiServer, { transports: ["websocket", "polling"] });
+
+        socket.on("connect", () => {
+            setSocketConnected(true);
+            // 🏠 Join dashboard room (ดูทุกเครื่อง)
+            socket.emit("joinRoom", "dashboard");
+        });
+        socket.on("disconnect", () => setSocketConnected(false));
+
+        // Clock
+        socket.on("server_time", (isoStr: string) => {
+            const t = new Date(isoStr);
+            setServerTimeStr(t.toLocaleTimeString("en-GB", { hour12: false, timeZone: "Asia/Bangkok" }));
+        });
+
+        // Fast production update ทุก 2 วินาที — Output, Eff, CT
+        socket.on("realtime_output", (data: any) => {
+            const isCurrentMonth = dayjs(selectedMonth).format("YYYY-MM") === dayjs().format("YYYY-MM");
+            if (!isCurrentMonth) return;
+
+            const shiftDate = data?.shiftDate;
+            const socketMachines = data?.machines;
+            if (!shiftDate || !socketMachines) return;
+
+            setReportData(prev => {
+                if (prev.length === 0) return prev;
+                return prev.map(machine => {
+                    const socketData = socketMachines[machine.machine_name];
+                    if (!socketData?.daily) return machine;
+
+                    const updatedDailyData = { ...machine.daily_data };
+                    const existing = updatedDailyData[shiftDate] || {};
+                    updatedDailyData[shiftDate] = {
+                        ...existing,
+                        output_actual: socketData.daily.totalOutput,
+                        eff_actual: socketData.daily.overallEfficiency,
+                        cycle_actual: socketData.daily.avgCycleTime,
+                    };
+
+                    return { ...machine, daily_data: updatedDailyData };
+                });
+            });
+        });
+
+        // Slow status update ทุก 5 นาที — Availability, Performance, Quality, OEE (จาก MCStatus)
+        socket.on("realtime_update", (data: any) => {
+            const isCurrentMonth = dayjs(selectedMonth).format("YYYY-MM") === dayjs().format("YYYY-MM");
+            if (!isCurrentMonth) return;
+
+            const shiftDate = data?.shiftDate;
+            const socketMachines = data?.machines;
+            if (!shiftDate || !socketMachines) return;
+
+            setReportData(prev => {
+                if (prev.length === 0) return prev;
+                return prev.map(machine => {
+                    const socketData = socketMachines[machine.machine_name];
+                    if (!socketData?.daily) return machine;
+
+                    const isAuto = machine.oee_mode === "auto";
+                    const updatedDailyData = { ...machine.daily_data };
+                    const existing = updatedDailyData[shiftDate] || {};
+                    updatedDailyData[shiftDate] = {
+                        ...existing,
+                        availability: socketData.daily.availability,
+                        performance: socketData.daily.performance,
+                        // Auto mode: อัปเดต NG/Quality/OEE realtime
+                        ...(isAuto ? {
+                            ng_qty: socketData.daily.ngQty ?? 0,
+                            quality: socketData.daily.quality,
+                            oee: socketData.daily.oee,
+                        } : {}),
+                    };
+
+                    return { ...machine, daily_data: updatedDailyData };
+                });
+            });
+        });
+
+        return () => {
+            socket.off("realtime_update");
+            socket.off("realtime_output");
+            socket.disconnect();
+        };
+    }, [selectedMonth]);
+
+    // ==========================
     // 🔸 API Calls
     // ==========================
     const fetchAreas = async () => {
@@ -110,8 +205,8 @@ function MachineReportPage() {
         try { if (area === "all" || !area) { setTypes([]); return; } const res = await axios.get(`${config.apiServer}/api/machine/listType/${area}`); setTypes(res.data.results); } catch (e) { console.error(e); }
     };
 
-    const fetchReport = async (month: string, area: string, type: string) => {
-        setLoading(true);
+    const fetchReport = async (month: string, area: string, type: string, showLoading: boolean = true) => {
+        if (showLoading) setLoading(true);
         try {
             const res = await axios.get(`${config.apiServer}/api/report/machine-report`, {
                 params: { month, area, type }
@@ -120,7 +215,7 @@ function MachineReportPage() {
         } catch (e) {
             console.error(e);
         } finally {
-            setLoading(false);
+            if (showLoading) setLoading(false);
         }
     };
 
@@ -334,6 +429,12 @@ function MachineReportPage() {
         return day > currentDay;
     };
 
+    // Helper: Check if a specific day is a holiday for a machine
+    const isHoliday = (machine: any, day: number): boolean => {
+        const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
+        return machine.holidays?.includes(dateKey) || false;
+    };
+
     // Helper: Check if a specific day has NO data (output_actual, eff_actual, cycle_actual are all empty/zero)
     const isDayEmpty = (dailyData: Record<string, any>, day: number): boolean => {
         const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
@@ -349,9 +450,9 @@ function MachineReportPage() {
         return isEmpty(outputActual) && isEmpty(effActual) && isEmpty(cycleActual);
     };
 
-    const renderCell = (val: any, isPercent: boolean = false) => {
+    const renderCell = (val: any, isPercent: boolean = false, showZero: boolean = false) => {
         if (val === undefined || val === null) return "\u00A0";
-        if (val === 0) return "\u00A0";
+        if (val === 0 && !showZero) return "\u00A0";
         if (isPercent) return `${Number(val).toLocaleString("en-US")}%`;
         return Number(val).toLocaleString("en-US");
     };
@@ -365,6 +466,14 @@ function MachineReportPage() {
                         <span>Machine Monthly Report</span>
                     </div>
                     <div className="d-flex gap-3 ms-auto text-end">
+                        {socketConnected && (
+                            <div className="d-flex align-items-center">
+                                <span className="badge bg-success d-flex align-items-center" style={{ fontSize: "0.75rem" }}>
+                                    <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#fff", display: "inline-block", marginRight: 4 }}></span>
+                                    Live {serverTimeStr}
+                                </span>
+                            </div>
+                        )}
                         <span className="fw-semibold me-2">Filter By:</span>
                         <div>
                             {/* <small className="fw-bold d-block mb-1">Area</small> */}
@@ -443,7 +552,7 @@ function MachineReportPage() {
                                                             <>
                                                                 <td rowSpan={rows.length} style={{ background: "white", fontWeight: "bold", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{machine_name}</td>
                                                                 <td rowSpan={rows.length} style={{ background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{model_info.model_type}</td>
-                                                                <td rowSpan={rows.length} style={{ background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{model_info.model_name}</td>
+                                                                <td rowSpan={rows.length} style={{ background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px", wordBreak: "break-word", fontSize: "0.75rem", lineHeight: "1.2" }}>{model_info.model_name}</td>
                                                                 <td rowSpan={rows.length} style={{ background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{model_info.process_name}</td>
                                                             </>
                                                         )}
@@ -482,17 +591,17 @@ function MachineReportPage() {
                                         {reportData.map((machine, idx) => {
                                             const { machine_name, daily_data } = machine;
                                             const rows = [
-                                                { key: "output_target", isPercent: false },
-                                                { key: "output_actual", isPercent: false },
-                                                { key: "eff_target", isPercent: true },
-                                                { key: "eff_actual", isPercent: true },
-                                                { key: "cycle_target", isPercent: false },
-                                                { key: "cycle_actual", isPercent: false },
-                                                { key: "ng_qty", isPercent: false },
-                                                { key: "availability", isPercent: true },
-                                                { key: "performance", isPercent: true },
-                                                { key: "quality", isPercent: true },
-                                                { key: "oee", isPercent: true },
+                                                { key: "output_target", isPercent: false, showZero: false },
+                                                { key: "output_actual", isPercent: false, showZero: false },
+                                                { key: "eff_target", isPercent: true, showZero: false },
+                                                { key: "eff_actual", isPercent: true, showZero: false },
+                                                { key: "cycle_target", isPercent: false, showZero: false },
+                                                { key: "cycle_actual", isPercent: false, showZero: false },
+                                                { key: "ng_qty", isPercent: false, showZero: true },
+                                                { key: "availability", isPercent: true, showZero: false },
+                                                { key: "performance", isPercent: true, showZero: false },
+                                                { key: "quality", isPercent: true, showZero: false },
+                                                { key: "oee", isPercent: true, showZero: false },
                                             ];
 
                                             return rows.map((row, rIdx) => {
@@ -508,20 +617,51 @@ function MachineReportPage() {
                                                             const val = data ? data[row.key] : undefined;
                                                             const dayEmpty = isDayEmpty(daily_data, day);
                                                             const futureDay = isFutureDay(day);
+                                                            const holiday = isHoliday(machine, day);
 
-                                                            // Future day: show empty (no color)
-                                                            // Past day with no data: show light red background
+                                                            // Determine cell background
                                                             const cellStyle: React.CSSProperties = {
                                                                 borderBottom: borderBottomStyle,
                                                                 height: "30px",
                                                                 boxSizing: "border-box",
                                                                 padding: "0 4px",
-                                                                ...(futureDay ? {} : (dayEmpty ? { backgroundColor: "#ffcccc" } : {})) // Light red only for past empty days
+                                                                ...(futureDay
+                                                                    ? {}
+                                                                    : holiday
+                                                                        ? { backgroundColor: "#ffcccc" }  // Holiday: light red
+                                                                        : dayEmpty
+                                                                            ? { backgroundColor: "#ffcccc" }  // No data: red
+                                                                            : {})
                                                             };
+
+                                                            // Manual mode + วัน UTC ปัจจุบัน → ซ่อน NG/Quality/OEE
+                                                            const isManualToday = machine.oee_mode !== "auto"
+                                                                && dateKey === dayjs.utc().format("YYYY-MM-DD");
+                                                            const hideOeeFields = isManualToday
+                                                                && ["ng_qty", "quality", "oee"].includes(row.key);
+
+                                                            // Determine cell content
+                                                            let cellContent: string;
+                                                            if (futureDay) {
+                                                                cellContent = "\u00A0";
+                                                            } else if (hideOeeFields) {
+                                                                cellContent = "-";
+                                                            } else if (holiday) {
+                                                                // Holiday: only show output_actual if it has a value
+                                                                if (row.key === "output_actual" && val && val > 0) {
+                                                                    cellContent = renderCell(val, row.isPercent);
+                                                                } else {
+                                                                    cellContent = "\u00A0";
+                                                                }
+                                                            } else if (dayEmpty) {
+                                                                cellContent = "\u00A0";
+                                                            } else {
+                                                                cellContent = renderCell(val, row.isPercent, row.showZero);
+                                                            }
 
                                                             return (
                                                                 <td key={day} style={cellStyle}>
-                                                                    {(futureDay || dayEmpty) ? "\u00A0" : renderCell(val, row.isPercent)}
+                                                                    {cellContent}
                                                                 </td>
                                                             );
                                                         })}

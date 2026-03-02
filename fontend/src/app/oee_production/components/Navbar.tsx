@@ -23,6 +23,7 @@ export default function Navbar() {
                 backgroundColor: "#1E293B", // 🔹 สีพื้นหลังเหมือน Sidebar
                 borderBottom: "1px solid #334155", // 🔹 เส้นแบ่งล่างสีเทาเข้ม
                 color: "#E2E8F0", // 🔹 สีตัวอักษรเทาอ่อน
+                zIndex: 1040, // ✅ Fix: Adjust z-index to be < Modal (1050) but > Content
             }}
         >
             {/* 🔹 ปุ่ม Toggle Sidebar + หน้าหลัก */}

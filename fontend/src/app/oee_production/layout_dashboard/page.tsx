@@ -1,26 +1,44 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useRouter } from 'next/navigation';
 import config from '@/app/config';
+import { getSocket } from '@/app/lib/socketManager';
 
 const apiServer = config.apiServer;
 
-// สีสำหรับแต่ละ Area
-const areaColors: { [key: string]: { bg: string; border: string; header: string } } = {
-    'DLC': { bg: '#E3F2FD', border: '#2196F3', header: '#1565C0' },
-    'ECM': { bg: '#E8F5E9', border: '#4CAF50', header: '#1B5E20' },
-    'CLASS100': { bg: '#FFF3E0', border: '#FF9800', header: '#E65100' },
-    'CLASS1000': { bg: '#F3E5F5', border: '#9C27B0', header: '#7B1FA2' },
+
+
+// Unified Grid: 21 columns × (1 header row + 15 machine rows = 16 rows)
+const UNIFIED_COLS = 21;
+const UNIFIED_MACHINE_ROWS = 15;
+
+// Area Layout — กำหนด offset ของแต่ละ Area ใน unified grid (1-indexed)
+// Row 1 = auto-height header row, Rows 2-16 = equal machine rows
+const AREA_LAYOUT: { [area: string]: { colStart: number; colEnd: number; rowStart: number; rowEnd: number; title: string; labelRow: number; labelAlign: 'start' | 'end' } } = {
+    DLC: { colStart: 1, colEnd: 4, rowStart: 1, rowEnd: 10, title: 'DLC Area', labelRow: 1, labelAlign: 'start' },
+    ECM: { colStart: 4, colEnd: 7, rowStart: 1, rowEnd: 10, title: 'ECM Area', labelRow: 1, labelAlign: 'start' },
+    CLASS1000: { colStart: 1, colEnd: 7, rowStart: 11, rowEnd: 16, title: 'Class 1000 Area', labelRow: 10, labelAlign: 'end' },
+    CLASS100: { colStart: 7, colEnd: 22, rowStart: 1, rowEnd: 17, title: 'Class 100 Area', labelRow: 1, labelAlign: 'start' },
 };
 
-// Grid Configuration
-const GRID_CONFIG = {
-    DLC: { cols: 3, rows: 8 },
-    ECM: { cols: 3, rows: 8 },
-    CLASS1000: { cols: 6, rows: 5 },
-    CLASS100: { cols: 15, rows: 15 },
+// Offset mapping: machine local (row,col) → unified grid (gridRow, gridCol)
+// Row 1 is header, DLC/ECM/CLASS100 machines start at row 2, CLASS1000 at row 11 (gap at row 10)
+const AREA_OFFSET: { [area: string]: { colOffset: number; rowOffset: number } } = {
+    DLC: { colOffset: 1, rowOffset: 2 },
+    ECM: { colOffset: 4, rowOffset: 2 },
+    CLASS1000: { colOffset: 1, rowOffset: 11 },
+    CLASS100: { colOffset: 7, rowOffset: 2 },
+};
+
+// ฟังก์ชันคำนวณธีมสีพื้นหลังของแต่ละโซน
+const getAreaTheme = (areaKey: string) => {
+    if (areaKey === 'DLC') return { headerBg: '#0284c7', bodyBg: '#f0f9ff', textColor: '#ffffff', borderColor: '#bae6fd' };
+    if (areaKey === 'ECM') return { headerBg: '#9333ea', bodyBg: '#faf5ff', textColor: '#ffffff', borderColor: '#e9d5ff' };
+    if (areaKey === 'CLASS1000') return { headerBg: '#ea580c', bodyBg: '#fff7ed', textColor: '#ffffff', borderColor: '#fed7aa' };
+    if (areaKey === 'CLASS100') return { headerBg: '#0d9488', bodyBg: '#f0fdfa', textColor: '#ffffff', borderColor: '#99f6e4' };
+    return { headerBg: '#475569', bodyBg: '#f1f5f9', textColor: '#ffffff', borderColor: '#e2e8f0' };
 };
 
 // Machine Position Map - กำหนดตำแหน่งเครื่องในแต่ละ Area (ชื่อตรงกับ database)
@@ -128,19 +146,21 @@ interface MachineData {
     output: number | string;
     efficiency: number | string;
     cycleTime: number | string;
+    availability?: number;
+    performance?: number;
 }
 
 export default function LayoutDashboard() {
     const router = useRouter();
     const [activeButton, setActiveButton] = useState<string>('OUTPUT');
     const [isMobile, setIsMobile] = useState(false);
-    const [cellHeight, setCellHeight] = useState(0);
     const [machinesData, setMachinesData] = useState<MachineData[]>([]);
     const [selectedMachine, setSelectedMachine] = useState<MachineData | null>(null);
     const [showPopup, setShowPopup] = useState(false);
     const [popoverPosition, setPopoverPosition] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-    const [countdown, setCountdown] = useState<number>(300); // 5 minutes in seconds
-    const class100Ref = useRef<HTMLDivElement>(null);
+    const [serverTimeStr, setServerTimeStr] = useState('');
+    const [machineStatuses, setMachineStatuses] = useState<Record<string, string>>({});
+    const [countdown, setCountdown] = useState<number>(300); // 5 minutes refresh
 
     useEffect(() => {
         const checkMobile = () => setIsMobile(window.innerWidth < 768);
@@ -159,55 +179,94 @@ export default function LayoutDashboard() {
         }
     };
 
-    // ดึงข้อมูลเครื่องจักรครั้งแรก
+    // ดึงข้อมูลเครื่องจักรครั้งแรก + Socket.IO connection
     useEffect(() => {
         fetchMachines();
-    }, []);
 
-    // Auto-refresh ทุก 5 นาที พร้อม countdown
-    useEffect(() => {
-        const timer = setInterval(() => {
-            setCountdown((prev) => {
-                if (prev <= 1) {
-                    fetchMachines(); // Refresh data
-                    return 300; // Reset to 5 minutes
-                }
-                return prev - 1;
+        // Socket.IO connection
+        const socket = getSocket();
+
+        // 🏠 Join dashboard room (ดูทุกเครื่อง)
+        socket.emit("joinRoom", "dashboard");
+
+        // Server time
+        socket.on('server_time', (isoStr: string) => {
+            const serverTime = new Date(isoStr);
+            setServerTimeStr(serverTime.toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Asia/Bangkok' }));
+        });
+
+        // Fast production update ทุก 2 วินาที — Output, Eff, CT
+        socket.on('realtime_output', (data: any) => {
+            const socketMachines = data?.machines;
+            if (!socketMachines) return;
+
+            setMachinesData(prev => {
+                if (prev.length === 0) return prev;
+                return prev.map(machine => {
+                    const rt = socketMachines[machine.name];
+                    if (!rt || !rt.daily) return machine;
+                    return {
+                        ...machine,
+                        output: rt.daily.totalOutput ?? machine.output,
+                        efficiency: rt.daily.overallEfficiency ?? machine.efficiency,
+                        cycleTime: rt.daily.avgCycleTime ?? machine.cycleTime,
+                    };
+                });
             });
-        }, 1000);
+        });
 
-        return () => clearInterval(timer);
+        // Slow status update ทุก 5 นาที — Availability, Performance (จาก MCStatus)
+        socket.on('realtime_update', (data: any) => {
+            const socketMachines = data?.machines;
+            if (!socketMachines) return;
+
+            setMachinesData(prev => {
+                if (prev.length === 0) return prev;
+                return prev.map(machine => {
+                    const rt = socketMachines[machine.name];
+                    if (!rt || !rt.daily) return machine;
+                    return {
+                        ...machine,
+                        availability: rt.daily.availability ?? machine.availability,
+                        performance: rt.daily.performance ?? machine.performance,
+                    };
+                });
+            });
+        });
+
+        return () => {
+            socket.emit("leaveRoom", "dashboard");
+            socket.off('server_time');
+            socket.off('realtime_update');
+            socket.off('realtime_output');
+        };
     }, []);
 
-    // Format countdown to mm:ss
-    const formatCountdown = (seconds: number) => {
-        const mins = Math.floor(seconds / 60);
-        const secs = seconds % 60;
-        return `${mins}:${secs.toString().padStart(2, '0')}`;
-    };
-
-    // คำนวณความสูงของ cell จาก CLASS100
+    // Fetch MC Status for all machines & poll every 5 minutes
     useEffect(() => {
-        const calculateCellHeight = () => {
-            if (class100Ref.current) {
-                const containerHeight = class100Ref.current.clientHeight;
-                const headerHeight = 28;
-                const padding = 8;
-                const availableHeight = containerHeight - headerHeight - padding;
-                const gap = 2; // gap ระหว่างแถว
-                const totalGap = gap * (GRID_CONFIG.CLASS100.rows - 1);
-                const height = (availableHeight - totalGap) / GRID_CONFIG.CLASS100.rows;
-                setCellHeight(height);
+        const fetchMcStatuses = async () => {
+            try {
+                const res = await axios.get(`${apiServer}/api/mcstatus/latest-all`);
+                setMachineStatuses(res.data.results || {});
+                setCountdown(300); // Reset timer after fetch
+            } catch (e) {
+                console.error('Error fetching MC statuses:', e);
             }
         };
-        calculateCellHeight();
-        window.addEventListener('resize', calculateCellHeight);
-        return () => window.removeEventListener('resize', calculateCellHeight);
+        fetchMcStatuses();
+
+        const fetchInterval = setInterval(fetchMcStatuses, 5 * 60 * 1000);
+        const tickInterval = setInterval(() => {
+            setCountdown(prev => prev > 0 ? prev - 1 : 0);
+        }, 1000);
+
+        return () => {
+            clearInterval(fetchInterval);
+            clearInterval(tickInterval);
+        };
     }, []);
 
-    const getAreaStyle = (area: string) => {
-        return areaColors[area] || { bg: '#F5F5F5', border: '#9E9E9E', header: '#424242' };
-    };
+
 
     // หาข้อมูลเครื่องจักรตาม name และ area
     const getMachineByPosition = (area: string, row: number, col: number): MachineData | undefined => {
@@ -222,14 +281,28 @@ export default function LayoutDashboard() {
         if (!machineName) return undefined;
         return machinesData.find(m => m.name === machineName);
     };
+    const LegendBox = ({ headerColor, bodyColor, label, borderColor }: { headerColor: string, bodyColor: string, label: string, borderColor?: string }) => (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <div style={{
+                width: '14px', height: '14px',
+                border: `1px solid ${borderColor || headerColor}`,
+                borderRadius: '2px',
+                display: 'flex', flexDirection: 'column', overflow: 'hidden'
+            }}>
+                <div style={{ flex: '0 0 50%', backgroundColor: headerColor }}></div>
+                <div style={{ flex: '1', backgroundColor: bodyColor }}></div>
+            </div>
+            <span style={{ fontSize: '0.75rem', fontWeight: 500 }}>{label}</span>
+        </div>
+    );
 
     // Machine Card Component - แสดงในช่อง grid ขนาดเล็ก
     const MachineCard = ({ machine }: { machine: MachineData }) => {
         const getValue = () => {
             switch (activeButton) {
                 case 'OUTPUT': return machine.output !== '--' ? `${machine.output} pcs` : '--';
-                case 'EFFICIENCY': return machine.efficiency !== '--' ? `${(machine.efficiency as number).toFixed(0)} %` : '--';
-                case 'CYCLE_TIME': return machine.cycleTime !== '--' ? `${(machine.cycleTime as number).toFixed(1)} s` : '--';
+                case 'EFFICIENCY': return machine.efficiency !== '--' ? `${(machine.efficiency as number).toFixed(2)} %` : '--';
+                case 'CYCLE_TIME': return machine.cycleTime !== '--' ? `${(machine.cycleTime as number).toFixed(2)} s` : '--';
                 default: return '--';
             }
         };
@@ -242,16 +315,28 @@ export default function LayoutDashboard() {
                     setShowPopup(true);
                 }}
                 style={{
-                    backgroundColor: '#fff',
-                    borderRadius: '2px',
-                    padding: '1px',
+                    backgroundColor: (() => {
+                        const status = machineStatuses[machine.name];
+                        if (status === 'Plan_Stop' || status === 'Break_Time') return '#d5d5d5'; // เทาเข้ม (body)
+                        if (status === 'Run_Time') return '#e8f5e9'; // Light Green
+                        if (status) return '#ffebee'; // Down Time (Light Red)
+                        return '#f5f5f5'; // No Data — เทาอ่อน (body)
+                    })(),
+                    border: `1px solid ${(() => {
+                        const status = machineStatuses[machine.name];
+                        if (status === 'Plan_Stop' || status === 'Break_Time') return '#424242'; // เทาเข้ม (border)
+                        if (status === 'Run_Time') return '#2e7d32'; // Dark Green
+                        if (status) return '#c62828'; // Down Time (Dark Red)
+                        return '#9e9e9e'; // No Data — เทาอ่อน (border)
+                    })()}`,
+                    borderRadius: '4px',
                     cursor: 'pointer',
                     width: '100%',
                     height: '100%',
                     display: 'flex',
                     flexDirection: 'column',
                     overflow: 'hidden',
-                    boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.12)',
                     transition: 'transform 0.15s, box-shadow 0.15s',
                     fontSize: '6px',
                     lineHeight: 1.15,
@@ -264,33 +349,40 @@ export default function LayoutDashboard() {
                 }}
                 onMouseLeave={(e) => {
                     e.currentTarget.style.transform = 'scale(1)';
-                    e.currentTarget.style.boxShadow = '0 1px 2px rgba(0,0,0,0.1)';
+                    e.currentTarget.style.boxShadow = '0 1px 3px rgba(0,0,0,0.12)';
                     e.currentTarget.style.zIndex = '1';
                 }}
             >
                 {/* Machine Name - Header */}
                 <div style={{
                     fontWeight: 'bold',
-                    borderBottom: '1px solid #ddd',
-                    paddingBottom: '1px',
-                    marginBottom: '1px',
+                    backgroundColor: (() => {
+                        const status = machineStatuses[machine.name];
+                        if (status === 'Plan_Stop' || status === 'Break_Time') return '#424242'; // เทาเข้ม (header)
+                        if (status === 'Run_Time') return '#2e7d32';
+                        if (status) return '#c62828';
+                        return '#bdbdbd'; // No Data — เทาอ่อน (header)
+                    })(),
+                    color: '#ffffff',
+                    padding: '1px 2px',
                     whiteSpace: 'nowrap',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
-                    fontSize: '10px',
-                    color: 'black',
+                    fontSize: 'clamp(6px, 0.55vw, 10px)',
+                    textAlign: 'center',
+                    flexShrink: 0,
                 }}>
                     {machine.name}
                 </div>
                 {/* Content */}
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-                    <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'black', fontSize: '8px' }}>
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '0px 2px', gap: '0px', overflow: 'hidden', minHeight: 0 }}>
+                    <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: '#212121', fontSize: 'clamp(5px, 0.45vw, 8px)', lineHeight: 1.1 }}>
                         {machine.model}
                     </div>
-                    <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'black', fontSize: '8px' }}>
+                    <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: '#212121', fontSize: 'clamp(5px, 0.45vw, 8px)', lineHeight: 1.1 }}>
                         {machine.process}
                     </div>
-                    <div style={{ fontWeight: 'bold', color: 'black', fontSize: '10px' }}>
+                    <div style={{ fontWeight: 700, color: '#212121', fontSize: 'clamp(6px, 0.5vw, 10px)', lineHeight: 1.2 }}>
                         {getValue()}
                     </div>
                 </div>
@@ -298,18 +390,70 @@ export default function LayoutDashboard() {
         );
     };
 
-    // สร้าง Grid cells พร้อม Machine Cards
-    const renderGrid = (areaName: string, cols: number, rows: number, useDynamicHeight: boolean) => {
-        const cells = [];
-        for (let r = 0; r < rows; r++) {
-            for (let c = 0; c < cols; c++) {
-                const machine = getMachineByPosition(areaName, r, c);
-                cells.push(
+    // Render unified grid: area backgrounds + machine cards
+    const renderUnifiedGrid = () => {
+        const elements: React.ReactNode[] = [];
+
+        // 1) Area backgrounds (no label inside)
+        Object.entries(AREA_LAYOUT).forEach(([areaKey, layout]) => {
+            const theme = getAreaTheme(areaKey);
+            elements.push(
+                <div
+                    key={`area-bg-${areaKey}`}
+                    style={{
+                        gridColumn: `${layout.colStart} / ${layout.colEnd}`,
+                        gridRow: `${layout.rowStart} / ${layout.rowEnd}`,
+                        backgroundColor: theme.bodyBg,
+                        border: `1px solid ${theme.borderColor}`,
+                        borderRadius: '6px',
+                        zIndex: 0,
+                    }}
+                />
+            );
+
+            // Area label as SEPARATE grid item (z-index: 2, above machine cards)
+            elements.push(
+                <div
+                    key={`area-label-${areaKey}`}
+                    style={{
+                        gridColumn: `${layout.colStart} / ${layout.colEnd}`,
+                        gridRow: layout.labelRow,
+                        zIndex: 2,
+                        pointerEvents: 'none',
+                        alignSelf: layout.labelAlign,
+                        backgroundColor: theme.headerBg,
+                        color: theme.textColor,
+                        fontWeight: 'bold',
+                        fontSize: 'clamp(7px, 0.6vw, 12px)',
+                        padding: '1px 6px',
+                        borderTopLeftRadius: '6px',
+                        borderTopRightRadius: '6px',
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                    }}
+                >
+                    {layout.title}
+                </div>
+            );
+        });
+
+        // 2) Machine cards — placed directly in unified grid
+        Object.entries(MACHINE_POSITIONS).forEach(([areaKey, positions]) => {
+            const offset = AREA_OFFSET[areaKey];
+            if (!offset) return;
+
+            Object.entries(positions).forEach(([machineName, pos]) => {
+                const machine = machinesData.find(m => m.name === machineName);
+                const gridCol = pos.col + offset.colOffset;
+                const gridRow = pos.row + offset.rowOffset;
+                elements.push(
                     <div
-                        key={`${r}-${c}`}
+                        key={`machine-${machineName}`}
                         style={{
-                            backgroundColor: 'transparent',
-                            height: useDynamicHeight && cellHeight > 0 ? `${cellHeight}px` : 'auto',
+                            gridColumn: gridCol,
+                            gridRow: gridRow,
+                            zIndex: 1,
                             padding: '1px',
                             overflow: 'hidden',
                         }}
@@ -317,69 +461,10 @@ export default function LayoutDashboard() {
                         {machine && <MachineCard machine={machine} />}
                     </div>
                 );
-            }
-        }
-        return cells;
-    };
+            });
+        });
 
-    // Area Box Component
-    const AreaBox = ({
-        areaName,
-        title,
-        style: customStyle,
-        innerRef,
-        useDynamicHeight = true,
-    }: {
-        areaName: string;
-        title?: string;
-        style?: React.CSSProperties;
-        innerRef?: React.RefObject<HTMLDivElement | null>;
-        useDynamicHeight?: boolean;
-    }) => {
-        const colorStyle = getAreaStyle(areaName);
-        const gridConfig = GRID_CONFIG[areaName as keyof typeof GRID_CONFIG] || { cols: 1, rows: 1 };
-
-        return (
-            <div
-                ref={innerRef}
-                style={{
-                    backgroundColor: colorStyle.bg,
-                    border: `2px solid ${colorStyle.border}`,
-                    borderRadius: '4px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    ...customStyle,
-                }}
-            >
-                <div
-                    style={{
-                        backgroundColor: colorStyle.header,
-                        color: 'white',
-                        fontWeight: 'bold',
-                        fontSize: isMobile ? '0.65rem' : '0.75rem',
-                        padding: isMobile ? '3px 6px' : '4px 8px',
-                        borderRadius: '2px 2px 0 0',
-                        flexShrink: 0,
-                    }}
-                >
-                    {title || areaName} Area
-                </div>
-                <div
-                    style={{
-                        flex: useDynamicHeight ? 'none' : 1,
-                        padding: '4px',
-                        display: 'grid',
-                        gridTemplateColumns: `repeat(${gridConfig.cols}, 1fr)`,
-                        gridTemplateRows: useDynamicHeight && cellHeight > 0
-                            ? `repeat(${gridConfig.rows}, ${cellHeight}px)`
-                            : `repeat(${gridConfig.rows}, 1fr)`,
-                        gap: '2px',
-                    }}
-                >
-                    {renderGrid(areaName, gridConfig.cols, gridConfig.rows, useDynamicHeight)}
-                </div>
-            </div>
-        );
+        return elements;
     };
 
     // Popover Component - แสดงใกล้ตำแหน่งที่คลิก
@@ -428,7 +513,7 @@ export default function LayoutDashboard() {
                         backgroundColor: '#fff',
                         borderRadius: '8px',
                         padding: '8px',
-                        boxShadow: '0 4px 20px rgba(0,0,0,0.25)',
+                        boxShadow: '0 44px 20px rgba(0,0,0,0.25)',
                         zIndex: 9999,
                     }}
                     onClick={(e) => e.stopPropagation()}
@@ -464,9 +549,9 @@ export default function LayoutDashboard() {
     };
 
     return (
-        <div className="content" style={{ overflow: 'hidden', height: 'calc(100vh - 60px)' }}>
+        <div className="content" style={{ overflow: 'hidden', height: 'calc(100vh - 60px)', backgroundColor: '#e2e8f0' }}>
             <Popover />
-            <div className="card mt-1" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div className="card mt-1" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', backgroundColor: '#f1f5f9' }}>
                 {/* Header */}
                 <div
                     className="card-header d-flex flex-wrap align-items-center"
@@ -492,6 +577,23 @@ export default function LayoutDashboard() {
                         <span>Layout Dashboard</span>
                     </div>
 
+                    {/* Legend */}
+                    <div
+                        className="d-flex align-items-center"
+                        style={{
+                            gap: isMobile ? '12px' : '32px',
+                            margin: '0 24px',
+                            flex: 1,
+                            justifyContent: 'center',
+                            flexWrap: 'wrap',
+                        }}
+                    >
+                        <LegendBox headerColor="#2e7d32" bodyColor="#e8f5e9" label="Run Time" />
+                        <LegendBox headerColor="#c62828" bodyColor="#ffebee" label="Down Time" />
+                        <LegendBox headerColor="#424242" bodyColor="#d5d5d5" label="Plan Stop / Break" />
+                        <LegendBox headerColor="#bdbdbd" bodyColor="#f5f5f5" label="No Data" />
+                    </div>
+
                     <div
                         className="d-flex gap-2 align-items-center"
                         style={{
@@ -499,21 +601,32 @@ export default function LayoutDashboard() {
                             flexWrap: 'wrap',
                         }}
                     >
-                        {/* Countdown Timer */}
+                        {/* Machine Status Countdown */}
                         <div
-                            className="d-flex align-items-center gap-1"
+                            className="d-flex align-items-center gap-2"
                             style={{
-                                backgroundColor: '#f8f9fa',
+                                backgroundColor: '#e2e8f0',
                                 padding: '4px 10px',
                                 borderRadius: '4px',
                                 fontSize: isMobile ? '0.7rem' : '0.8rem',
-                                color: countdown <= 30 ? '#dc3545' : '#495057',
-                                fontWeight: 500,
+                                color: '#475569',
+                                fontWeight: 600,
                             }}
                         >
-                            <i className="fas fa-sync-alt" style={{ fontSize: '0.7rem' }}></i>
-                            <span>{formatCountdown(countdown)}</span>
+                            <span>Machine Status</span>
+                            <span
+                                className="badge rounded-pill"
+                                style={{
+                                    backgroundColor: '#64748b',
+                                    fontSize: isMobile ? '0.65rem' : '0.75rem',
+                                    padding: '3px 6px',
+                                    minWidth: '40px'
+                                }}
+                            >
+                                ⏱️ {Math.floor(countdown / 60)}:{String(countdown % 60).padStart(2, '0')}
+                            </span>
                         </div>
+                        {/* Real-time Badge Removed */}
                         <button
                             className={`btn btn-sm ${activeButton === 'OUTPUT' ? 'btn-primary' : 'btn-outline-secondary'}`}
                             onClick={() => setActiveButton('OUTPUT')}
@@ -538,9 +651,9 @@ export default function LayoutDashboard() {
                     </div>
                 </div>
 
-                {/* Body */}
+                {/* Body — Unified Grid */}
                 <div
-                    className="card-body p-2"
+                    className="card-body p-1"
                     style={{
                         flex: 1,
                         height: '0',
@@ -548,51 +661,17 @@ export default function LayoutDashboard() {
                         overflow: 'hidden',
                     }}
                 >
-                    {/* Main Layout */}
                     <div
                         style={{
-                            display: 'flex',
-                            flexDirection: isMobile ? 'column' : 'row',
-                            gap: '6px',
-                            height: isMobile ? 'auto' : '100%',
+                            width: '100%',
+                            height: '100%',
+                            display: 'grid',
+                            gridTemplateColumns: `repeat(${UNIFIED_COLS}, minmax(0, 1fr))`,
+                            gridTemplateRows: `auto repeat(${UNIFIED_MACHINE_ROWS}, minmax(0, 1fr))`,
+                            gap: '2px',
                         }}
                     >
-                        {/* Left Section: DLC + ECM + CLASS1000 */}
-                        <div
-                            style={{
-                                display: 'flex',
-                                flexDirection: 'column',
-                                gap: '6px',
-                                flex: isMobile ? 'none' : '6',
-                                width: isMobile ? '100%' : 'auto',
-                                minWidth: isMobile ? 'auto' : '180px',
-                            }}
-                        >
-                            {/* Row 1: DLC + ECM */}
-                            <div style={{ display: 'flex', gap: '6px' }}>
-                                <AreaBox areaName="DLC" style={{ flex: 1 }} />
-                                <AreaBox areaName="ECM" style={{ flex: 1 }} />
-                            </div>
-
-                            {/* Row 2: CLASS1000 */}
-                            <AreaBox
-                                areaName="CLASS1000"
-                                title="Class 1000"
-                                style={{ marginTop: '6px', flex: 1 }}
-                            />
-                        </div>
-
-                        {/* Right Section: CLASS100 */}
-                        <AreaBox
-                            areaName="CLASS100"
-                            title="Class 100"
-                            innerRef={class100Ref}
-                            useDynamicHeight={true}
-                            style={{
-                                flex: isMobile ? 'none' : '15',
-                                height: isMobile ? '400px' : '100%',
-                            }}
-                        />
+                        {renderUnifiedGrid()}
                     </div>
                 </div>
             </div>

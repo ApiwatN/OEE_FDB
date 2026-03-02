@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useState, useRef, useCallback } from "react";
 import {
     Chart as ChartJS,
     CategoryScale,
@@ -21,6 +21,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import axios from "axios";
 import dayjs from "dayjs";
 import config from "@/app/config";
+import { getSocket } from "@/app/lib/socketManager";
+import type { Socket } from "socket.io-client";
 
 // ✅ Register ChartJS components
 ChartJS.register(CategoryScale, LinearScale, BarElement, LineElement, PointElement, Legend, Tooltip, ChartDataLabels, BarController, LineController)
@@ -42,10 +44,11 @@ function MachineWorkingInner() {
     // 1. Basic Info & Timer
     const [machineName, setMachineName] = useState("");
     const [clientTime, setClientTime] = useState<string>("");
-    const [countdown, setCountdown] = useState(300); // 5 minutes
-    const [refreshTime] = useState(300);
+    const [serverTimeRef, setServerTimeRef] = useState<Date>(new Date());
     const [currentDateStr, setCurrentDateStr] = useState(""); // YYYY-MM-DD
     const [blink, setBlink] = useState(true);
+    const [socketRef, setSocketRef] = useState<Socket | null>(null);
+    const [isViewingToday, setIsViewingToday] = useState(true);
     // 2. Table Data State
     const [tableData, setTableData] = useState({
         model: "-",
@@ -68,9 +71,29 @@ function MachineWorkingInner() {
     const [historyId, setHistoryId] = useState<number | null>(null);
     const [canLogout, setCanLogout] = useState(false);
 
+    // 4. Multi-Model Support
+    const [modelsList, setModelsList] = useState<string[]>([]);
+    const [selectedModel, setSelectedModel] = useState<string>("");
+
     // 4. Graph Data State
     const [graph1Data, setGraph1Data] = useState<any>(null); // Output Graph
     const [graph2Data, setGraph2Data] = useState<any>(null); // CT & Eff Graph
+
+    // 5. Machine Status Tab
+    const [activeTab, setActiveTab] = useState<"output" | "status">(() => {
+        if (typeof window !== "undefined") {
+            const saved = localStorage.getItem("machineWorkingTab");
+            if (saved === "output" || saved === "status") return saved;
+        }
+        return "output";
+    });
+    const [mcStatusData, setMcStatusData] = useState<any[]>([]);
+    const mcStatusCanvasRef = useRef<HTMLCanvasElement>(null);
+    const mcSegmentsRef = useRef<{ startMin: number; endMin: number; status: string; startTime: string; endTime: string }[]>([]);
+    const [mcTooltip, setMcTooltip] = useState<{ visible: boolean; x: number; y: number; status: string; startTime: string; endTime: string; duration: string } | null>(null);
+    const [countdown, setCountdown] = useState(300); // 5 min in seconds
+    const [downtimeChartData, setDowntimeChartData] = useState<any>(null);
+    const [downtimeDurationMap, setDowntimeDurationMap] = useState<Record<string, number>>({});
 
     // ================= Effects =================
     useEffect(() => {
@@ -81,13 +104,15 @@ function MachineWorkingInner() {
     }, []);
     // ✅ Effect สำหรับอัปเดตสีกราฟให้กระพริบ
     useEffect(() => {
-        const currentHour = new Date().getHours();
-        const todayStr = new Date().toISOString().split("T")[0];
+        const todayStr = serverTimeRef.toISOString().split("T")[0];
 
         // ✅ ถ้าไม่ใช่วันนี้ ไม่ต้องกระพริบ (แสดงสีปกติ)
         if (currentDateStr !== todayStr) {
             return;
         }
+
+        const currentHour = serverTimeRef.getUTCHours();
+        const thHour = (currentHour + 7) % 24;
 
         // --- Update Graph 1 (Output) ---
         setGraph1Data((prev: any) => {
@@ -96,7 +121,7 @@ function MachineWorkingInner() {
             // สร้าง Array สีใหม่
             const newColors = prev.labels.map((h: string) => {
                 // ถ้าเป็นชั่วโมงปัจจุบัน ให้สลับสีตาม blink
-                if (parseInt(h) === currentHour) {
+                if (parseInt(h) === thHour) {
                     return blink ? "#00b050" : "#00b05080"; // สีเขียวปกติ สลับกับ สีเขียวจางๆ (Hex Alpha)
                 }
                 return "#00b050"; // สีปกติสำหรับแท่งอื่น
@@ -119,7 +144,7 @@ function MachineWorkingInner() {
 
             // สร้าง Array สีใหม่
             const newColors = prev.labels.map((h: string) => {
-                if (parseInt(h) === currentHour) {
+                if (parseInt(h) === thHour) {
                     return blink ? "#5b9bd5" : "#5b9bd580"; // สีฟ้าปกติ สลับกับ สีฟ้าจางๆ
                 }
                 return "#5b9bd5";
@@ -160,49 +185,161 @@ function MachineWorkingInner() {
 
         setMachineName(targetMachine);
 
-        // ✅ Logic: ใช้วันที่จาก LocalStorage ถ้ามี, ถ้าไม่มีใช้วันที่ปัจจุบัน
+        // ✅ Logic: แยก Login Mode กับ History Mode
         let targetDateStr = "";
+        const urlDate = searchParams.get("date");
+        const isLoggedIn = !!localStorage.getItem("operatorLocal");
 
-        // ✅ Logic: Always use current UTC date for monitoring
-        //targetDateStr = new Date().toISOString().split("T")[0];
-        targetDateStr = searchParams.get("date") || localDate || new Date().toISOString().split("T")[0];
-
-        // setCurrentDateStr(targetDateStr);
-        // ✅ Logic: ถ้าเข้ามาแบบ Scan (date=current) -> แสดงเวลาปกติ
-        // ถ้าเข้ามาแบบ History (date!=current) -> ซ่อนเวลา
-        // (Moved logic to Render phase)
+        if (urlDate) {
+            // 🔵 History Mode: มี URL param → ใช้วันจาก URL
+            targetDateStr = urlDate;
+        } else if (isLoggedIn) {
+            // 🟢 Login Mode: ใช้ UTC ปัจจุบันเสมอ
+            targetDateStr = new Date().toISOString().split("T")[0];
+            localStorage.setItem("machineDateLocal", targetDateStr);
+        } else {
+            // 🔵 History Mode (ไม่มี URL): ใช้ localStorage หรือ UTC
+            targetDateStr = localDate || new Date().toISOString().split("T")[0];
+        }
 
         setCurrentDateStr(targetDateStr);
 
         // 2. Initial Fetch (ส่งวันที่ที่ถูกต้องไป)
         fetchAllData(targetMachine, targetDateStr);
 
-        // 3. Clock Timer (Always run, visibility handled in render)
-        const clockInterval = setInterval(() => {
-            setClientTime(new Date().toLocaleTimeString("en-GB", { hour12: false }));
-        }, 1000);
+        // 3. Socket.IO connection
+        const socket = getSocket();
+        setSocketRef(socket);
 
-        return () => clearInterval(clockInterval);
-    }, []);
+        // 🏠 Join room ของเครื่องจักรที่กำลังดู
+        socket.emit("joinRoom", `machine:${targetMachine}`);
 
-    // Countdown & Auto Refresh
+        // ✅ Server Time — ใช้เวลา server แทน client
+        socket.on("server_time", (isoStr: string) => {
+            // console.log("⏱️ Server Time:", isoStr);
+            const serverTime = new Date(isoStr);
+            setServerTimeRef(serverTime);
+            // แสดงเวลาที่ไทย (Asia/Bangkok) — ไม่ต้องบวก +7 เอง
+            setClientTime(serverTime.toLocaleTimeString("en-GB", { hour12: false, timeZone: "Asia/Bangkok" }));
+        });
+
+        return () => {
+            socket.emit("leaveRoom", `machine:${targetMachine}`);
+            socket.off("server_time");
+        };
+    }, [searchParams]);
+
+    // ✅ Socket.IO: Fast production update ทุก 2 วินาที (Output, CT, Eff, Target, Achieve, กราฟ)
     useEffect(() => {
-        console.log("machineName: " + machineName)
-        console.log("currentDateStr: " + currentDateStr)
-        const timer = setInterval(() => {
-            setCountdown((prev) => {
-                if (prev <= 1) {
-                    if (machineName && currentDateStr) {
-                        fetchAllData(machineName, currentDateStr);
+        if (!socketRef || !machineName || !currentDateStr) return;
+
+        const todayStr = serverTimeRef.toISOString().split("T")[0];
+        const viewingToday = currentDateStr === todayStr;
+        setIsViewingToday(viewingToday);
+
+        if (!viewingToday) return;
+
+        const fastHandler = (data: any) => {
+            const machines = data.machines || {};
+            const machineData = machines[machineName];
+            if (!machineData) return;
+
+            const { currentHour, daily } = machineData;
+            const shiftIndex = currentHour.shiftIndex;
+
+            // ✅ อัปเดต Table Data
+            setTableData((prev) => ({
+                ...prev,
+                outputActual: daily.totalOutput,
+                outputTarget: daily.accumTarget || prev.outputTarget,
+                achieve: daily.achieve || 0,
+                ctActual: daily.avgCycleTime,
+                effActual: daily.overallEfficiency,
+            }));
+
+            // ✅ อัปเดต Graph 1 (Output + Accum)
+            setGraph1Data((prev: any) => {
+                if (!prev) return prev;
+                const newOutputActual = [...prev.datasets[0].data];
+                const newOutputAccum = [...prev.datasets[2].data];
+
+                newOutputActual[shiftIndex] = currentHour.output;
+                let runningAccum = 0;
+                for (let i = 0; i < newOutputActual.length; i++) {
+                    const v = newOutputActual[i];
+                    if (v !== null && v !== undefined) {
+                        runningAccum += v;
                     }
-                    return refreshTime;
+                    newOutputAccum[i] = i <= shiftIndex ? runningAccum : (prev.datasets[2].data[i]);
                 }
-                return prev - 1;
+
+                const newDatasets = prev.datasets.map((ds: any, idx: number) => {
+                    if (idx === 0) return { ...ds, data: newOutputActual };
+                    if (idx === 2) return { ...ds, data: newOutputAccum };
+                    return ds;
+                });
+                return { ...prev, datasets: newDatasets };
             });
-        }, 1000);
-        console.log("Test")
-        return () => clearInterval(timer);
-    }, [machineName, currentDateStr, refreshTime]);
+
+            // ✅ อัปเดต Graph 2 (CT & Eff)
+            setGraph2Data((prev: any) => {
+                if (!prev) return prev;
+                const newCtActual = [...prev.datasets[0].data];
+                const newEffActual = [...prev.datasets[2].data];
+
+                newCtActual[shiftIndex] = currentHour.cycleTime;
+                newEffActual[shiftIndex] = currentHour.efficiency;
+
+                const newDatasets = prev.datasets.map((ds: any, idx: number) => {
+                    if (idx === 0) return { ...ds, data: newCtActual };
+                    if (idx === 2) return { ...ds, data: newEffActual };
+                    return ds;
+                });
+                return { ...prev, datasets: newDatasets };
+            });
+
+            // ✅ Date rollover check
+            const serverDate = data.shiftDate;
+            if (serverDate && currentDateStr !== serverDate) {
+                const isLoggedIn = !!localStorage.getItem("operatorLocal");
+                const urlDate = searchParams.get("date");
+                if (isLoggedIn && !urlDate) {
+                    console.log("Date Rollover: " + currentDateStr + " -> " + serverDate);
+                    setCurrentDateStr(serverDate);
+                    localStorage.setItem("machineDateLocal", serverDate);
+                    fetchAllData(machineName, serverDate);
+                }
+            }
+        };
+
+        socketRef.on("realtime_output", fastHandler);
+        return () => { socketRef.off("realtime_output", fastHandler); };
+    }, [socketRef, machineName, currentDateStr, searchParams]);
+
+    // ✅ Socket.IO: Slow status update ทุก 5 นาที (เฉพาะ OEE จาก MCStatus)
+    useEffect(() => {
+        if (!socketRef || !machineName || !currentDateStr) return;
+
+        const todayStr = serverTimeRef.toISOString().split("T")[0];
+        if (currentDateStr !== todayStr) return;
+
+        const statusHandler = (data: any) => {
+            const machineData = data?.machines?.[machineName];
+            if (!machineData?.daily) return;
+
+            // อัปเดตเฉพาะค่า OEE (คำนวณจาก Availability × Performance × Quality)
+            // ✅ Guard: ไม่ทับค่า OEE Last ถ้า Socket ส่ง 0 มา (Cron ยังไม่คำนวณ)
+            if (machineData.daily.oee !== undefined && machineData.daily.oee > 0) {
+                setTableData((prev) => ({
+                    ...prev,
+                    oee: machineData.daily.oee,
+                }));
+            }
+        };
+
+        socketRef.on("realtime_update", statusHandler);
+        return () => { socketRef.off("realtime_update", statusHandler); };
+    }, [socketRef, machineName, currentDateStr]);
 
     // ================= Data Fetching =================
 
@@ -211,18 +348,35 @@ function MachineWorkingInner() {
             // เรียก API พร้อมกัน 5 ตัวเพื่อความเร็ว
             const timestamp = Date.now();
 
+            // ✅ 1. Fetch Models List First
+            const resModels = await axios.get(`${config.apiServer}/api/oee/getModelsByDate`, {
+                params: { machine_name: machine, date: date, t: timestamp }
+            });
+            const models = resModels.data.results.map((m: any) => m.model_name);
+            setModelsList(models);
+
+            // Set default selected model if not already set
+            let targetModel = selectedModel;
+            if (!selectedModel && models.length > 0) {
+                targetModel = models[0];
+                setSelectedModel(targetModel);
+            }
+
+            // ✅ 2. Prepare model parameter
+            const modelParam = targetModel ? `&model_name=${targetModel}` : '';
+
             // เรียก API พร้อมกัน 5 ตัว (เพิ่ม &t=${timestamp} ต่อท้าย)
             const [resOEE, resTable, resGraph1, resGraph2, resOperator] = await Promise.all([
-                axios.get(`${config.apiServer}/api/oee/getLastOEE?machine_name=${machine}&date=${date}&t=${timestamp}`),
-                axios.get(`${config.apiServer}/api/oee/getDataTable?machine_name=${machine}&date=${date}&t=${timestamp}`),
-                axios.get(`${config.apiServer}/api/oee/getGraph1?machine_name=${machine}&date=${date}&t=${timestamp}`),
-                axios.get(`${config.apiServer}/api/oee/getGraph2?machine_name=${machine}&date=${date}&t=${timestamp}`),
+                axios.get(`${config.apiServer}/api/oee/getLastOEE?machine_name=${machine}&date=${date}${modelParam}&t=${timestamp}`),
+                axios.get(`${config.apiServer}/api/oee/getDataTable?machine_name=${machine}&date=${date}${modelParam}&t=${timestamp}`),
+                axios.get(`${config.apiServer}/api/oee/getGraph1?machine_name=${machine}&date=${date}${modelParam}&t=${timestamp}`),
+                axios.get(`${config.apiServer}/api/oee/getGraph2?machine_name=${machine}&date=${date}${modelParam}&t=${timestamp}`),
                 // ✅ เปลี่ยนเป็นดึงประวัติทั้งหมดของวันนั้น
                 axios.get(`${config.apiServer}/api/historyWorking/getHistoryByDate?machine_name=${machine}&date=${date}&t=${timestamp}`)
             ]);
 
-            // ✅ Check if viewing "Today"
-            const todayStr = dayjs().format("YYYY-MM-DD");
+            // ✅ Check if viewing "Today" (UTC date comparison)
+            const todayStr = new Date().toISOString().split("T")[0];
             const isToday = date === todayStr;
 
             let activeCrossDayOp = null;
@@ -236,6 +390,16 @@ function MachineWorkingInner() {
                     }
                 } catch (e) {
                     console.error("Error fetching active operator:", e);
+                }
+            } else {
+                // ✅ ADDED: For historical dates, check for cross-day operators
+                try {
+                    const resCrossDay = await axios.get(`${config.apiServer}/api/historyWorking/getActiveCrossDayOperator?machine_name=${machine}&date=${date}&t=${timestamp}`);
+                    if (resCrossDay.data && resCrossDay.data.results) {
+                        activeCrossDayOp = resCrossDay.data.results;
+                    }
+                } catch (e) {
+                    console.error("Error fetching cross-day operator:", e);
                 }
             }
 
@@ -286,6 +450,7 @@ function MachineWorkingInner() {
             // --- 2. Process OEE & Table Data ---
             const oeeData = resOEE.data;
             const tableDataRaw = resTable.data;
+            console.log("🔥 [API] Table Data Raw:", tableDataRaw);
 
             setTableData({
                 model: tableDataRaw.model || "-",
@@ -332,7 +497,7 @@ function MachineWorkingInner() {
                         {
                             type: "bar",
                             label: "Output Actual",
-                            data: g1.outputActual, // รายชั่วโมง
+                            data: filterFutureData(g1.outputActual, g1.hours), // ✅ กรองชั่วโมงอนาคต
                             backgroundColor: "#00b050", // Green
                             yAxisID: "y_qty",
                             order: 4,
@@ -415,7 +580,7 @@ function MachineWorkingInner() {
                         {
                             type: "bar",
                             label: "Cycle Time Actual",
-                            data: g2.cycleTimeActual,
+                            data: filterFutureData(g2.cycleTimeActual, g2.hours), // ✅ กรองชั่วโมงอนาคต
                             backgroundColor: "#5b9bd5", // Blue
                             yAxisID: "y_ct",
                             order: 4
@@ -450,7 +615,7 @@ function MachineWorkingInner() {
                         },
                         {
                             type: "line",
-                            label: "Efficiency Actual",
+                            label: "Availability Actual",
                             // ✅ แก้ไขตรงนี้: เรียกใช้ filterFutureData
                             data: filterFutureData(g2.efficiencyActual, g2.hours),
                             // data: g2.efficiencyActual,
@@ -463,7 +628,7 @@ function MachineWorkingInner() {
                         },
                         {
                             type: "line",
-                            label: "Efficiency Target",
+                            label: "Availability Target",
                             data: g2.efficiencyTarget,
                             borderColor: "#ff6600ff", // Dark Orange
                             borderWidth: 5,
@@ -498,6 +663,303 @@ function MachineWorkingInner() {
         } catch (error: any) {
             console.error("Fetch Error:", error);
         }
+    };
+
+    // ================= Machine Status =================
+
+    const MC_STATUS_COLORS: Record<string, { color: string; label: string }> = {
+        Run_Time: { color: "#2ca02c", label: "Run Time" },
+        Plan_Stop: { color: "#aec7e8", label: "Plan Stop" },
+        Break_Time: { color: "#ffbb78", label: "Break Time" },
+        MM_Repair: { color: "#d62728", label: "MM Repair" },
+        MM_Check_Master: { color: "#ff7f0e", label: "MM Check Master" },
+        MM_Preventive: { color: "#e377c2", label: "MM Preventive" },
+        Setter_Adjust: { color: "#9467bd", label: "Setter Adjust" },
+        Setter_Check_Master: { color: "#8c564b", label: "Setter Check Master" },
+        Setter_Preventive: { color: "#c49c94", label: "Setter Preventive" },
+        QC_Quality: { color: "#1f77b4", label: "QC Quality" },
+        QC_Check_Master: { color: "#17becf", label: "QC Check Master" },
+        Prod_Cleaning: { color: "#bcbd22", label: "Prod Cleaning" },
+        Prod_Check_Master: { color: "#98df8a", label: "Prod Check Master" },
+        Wait_Part: { color: "#ff9896", label: "Wait Part" },
+        MC_Stop: { color: "#7f7f7f", label: "Machine Stop" },
+        MC_Alarm: { color: "#c62828", label: "MC Alarm" },
+        Cut_Lot: { color: "#dbdb8d", label: "Cut Lot" },
+        Signal_Lost: { color: "#2f2f2f", label: "Signal Lost" },
+    };
+
+    const fetchMcStatus = useCallback(async () => {
+        if (!machineName || !currentDateStr) return;
+        try {
+            const res = await axios.get(`${config.apiServer}/api/mcstatus/timeline`, {
+                params: { machine_name: machineName, date: currentDateStr }
+            });
+            setMcStatusData(res.data.results || []);
+        } catch (e) {
+            console.error("MC Status fetch error:", e);
+        }
+    }, [machineName, currentDateStr]);
+
+    // Fetch on tab switch & poll every 5 minutes + countdown
+    useEffect(() => {
+        if (activeTab !== "status") return;
+        fetchMcStatus();
+        setCountdown(300);
+        const fetchId = setInterval(() => {
+            fetchMcStatus();
+            setCountdown(300);
+        }, 5 * 60 * 1000);
+        const tickId = setInterval(() => {
+            setCountdown(prev => prev > 0 ? prev - 1 : 0);
+        }, 1000);
+        return () => { clearInterval(fetchId); clearInterval(tickId); };
+    }, [activeTab, fetchMcStatus]);
+
+    // Draw canvas when data changes
+    useEffect(() => {
+        if (activeTab !== "status") return;
+        const canvas = mcStatusCanvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+
+        // High-DPI support
+        const dpr = window.devicePixelRatio || 1;
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        ctx.scale(dpr, dpr);
+        const W = rect.width;
+        const H = rect.height;
+
+        // Clear
+        ctx.clearRect(0, 0, W, H);
+
+        // Layout constants
+        const labelAreaW = 50;   // "Shift" / "Status" labels
+        const chartX = labelAreaW;
+        const chartW = W - labelAreaW - 10;
+        const shiftRowY = 10;
+        const shiftRowH = 22;
+        const barY = shiftRowY + shiftRowH + 4;
+        const barH = 36;
+        const totalMinutes = 1440; // 24 hours
+        const mShiftEnd = 720;     // 12 hours = M shift ends
+
+        // Helper: datetime → minutes on timeline (UTC ตรงๆ)
+        // Prisma แปลง TH local → UTC ให้แล้ว: TH 07:00 = UTC 00:00Z = นาทีที่ 0
+        const toMinSince0700 = (dtStr: string): number => {
+            const d = new Date(dtStr);
+            return d.getUTCHours() * 60 + d.getUTCMinutes() + d.getUTCSeconds() / 60;
+        };
+
+        // --- Draw Shift Row ---
+        ctx.fillStyle = "#f8f9fa";
+        ctx.fillRect(chartX, shiftRowY, chartW, shiftRowH);
+        ctx.strokeStyle = "#dee2e6";
+        ctx.strokeRect(chartX, shiftRowY, chartW, shiftRowH);
+
+        // M Shift label (left half)
+        const mEndX = chartX + (mShiftEnd / totalMinutes) * chartW;
+        ctx.fillStyle = "#333";
+        ctx.font = "bold 12px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("M Shift", chartX + (mEndX - chartX) / 2, shiftRowY + shiftRowH / 2);
+
+        // N Shift label (right half)
+        ctx.fillText("N Shift", mEndX + (chartX + chartW - mEndX) / 2, shiftRowY + shiftRowH / 2);
+
+        // Divider line between M and N
+        ctx.strokeStyle = "#333";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(mEndX, shiftRowY);
+        ctx.lineTo(mEndX, barY + barH);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+
+        // Left labels
+        ctx.fillStyle = "#555";
+        ctx.font = "bold 11px sans-serif";
+        ctx.textAlign = "right";
+        ctx.fillText("Shift", labelAreaW - 6, shiftRowY + shiftRowH / 2);
+        ctx.fillText("Status", labelAreaW - 6, barY + barH / 2);
+
+        // --- Helper: minutes since 07:00 → TH time string ---
+        const minToTimeStr = (min: number): string => {
+            let h = Math.floor(min / 60) + 7;
+            if (h >= 24) h -= 24;
+            const m = Math.floor(min % 60);
+            return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+        };
+
+        // --- Build segments from data ---
+        const segments: { startMin: number; endMin: number; status: string; startTime: string; endTime: string }[] = [];
+
+        if (mcStatusData.length > 0) {
+            for (let i = 0; i < mcStatusData.length; i++) {
+                const startMin = toMinSince0700(mcStatusData[i].datetime);
+                let endMin: number;
+                let endTimeLabel: string;
+                if (i + 1 < mcStatusData.length) {
+                    endMin = toMinSince0700(mcStatusData[i + 1].datetime);
+                    endTimeLabel = minToTimeStr(endMin);
+                } else {
+                    const now = new Date();
+                    const currentMin = now.getUTCHours() * 60 + now.getUTCMinutes();
+                    const todayStr = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD เวลาไทย
+                    if (currentDateStr === todayStr) {
+                        endMin = Math.min(currentMin, 1440);
+                        endTimeLabel = "Now";
+                    } else {
+                        endMin = 1440;
+                        endTimeLabel = "06:59";
+                    }
+                }
+                segments.push({
+                    startMin, endMin,
+                    status: mcStatusData[i].mc_status,
+                    startTime: minToTimeStr(startMin),
+                    endTime: endTimeLabel,
+                });
+            }
+        }
+
+        // Store segments ref for tooltip
+        mcSegmentsRef.current = segments;
+
+        // --- Draw status bar segments ---
+        ctx.strokeStyle = "#dee2e6";
+        ctx.strokeRect(chartX, barY, chartW, barH);
+
+        for (const seg of segments) {
+            const x1 = chartX + (seg.startMin / totalMinutes) * chartW;
+            const x2 = chartX + (seg.endMin / totalMinutes) * chartW;
+            const w = Math.max(x2 - x1, 1);
+            const statusInfo = MC_STATUS_COLORS[seg.status];
+            ctx.fillStyle = statusInfo ? statusInfo.color : "#ccc";
+            ctx.fillRect(x1, barY, w, barH);
+        }
+
+        // --- Draw hour tick marks ---
+        ctx.strokeStyle = "#aaa";
+        ctx.fillStyle = "#666";
+        ctx.font = "10px sans-serif";
+        ctx.textAlign = "center";
+        const hourLabels = ["07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "00", "01", "02", "03", "04", "05", "06"];
+        for (let i = 0; i <= 24; i++) {
+            const x = chartX + (i * 60 / totalMinutes) * chartW;
+            ctx.beginPath();
+            ctx.moveTo(x, barY + barH);
+            ctx.lineTo(x, barY + barH + 5);
+            ctx.stroke();
+            if (i < 24) {
+                ctx.fillText(hourLabels[i], x + (60 / totalMinutes * chartW) / 2, barY + barH + 15);
+            }
+        }
+
+    }, [activeTab, mcStatusData, currentDateStr]);
+
+    // ================= Downtime Breakdown Chart =================
+    useEffect(() => {
+        const segments = mcSegmentsRef.current;
+        if (!segments || segments.length === 0) { setDowntimeChartData(null); return; }
+
+        // Aggregate duration per status
+        const durationMap: Record<string, number> = {};
+        let totalElapsed = 0;
+        for (const seg of segments) {
+            const dur = Math.max(seg.endMin - seg.startMin, 0);
+            durationMap[seg.status] = (durationMap[seg.status] || 0) + dur;
+            totalElapsed += dur;
+        }
+        if (totalElapsed === 0) { setDowntimeChartData(null); return; }
+
+        // Categories to show (exclude Run_Time, Break_Time — show all others)
+        const DOWNTIME_KEYS = [
+            "Plan_Stop", "Break_Time",
+            "MM_Repair", "MM_Check_Master", "MM_Preventive",
+            "Setter_Adjust", "Setter_Check_Master", "Setter_Preventive",
+            "QC_Quality", "QC_Check_Master",
+            "Prod_Cleaning", "Prod_Check_Master",
+            "Wait_Part", "MC_Stop", "MC_Alarm", "Cut_Lot", "Signal_Lost",
+        ];
+
+        const labels: string[] = [];
+        const values: number[] = [];
+        const colors: string[] = [];
+        for (const key of DOWNTIME_KEYS) {
+            labels.push(MC_STATUS_COLORS[key]?.label || key);
+            values.push(parseFloat((((durationMap[key] || 0) / totalElapsed) * 100).toFixed(1)));
+            colors.push(MC_STATUS_COLORS[key]?.color || "#ccc");
+        }
+
+        // เก็บ durationMap ใน state (Chart.js จะ strip custom props ออกจาก data)
+        const durMap: Record<string, number> = {};
+        for (const key of DOWNTIME_KEYS) {
+            durMap[MC_STATUS_COLORS[key]?.label || key] = durationMap[key] || 0;
+        }
+        setDowntimeDurationMap(durMap);
+
+        setDowntimeChartData({
+            labels,
+            datasets: [{
+                label: "Downtime %",
+                data: values,
+                backgroundColor: colors,
+                borderRadius: 4,
+            }],
+        });
+    }, [mcStatusData]);
+
+    // ================= MC Status Tooltip Handlers =================
+
+    const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+        const canvas = mcStatusCanvasRef.current;
+        if (!canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        // Chart layout constants (must match draw code)
+        const labelAreaW = 50;
+        const chartX = labelAreaW;
+        const chartW = rect.width - labelAreaW - 10;
+        const barY = 10 + 22 + 4; // shiftRowY + shiftRowH + 4
+        const barH = 36;
+        const totalMinutes = 1440;
+
+        // Check if mouse is within the bar area
+        if (mouseY < barY || mouseY > barY + barH || mouseX < chartX || mouseX > chartX + chartW) {
+            setMcTooltip(null);
+            return;
+        }
+
+        // Find which segment the mouse is over
+        const minAtMouse = ((mouseX - chartX) / chartW) * totalMinutes;
+        const seg = mcSegmentsRef.current.find(s => minAtMouse >= s.startMin && minAtMouse < s.endMin);
+        if (seg) {
+            const durMin = seg.endMin - seg.startMin;
+            const durH = Math.floor(durMin / 60);
+            const durM = Math.floor(durMin % 60);
+            const duration = durH > 0 ? `${durH}h ${durM}m` : `${durM}m`;
+            setMcTooltip({
+                visible: true,
+                x: e.clientX - rect.left,
+                y: e.clientY - rect.top - 60,
+                status: seg.status,
+                startTime: seg.startTime,
+                endTime: seg.endTime,
+                duration,
+            });
+        } else {
+            setMcTooltip(null);
+        }
+    };
+
+    const handleCanvasMouseLeave = () => {
+        setMcTooltip(null);
     };
 
     // ================= Handlers =================
@@ -605,7 +1067,7 @@ function MachineWorkingInner() {
         }
     };
 
-    // [Graph 2] CT & Efficiency Monitor Options
+    // [Graph 2] CT & Availability Monitor Options
     const optionsGraph2: ChartOptions<"bar" | "line"> = {
         responsive: true,
         maintainAspectRatio: false,
@@ -635,7 +1097,7 @@ function MachineWorkingInner() {
                 type: 'linear',
                 display: true,
                 position: 'right',
-                title: { display: true, text: 'Efficiency [%]', color: '#ed7d31' },
+                title: { display: true, text: 'Availability [%]', color: '#ed7d31' },
                 min: 0,
                 max: 120,
                 grid: { drawOnChartArea: false }
@@ -646,7 +1108,7 @@ function MachineWorkingInner() {
     // ================= Render =================
 
     return (
-        <div className="container-fluid min-vh-100 d-flex flex-column bg-light overflow-auto">
+        <div className="container-fluid vh-100 d-flex flex-column bg-light" style={{ overflow: "hidden" }}>
             <div className="row flex-grow-1 p-3">
                 <div className="col-12 d-flex flex-column">
 
@@ -689,7 +1151,25 @@ function MachineWorkingInner() {
                                             </td>
                                             {/* Machine Info */}
                                             <td className="fw-bold text-primary">{machineName}</td>
-                                            <td>{tableData.model}</td>
+                                            <td>
+                                                {modelsList.length > 1 ? (
+                                                    <select
+                                                        className="form-select form-select-sm d-inline-block w-auto mx-auto"
+                                                        style={{ fontSize: "1rem" }}
+                                                        value={selectedModel}
+                                                        onChange={(e) => {
+                                                            setSelectedModel(e.target.value);
+                                                            fetchAllData(machineName, currentDateStr);
+                                                        }}
+                                                    >
+                                                        {modelsList.map(model => (
+                                                            <option key={model} value={model}>{model}</option>
+                                                        ))}
+                                                    </select>
+                                                ) : (
+                                                    <span>{tableData.model}</span>
+                                                )}
+                                            </td>
                                             {/* Achieve */}
                                             <td>
                                                 <span className={`fw-bold ${tableData.achieve >= 100 ? "text-success" : "text-danger"}`}>
@@ -743,7 +1223,7 @@ function MachineWorkingInner() {
                                         <tr className="table-light fw-bold text-secondary" style={{ fontSize: "0.9rem" }}>
                                             <td>Output</td>
                                             <td>Cycle Time</td>
-                                            <td>Efficiency</td>
+                                            <td>Availability</td>
                                         </tr>
                                         {/* Row 3: Actual Data */}
                                         <tr>
@@ -759,7 +1239,7 @@ function MachineWorkingInner() {
                                                 {tableData.ctActual.toFixed(2)} <small className="fs-6 fw-normal">sec</small>
                                             </td>
 
-                                            {/* ✅ แก้ไข Efficiency: ถ้าประสิทธิภาพจริง "น้อยกว่า" เป้าหมาย (แย่) = สีแดง, ถ้ามากกว่าหรือเท่ากับ (ดี) = สีเขียว */}
+                                            {/* ✅ แก้ไข Availability: ถ้าประสิทธิภาพจริง "น้อยกว่า" เป้าหมาย (แย่) = สีแดง, ถ้ามากกว่าหรือเท่ากับ (ดี) = สีเขียว */}
                                             <td className={`fw-bold fs-5 ${tableData.effActual < tableData.effTarget ? "text-danger" : "text-success"}`}>
                                                 {tableData.effActual.toFixed(2)} <small className="fs-6 fw-normal">%</small>
                                             </td>
@@ -777,49 +1257,204 @@ function MachineWorkingInner() {
                         </div>
                     </div>
 
-                    {/* --- GRAPH SECTION (Split 2 Columns) --- */}
-                    <div className="row g-3 flex-grow-1">
-                        {/* Graph 1: Output */}
-                        <div className="col-md-6 d-flex">
-                            <div className="card w-100 shadow-sm border border-dark position-relative">
-                                {/* ✅ ชื่อกราฟ 1 */}
-                                <div className="card-header bg-white fw-bold text-center py-1 fs-5">Output Monitor</div>
-                                <div className="card-body p-2 position-relative">
-                                    {graph1Data ? (
-                                        <Chart type="bar" data={graph1Data} options={optionsGraph1} />
-                                    ) : (
-                                        <div className="d-flex align-items-center justify-content-center h-100 text-muted">Loading Graph 1...</div>
-                                    )}
+                    {/* --- CONTENT AREA --- */}
+                    {activeTab === "output" ? (
+                        /* --- GRAPH SECTION (Split 2 Columns) --- */
+                        <div className="row g-3 flex-grow-1">
+                            {/* Graph 1: Output */}
+                            <div className="col-md-6 d-flex">
+                                <div className="card w-100 shadow-sm border border-dark position-relative">
+                                    <div className="card-header bg-white fw-bold text-center py-1 fs-5">Output Monitor</div>
+                                    <div className="card-body p-2 position-relative">
+                                        {graph1Data ? (
+                                            <Chart type="bar" data={graph1Data} options={optionsGraph1} />
+                                        ) : (
+                                            <div className="d-flex align-items-center justify-content-center h-100 text-muted">Loading Graph 1...</div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Graph 2: CT & Eff — Tab buttons in top-right */}
+                            <div className="col-md-6 d-flex">
+                                <div className="card w-100 shadow-sm border border-dark position-relative">
+                                    {/* Tab buttons + status badge in header */}
+                                    <div className="card-header bg-white py-1 d-flex align-items-center">
+                                        <span className="fw-bold fs-5 flex-grow-1 text-center">Cycle Time & Availability Monitor</span>
+                                        <div className="d-flex gap-1 ms-2 align-items-center">
+                                            {isViewingToday ? (
+                                                <span className="badge bg-success">📡 Real-time</span>
+                                            ) : (
+                                                <span className="badge bg-secondary">History</span>
+                                            )}
+                                            <button
+                                                className="btn btn-sm btn-outline-primary fw-bold px-2 py-0"
+                                                onClick={() => { setActiveTab("status"); localStorage.setItem("machineWorkingTab", "status"); }}
+                                                title="Switch to Machine Status"
+                                            >
+                                                <i className="fas fa-cogs me-1"></i>MC Status
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div className="card-body p-2">
+                                        {graph2Data ? (
+                                            <Chart type="bar" data={graph2Data} options={optionsGraph2} />
+                                        ) : (
+                                            <div className="d-flex align-items-center justify-content-center h-100 text-muted">Loading Graph 2...</div>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
                         </div>
-
-                        {/* Graph 2: CT & Eff */}
-                        <div className="col-md-6 d-flex">
-                            <div className="card w-100 shadow-sm border border-dark position-relative">
-                                {/* Refresh Timer */}
-                                <div
-                                    className="position-absolute d-flex align-items-center px-2 py-1 rounded bg-light border"
-                                    style={{ top: "10px", right: "10px", zIndex: 10, fontSize: "0.8rem" }}
-                                >
-                                    <i className="fas fa-sync-alt me-2 text-primary"></i>
-                                    <span className="fw-bold text-dark">
-                                        {Math.floor(countdown / 60)}:{String(countdown % 60).padStart(2, "0")}
-                                    </span>
+                    ) : (
+                        /* --- MACHINE STATUS TIMELINE --- */
+                        <div className="card shadow-sm border border-dark flex-grow-1">
+                            {/* Header with tab buttons + countdown */}
+                            <div className="card-body p-3 d-flex flex-column justify-content-start align-items-center position-relative" style={{ overflow: "hidden" }}>
+                                {/* Header Title (Perfectly Centered) */}
+                                <div className="w-100 text-center fw-bold fs-5 py-2 border-bottom mb-3 relative">
+                                    Machine Status Timeline
+                                    {/* Right-aligned buttons (Absolute positioning to not affect centering) */}
+                                    <div className="position-absolute end-0 top-0 mt-2 me-3 d-flex gap-1 align-items-center">
+                                        <span className="badge bg-info">
+                                            🔄 {Math.floor(countdown / 60)}:{String(countdown % 60).padStart(2, '0')}
+                                        </span>
+                                        <button
+                                            className="btn btn-sm btn-outline-primary fw-bold px-2 py-0"
+                                            onClick={() => { setActiveTab("output"); localStorage.setItem("machineWorkingTab", "output"); }}
+                                            title="Switch to Output & CT & Eff"
+                                        >
+                                            <i className="fas fa-chart-bar me-1"></i>Output
+                                        </button>
+                                    </div>
                                 </div>
+                                {mcStatusData.length === 0 ? (
+                                    <div className="d-flex align-items-center justify-content-center h-100 text-muted py-5">
+                                        <div className="text-center">
+                                            <i className="fas fa-info-circle fs-1 mb-2"></i>
+                                            <div>No Status Data for this date</div>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="w-100 d-flex flex-column" style={{ flex: 1, minHeight: 0 }}>
+                                        <div className="position-relative" style={{ flexShrink: 0 }}>
+                                            <canvas
+                                                ref={mcStatusCanvasRef}
+                                                style={{ width: "100%", height: "100px", display: "block", cursor: "crosshair" }}
+                                                onMouseMove={handleCanvasMouseMove}
+                                                onMouseLeave={handleCanvasMouseLeave}
+                                            />
+                                            {/* Tooltip */}
+                                            {mcTooltip && mcTooltip.visible && (
+                                                <div
+                                                    className="position-absolute bg-dark text-white rounded shadow px-2 py-1"
+                                                    style={{
+                                                        left: mcTooltip.x,
+                                                        top: mcTooltip.y,
+                                                        transform: "translateX(-50%)",
+                                                        pointerEvents: "none",
+                                                        zIndex: 100,
+                                                        fontSize: "0.8rem",
+                                                        whiteSpace: "nowrap",
+                                                    }}
+                                                >
+                                                    <div className="d-flex align-items-center gap-1">
+                                                        <div style={{
+                                                            width: 10, height: 10,
+                                                            backgroundColor: MC_STATUS_COLORS[mcTooltip.status]?.color || "#ccc",
+                                                            borderRadius: 2,
+                                                        }}></div>
+                                                        <strong>{MC_STATUS_COLORS[mcTooltip.status]?.label || mcTooltip.status}</strong>
+                                                    </div>
+                                                    <div>{mcTooltip.startTime} → {mcTooltip.endTime} ({mcTooltip.duration})</div>
+                                                </div>
+                                            )}
+                                        </div>
 
-                                {/* ✅ ชื่อกราฟ 2 */}
-                                <div className="card-header bg-white fw-bold text-center py-1 fs-5">Cycle Time & Efficiency Monitor</div>
-                                <div className="card-body p-2">
-                                    {graph2Data ? (
-                                        <Chart type="bar" data={graph2Data} options={optionsGraph2} />
-                                    ) : (
-                                        <div className="d-flex align-items-center justify-content-center h-100 text-muted">Loading Graph 2...</div>
-                                    )}
-                                </div>
+                                        {/* Downtime Breakdown Chart — flex-grow to fill remaining space */}
+                                        {downtimeChartData && (
+                                            <div className="mt-0" style={{ flex: "1 1 0", minHeight: "220px", overflow: "visible" }}>
+                                                <div className="text-center fw-bold" style={{ fontSize: "0.9rem", color: "#333", marginBottom: 2 }}>Downtime Breakdown (%)</div>
+                                                <Chart type="bar" data={downtimeChartData}
+                                                    plugins={[{
+                                                        id: "coloredXLabels",
+                                                        afterDraw: (chart: any) => {
+                                                            const { ctx } = chart;
+                                                            const xAxis = chart.scales.x;
+                                                            const bgColors = chart.data.datasets[0]?.backgroundColor || [];
+                                                            const labels = chart.data.labels || [];
+                                                            const y = xAxis.bottom + 6;
+                                                            const boxSize = 10;
+                                                            ctx.save();
+                                                            ctx.font = "9px sans-serif";
+                                                            ctx.textBaseline = "top";
+                                                            labels.forEach((label: string, i: number) => {
+                                                                const x = xAxis.getPixelForTick(i);
+                                                                const textWidth = ctx.measureText(label).width;
+                                                                const totalWidth = boxSize + 3 + textWidth;
+                                                                const startX = x - totalWidth / 2;
+                                                                // สี่เหลี่ยมสี
+                                                                ctx.fillStyle = bgColors[i] || "#ccc";
+                                                                ctx.fillRect(startX, y, boxSize, boxSize);
+                                                                ctx.strokeStyle = "#bbb";
+                                                                ctx.lineWidth = 0.5;
+                                                                ctx.strokeRect(startX, y, boxSize, boxSize);
+                                                                // ข้อความสีดำ
+                                                                ctx.fillStyle = "#333";
+                                                                ctx.textAlign = "left";
+                                                                ctx.fillText(label, startX + boxSize + 3, y);
+                                                            });
+                                                            ctx.restore();
+                                                        },
+                                                    }]}
+                                                    options={{
+                                                        responsive: true,
+                                                        maintainAspectRatio: false,
+                                                        animation: false,
+                                                        plugins: {
+                                                            legend: { display: false },
+                                                            title: { display: false },
+                                                            tooltip: {
+                                                                callbacks: {
+                                                                    label: (ctx: any) => {
+                                                                        const pct = ctx.parsed.y || 0;
+                                                                        const statusLabel = ctx.label || "";
+                                                                        const mins = downtimeDurationMap[statusLabel] || 0;
+                                                                        const hh = Math.floor(mins / 60);
+                                                                        const mm = Math.floor(mins % 60);
+                                                                        const ss = Math.round((mins % 1) * 60);
+                                                                        return `${pct}% — ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+                                                                    }
+                                                                }
+                                                            },
+                                                            datalabels: {
+                                                                display: true,
+                                                                anchor: "end",
+                                                                align: "top",
+                                                                offset: 1,
+                                                                color: "#333",
+                                                                font: { weight: "bold", size: 11 },
+                                                                formatter: (val: number) => val > 0 ? `${val}%` : null,
+                                                            },
+                                                        },
+                                                        layout: { padding: { top: 24, bottom: 28 } },
+                                                        scales: {
+                                                            x: {
+                                                                grid: { display: false },
+                                                                ticks: { display: false },
+                                                            },
+                                                            y: { beginAtZero: true, ticks: { callback: (val: any) => `${val}%`, font: { size: 10 } }, grid: { color: "#eee" } },
+                                                        },
+                                                    } as any} />
+                                            </div>
+                                        )}
+
+
+                                    </div>
+                                )}
                             </div>
                         </div>
-                    </div>
+                    )}
 
                 </div>
             </div>

@@ -6,28 +6,23 @@ import { usePathname } from "next/navigation"; // ✅ เพิ่มบนส�
 export default function Sidebar() {
     const router = useRouter();
     const [openMenu, setOpenMenu] = useState(false);
-    const [prevCollapsed, setPrevCollapsed] = useState(false);
-    const [mounted, setMounted] = useState(false); // ✅ เพิ่มบรรทัดนี้
+    const [mounted, setMounted] = useState(false);
 
     useEffect(() => {
         setMounted(true); // ✅ ให้ render หลังจาก client mount แล้วเท่านั้น
     }, []);
 
-    // ✅ ตรวจจับ class "sidebar-collapse" แบบ real-time
+    // ✅ ตรวจจับ class "sidebar-collapse" ด้วย MutationObserver (แทน setInterval)
     useEffect(() => {
-        const interval = setInterval(() => {
+        const observer = new MutationObserver(() => {
             const collapsed = document.body.classList.contains("sidebar-collapse");
-
-            // 🔸 ตรวจจับการเปลี่ยนสถานะ (จาก false -> true)
-            if (collapsed && !prevCollapsed) {
+            if (collapsed) {
                 setOpenMenu(false);
             }
-
-            setPrevCollapsed(collapsed);
-        }, 100); // ตรวจทุก 0.1 วินาที
-
-        return () => clearInterval(interval);
-    }, [prevCollapsed]);
+        });
+        observer.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+        return () => observer.disconnect();
+    }, []);
 
     // ✅ ปิด dropdown เมื่อเมาส์ออกจาก sidebar (เฉพาะตอนอยู่ในโหมดหุบแบบ hover)
     useEffect(() => {
@@ -168,6 +163,30 @@ export default function Sidebar() {
                                     style={{ color: "#60A5FA" }}
                                 ></i>
                                 <p style={{ marginLeft: "5px" }}>Machine Report</p>
+                            </Link>
+                        </li>
+
+                        {/* 🔹 Update OEE */}
+                        <li className="nav-item">
+                            <Link
+                                href="/oee_production/update_oee/"
+                                className={`nav-link ${isActive("/oee_production/update_oee/") ? "active" : ""
+                                    }`}
+                                style={{
+                                    backgroundColor: isActive("/oee_production/update_oee/")
+                                        ? "#3B82F6"
+                                        : "#334155",
+                                    color: "#E2E8F0",
+                                    marginBottom: "4px",
+                                    borderRadius: "6px",
+                                    transition: "all 0.2s ease",
+                                }}
+                            >
+                                <i
+                                    className="nav-icon fas fa-sync-alt"
+                                    style={{ color: "#60A5FA" }}
+                                ></i>
+                                <p style={{ marginLeft: "5px" }}>Update OEE</p>
                             </Link>
                         </li>
 
