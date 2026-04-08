@@ -40,15 +40,13 @@ const fileUpload = require("express-fileupload");
 const bodyParser = require("body-parser");
 const port = process.env.PORT || 5005;
 
-// 🆕 Services
-const { initClient } = require("./services/influxService");
-const { hydrateFromMSSQL } = require("./services/cacheService");
-const { startCronJobs, backfillStartup, upsertOeeHourly, backfillOeeStartup } = require("./services/cronService");
-const { startRealtimePolling } = require("./services/realtimeService");
-
 // 1️⃣ ต้อง parse JSON ก่อน (สำคัญสุด)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// ✅ Gzip Compression — ลด bandwidth ~80% (ต้องอยู่ก่อน static/routes ทั้งหมด)
+const compression = require("compression");
+app.use(compression());
 
 // 2️⃣ เปิด CORS ก่อน routes
 app.use(cors());
@@ -63,9 +61,38 @@ app.use(fileUpload());
 // 5️⃣ Static files
 app.use("/image", express.static("image"));
 
-// ✅ Serve Static Frontend
+// ✅ Serve Static Frontend with smart Cache-Control
 const path = require("path");
-app.use(express.static(path.join(__dirname, "../fontend/out"), { extensions: ["html"] }));
+const frontendOut = path.join(__dirname, "../fontend/out");
+
+// Next.js hashed chunks (_next/static/) → cache 1 ปี (ชื่อไฟล์มี hash, เปลี่ยนทุก build)
+app.use("/_next/static", express.static(path.join(frontendOut, "_next/static"), {
+  maxAge: "365d",
+  immutable: true,
+}));
+
+// Static assets (bootstrap, plugins, dist) → cache 7 วัน
+app.use("/bootstrap", express.static(path.join(frontendOut, "bootstrap"), { maxAge: "7d" }));
+app.use("/plugins", express.static(path.join(frontendOut, "plugins"), { maxAge: "7d" }));
+app.use("/dist", express.static(path.join(frontendOut, "dist"), { maxAge: "7d" }));
+
+// HTML pages → ห้าม cache เด็ดขาด (ป้องกัน browser เก็บ gzip payload แล้วกด F5 เป็นภาษาต่างดาว)
+app.use(express.static(frontendOut, {
+  extensions: ["html"],
+  etag: false,
+  lastModified: false,
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith(".html")) {
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+    }
+  },
+}));
+
+// ✅ Initialize InfluxDB client in Main Thread (for API controllers that query InfluxDB)
+const { initClient } = require("./services/influxService");
+initClient();
 
 // ✅ Controllers//
 const oeeDashboardController = require("./controllers/OeeDashboardController");
@@ -74,20 +101,23 @@ const outputTargetController = require("./controllers/OutputTargetController");
 const historyWorkingController = require("./controllers/HistoryWorkingController");
 const machineController = require("./controllers/MachineController");
 const reportController = require("./controllers/ReportController"); // 🆕
+const machineNgController = require("./controllers/MachineNgController"); // 🆕
 const mcStatusController = require("./controllers/MCStatusController"); // 🆕 Machine Status
 const planConfigController = require("./controllers/PlanConfigController"); // 🆕 Plan Config
 const holidayController = require("./controllers/HolidayController"); // 🆕 Holidays
 const oeeUpdateController = require("./controllers/OeeUpdateController"); // 🆕 OEE Update
 
+const { apiCache } = require("./middleware/apiCacheMiddleware"); // 🆕 API Cache
+
 // =========================================
 // 📦 OEE DASHBOARD ROUTES
 // =========================================
 app.get("/api/oee/getPicture/:emp_no", oeeDashboardController.getOperatorPicture);
-app.get("/api/oee/getLastOEE", oeeDashboardController.getLastOEEByMachine);
-app.get("/api/oee/getDataTable", oeeDashboardController.getDataTable);
-app.get("/api/oee/getGraph1", oeeDashboardController.getActualGraph1);
-app.get("/api/oee/getGraph2", oeeDashboardController.getActualGraph2);
-app.get("/api/oee/getModelsByDate", oeeDashboardController.getModelsByDate);
+app.get("/api/oee/getLastOEE", apiCache(5), oeeDashboardController.getLastOEEByMachine);
+app.get("/api/oee/getDataTable", apiCache(5), oeeDashboardController.getDataTable);
+app.get("/api/oee/getGraph1", apiCache(5), oeeDashboardController.getActualGraph1);
+app.get("/api/oee/getGraph2", apiCache(5), oeeDashboardController.getActualGraph2);
+app.get("/api/oee/getModelsByDate", apiCache(5), oeeDashboardController.getModelsByDate);
 // =========================================
 // 🧩 MODEL ROUTES
 // =========================================
@@ -154,6 +184,7 @@ app.get("/api/machine/getMachinesWithTodayData", machineController.getMachinesWi
 
 // ... REPORT ROUTES
 app.get("/api/report/machine-report", reportController.getMachineReport); // 🆕 // ✅ Add Route
+app.get("/api/report/machine-ng-report", machineNgController.getMachineNgReport); // 🆕 Machine NG Report Route
 
 // =========================================
 // 📊 MC STATUS ROUTES
@@ -161,51 +192,80 @@ app.get("/api/report/machine-report", reportController.getMachineReport); // �
 app.get("/api/mcstatus/timeline", mcStatusController.getTimeline); // 🆕 Machine Status Timeline
 app.get("/api/mcstatus/latest-all", mcStatusController.getLatestAll); // 🆕 Latest status for all machines
 
+// =========================================
+// ⚙️ CONFIG ROUTES
+// =========================================
+const configRoutes = require("./routes/configRoutes");
+app.use("/api/config", configRoutes);
+
 // 🆕 SERVER TIME ENDPOINT
 app.get("/api/oee/getServerTime", (req, res) => {
   res.json({ serverTimeUTC: new Date().toISOString() });
 });
 
 // ✅ Catch-All Route for SPA (must be last)
-app.get(/(.*)/, (req, res) => {
-  res.sendFile(path.join(__dirname, "../fontend/out/index.html"));
+app.get(/(.*)/, (req, res, next) => {
+  // ข้าม API routes และ static file requests (มี extension เช่น .js, .css, .png)
+  if (req.path.startsWith("/api/") || req.path.match(/\.\w+$/)) {
+    return next();
+  }
+
+  // ✅ ป้องกัน browser cache gzip payload → กด F5 แล้วเป็นภาษาต่างดาว
+  res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+
+  // ลองส่งไฟล์ HTML ตรงตาม path ก่อน (เช่น /oee_production/machine_report/ → out/.../index.html)
+  const htmlPath = path.join(frontendOut, req.path, "index.html");
+  res.sendFile(htmlPath, (err) => {
+    if (err) {
+      // ถ้าไม่พบหน้านั้น → ส่ง root index.html เป็น SPA fallback
+      res.sendFile(path.join(frontendOut, "index.html"));
+    }
+  });
 });
 
-// ✅ ASYNC STARTUP SEQUENCE
-async function startup() {
-  try {
-    // 1. Initialize InfluxDB client
-    initClient();
+// ✅ Worker Thread — Background services run in separate thread
+const { Worker } = require("worker_threads");
 
-    // 2. Hydrate cache from MSSQL
-    await hydrateFromMSSQL();
+// Start Express server FIRST — so frontend can connect immediately
+server.listen(port, () => {
+  console.log("🚀 API server running at port", port);
 
-    // 2.1 Backfill missing data for current shift
-    await backfillStartup();
+  // Spawn worker thread AFTER Express is listening
+  const worker = new Worker("./worker.js");
 
-    // 2.2 OEE: upsert availability + performance to tb_oee immediately
-    await upsertOeeHourly();
+  // ── IPC: Worker → Main Thread (Socket.IO emit) ──
+  const handleWorkerMessage = (msg) => {
+    switch (msg.type) {
+      case "emit":
+        io.to(msg.room).emit(msg.event, msg.data);
+        break;
+      case "broadcast":
+        io.emit(msg.event, msg.data);
+        break;
+      case "log":
+        console.log(`[Worker] ${msg.message}`);
+        break;
+    }
+  };
 
-    // 2.3 OEE Backfill: recalc availability + performance for past 5 days
-    await backfillOeeStartup();
+  worker.on("message", handleWorkerMessage);
 
-    // 3. Start cron jobs
-    startCronJobs();
+  worker.on("error", (err) => {
+    console.error("❌ Worker thread error:", err);
+  });
 
-    // 4. Start real-time polling + Socket.IO
-    startRealtimePolling(io);
+  worker.on("exit", (code) => {
+    if (code !== 0) {
+      console.error(`⚠️ Worker thread exited with code ${code}, restarting...`);
+      // Auto-restart worker on crash
+      setTimeout(() => {
+        const newWorker = new Worker("./worker.js");
+        newWorker.on("message", handleWorkerMessage); // ✅ Fixed: properly bind the message handler
+        newWorker.on("error", (err) => console.error("❌ Worker error:", err));
+      }, 2000);
+    }
+  });
 
-    // 5. Listen
-    server.listen(port, () => {
-      console.log("🚀 API server running at port", port);
-    });
-  } catch (err) {
-    console.error("❌ Startup failed:", err);
-    // Still start server even if services fail
-    server.listen(port, () => {
-      console.log("⚠️ API server running at port", port, "(some services failed)");
-    });
-  }
-}
-
-startup();
+  console.log("🔧 Worker thread spawned for background services");
+});

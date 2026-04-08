@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import axios from "axios";
 import config from "@/app/config";
+import { getSocket } from "@/app/lib/socketManager";
 import {
     Chart as ChartJS,
     CategoryScale,
@@ -20,6 +21,7 @@ import {
 import { Chart } from "react-chartjs-2";
 import ChartDataLabels from 'chartjs-plugin-datalabels';
 import dayjs from "dayjs";
+import { getStatusColors, getDowntimeKeys } from "@/app/lib/machineStatusConfig";
 
 // Register Chart.js components
 ChartJS.register(
@@ -39,37 +41,30 @@ ChartJS.register(
 interface OverallMachineCardProps {
     machineName: string;
     date: string;
-    scaleFactor?: number;  // Optional, defaults to 1.0
+    scaleFactor?: number;
 
-    refreshTrigger?: number; // Optional, to trigger auto-refresh
-    realtimeData?: any; // New prop for socket data
-    activeView?: "output" | "status"; // Toggle between Output and MC Status
-    mcStatusRefreshTrigger?: number; // Trigger MC Status re-fetch from parent
+    refreshTrigger?: number;
+    realtimeData?: any;
+    activeView?: "output" | "status";
+    mcStatusRefreshTrigger?: number;
+    onLoginClick?: (machineName: string) => void; // ✅ Login button callback
+    onLogoutClick?: (machineName: string, historyId: number, operatorCode: string) => void; // ✅ Remote logout callback
+    isSingleView?: boolean; // ✅ For better layout when only 1 machine
 }
 
-// MC Status color mapping (same as machine_working)
-const MC_STATUS_COLORS: Record<string, { color: string; label: string }> = {
-    Run_Time: { color: "#2ca02c", label: "Run Time" },
-    Plan_Stop: { color: "#aec7e8", label: "Plan Stop" },
-    Break_Time: { color: "#ffbb78", label: "Break Time" },
-    MM_Repair: { color: "#d62728", label: "MM Repair" },
-    MM_Check_Master: { color: "#ff7f0e", label: "MM Check Master" },
-    MM_Preventive: { color: "#e377c2", label: "MM Preventive" },
-    Setter_Adjust: { color: "#9467bd", label: "Setter Adjust" },
-    Setter_Check_Master: { color: "#8c564b", label: "Setter Check Master" },
-    Setter_Preventive: { color: "#c49c94", label: "Setter Preventive" },
-    QC_Quality: { color: "#1f77b4", label: "QC Quality" },
-    QC_Check_Master: { color: "#17becf", label: "QC Check Master" },
-    Prod_Cleaning: { color: "#bcbd22", label: "Prod Cleaning" },
-    Prod_Check_Master: { color: "#98df8a", label: "Prod Check Master" },
-    Wait_Part: { color: "#ff9896", label: "Wait Part" },
-    MC_Stop: { color: "#7f7f7f", label: "Machine Stop" },
-    MC_Alarm: { color: "#c62828", label: "MC Alarm" },
-    Cut_Lot: { color: "#dbdb8d", label: "Cut Lot" },
-    Signal_Lost: { color: "#2f2f2f", label: "Signal Lost" },
-};
 
-export default function OverallMachineCard({ machineName, date, scaleFactor = 1.0, refreshTrigger = 0, realtimeData, activeView = "output", mcStatusRefreshTrigger = 0 }: OverallMachineCardProps) {
+export default function OverallMachineCard({
+    machineName,
+    date,
+    scaleFactor = 1.0,
+    refreshTrigger,
+    realtimeData,
+    activeView = "output",
+    mcStatusRefreshTrigger,
+    onLoginClick,
+    onLogoutClick,
+    isSingleView = false
+}: OverallMachineCardProps) {
     // ================= State Management =================
     const [clientTime, setClientTime] = useState<string>("");
     const [tableData, setTableData] = useState({
@@ -80,16 +75,45 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
         operatorName: "-",
         operatorCode: "-",
         operatorPic: "",
+        historyId: null as number | null, // ✅ Add historyId for logout
         outputActual: 0,
         outputTarget: 0,
         ctActual: 0,
         ctTarget: 0,
         effActual: 0,
         effTarget: 0,
+        liveStatus: "Offline", // 🆕
+        liveAlarm: null as string | null, // 🆕
     });
 
     const [graph1Data, setGraph1Data] = useState<any>(null); // Output Graph
     const [graph2Data, setGraph2Data] = useState<any>(null); // CT & Eff Graph
+    const [canShowLogout, setCanShowLogout] = useState(false);
+
+    // 🆕 Config-driven Status Colors
+    const [statusColors, setStatusColors] = useState<Record<string, { color: string; label: string }>>({});
+    const [downtimeKeys, setDowntimeKeys] = useState<string[]>([]);
+
+    useEffect(() => {
+        const loadConfig = async () => {
+            if (!machineName) return;
+            const type = machineName.split("-")[0];
+            const colors = await getStatusColors(type);
+            const dKeys = await getDowntimeKeys(type);
+            if (colors) setStatusColors(colors);
+            if (dKeys) setDowntimeKeys(dKeys);
+        };
+        loadConfig();
+    }, [machineName]);
+
+    useEffect(() => {
+        if (typeof window !== "undefined" && tableData.historyId) {
+            const loginSource = localStorage.getItem(`loginSource_h${tableData.historyId}`);
+            setCanShowLogout(loginSource === "overall_machine_working");
+        } else {
+            setCanShowLogout(false);
+        }
+    }, [tableData.historyId]);
 
     // MC Status state
     const [mcStatusData, setMcStatusData] = useState<any[]>([]);
@@ -106,10 +130,11 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
     // ✅ Calculate scaled dimensions
     const s = scaleFactor; // Shorthand
     const fontSize = {
-        base: `${0.8 * s}rem`,      // Base font (was 0.8rem)
-        small: `${0.6 * s}rem`,     // Small text (was 0.6rem)
-        tiny: `${0.5 * s}rem`,      // Tiny text (was 0.5rem)
-        large: `${1.1 * s}rem`,     // Large text (was 1.1rem)
+        header: `${1.25 * s}rem`,   // 🔥 NEW: For Card Header so it's much bigger
+        base: `${0.9 * s}rem`,      // Bumped slightly
+        small: `${0.75 * s}rem`,    // Bumped from 0.6 to 0.75
+        tiny: `${0.65 * s}rem`,     // Bumped from 0.5 to 0.65
+        large: `${1.4 * s}rem`,     // Bumped from 1.1 to 1.4
     };
     const spacing = {
         cardPadding: `${8 * s}px`,
@@ -152,10 +177,14 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
     // REAL-TIME DATA HANDLING
     // REAL-TIME DATA HANDLING
     useEffect(() => {
-        // Relaxed date check + Debug log
-        const isToday = date === dayjs().format("YYYY-MM-DD");
-        if (!realtimeData || !isToday) {
-            // if (realtimeData && !isToday) console.warn("Skipping RT update due to date mismatch:", date);
+        if (!realtimeData) {
+            return;
+        }
+
+        // ✅ Guard: ถ้าดูย้อนหลัง (ไม่ใช่วันนี้) ให้ข้ามการอัปเดตจาก Socket ทั้งหมด
+        // เพื่อไม่ให้ข้อมูล real-time ของวันนี้ไปทับข้อมูลประวัติที่ดึงจาก API
+        const todayStr = new Date().toISOString().split("T")[0];
+        if (date !== todayStr) {
             return;
         }
 
@@ -164,16 +193,32 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
         const serverCurrentHourStr = currentHour ? currentHour.hour : null;
 
         // 1. Update Table Data
-        setTableData(prev => ({
-            ...prev,
-            outputActual: daily.totalOutput,
-            outputTarget: daily.accumTarget,
-            achieve: daily.achieve,
-            ctActual: daily.avgCycleTime,
-            effActual: daily.overallEfficiency,
-            // ✅ อัปเดต OEE เฉพาะเมื่อ > 0 (Auto mode) — Manual ได้ 0 จะไม่ทับค่าเดิม
-            ...(daily.oee > 0 ? { oee: daily.oee } : {}),
-        }));
+        setTableData(prev => {
+            const newOee = daily.oee > 0 ? daily.oee : prev.oee;
+
+            if (
+                prev.outputActual === daily.totalOutput &&
+                prev.outputTarget === daily.accumTarget &&
+                prev.achieve === daily.achieve &&
+                prev.ctActual === daily.avgCycleTime &&
+                prev.effActual === daily.overallEfficiency &&
+                prev.oee === newOee
+            ) {
+                return prev;
+            }
+
+            return {
+                ...prev,
+                outputActual: daily.totalOutput,
+                outputTarget: daily.accumTarget,
+                achieve: daily.achieve,
+                ctActual: daily.avgCycleTime,
+                effActual: daily.overallEfficiency,
+                oee: newOee,
+                liveStatus: currentHour.live_status || "Offline", // 🆕 Update from real-time
+                liveAlarm: currentHour.live_alarm || null, // 🆕 Update from real-time
+            };
+        });
 
         // Helper to replicate filter logic using SERVER TIME
         const filterFutureDataInternal = (dataArray: number[], labels: any[], currentHourStr: string | null) => {
@@ -187,25 +232,76 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
             return dataArray.map((val, index) => index > currentIndex ? null : val);
         };
 
-        // 2. Update Graph 1
+        // 2. Update Graph 1 — ✅ sync ทีละ index เหมือน machine_working
         setGraph1Data((prev: any) => {
             if (!prev) return prev;
-            const newDatasets = [...prev.datasets];
-            // Dataset 0: Output Actual (Bar)
-            if (newDatasets[0]) newDatasets[0] = { ...newDatasets[0], data: filterFutureDataInternal(hourly.output, prev.labels, serverCurrentHourStr) };
-            // Dataset 2: Output Accum (Line)
-            if (newDatasets[2]) newDatasets[2] = { ...newDatasets[2], data: filterFutureDataInternal(hourly.outputAccum, prev.labels, serverCurrentHourStr) };
+            const newOutputActual = [...prev.datasets[0].data];
+            const newOutputAccum = [...prev.datasets[2].data];
+            const shiftIndex = currentHour.shiftIndex;
+
+            // ✅ Sync ทุกแท่งที่ผ่านมาแล้ว + ปัจจุบัน จาก Backend hourly arrays
+            if (hourly.output) {
+                for (let i = 0; i <= shiftIndex && i < hourly.output.length; i++) {
+                    newOutputActual[i] = hourly.output[i];
+                }
+            }
+
+            // ✅ คำนวณ Accum ใหม่
+            let runningAccum = 0;
+            for (let i = 0; i < newOutputActual.length; i++) {
+                const v = newOutputActual[i];
+                if (v !== null && v !== undefined) runningAccum += v;
+                newOutputAccum[i] = i <= shiftIndex ? runningAccum : prev.datasets[2].data[i];
+            }
+
+            // 🛑 Bail out
+            let hasChanges = false;
+            for (let i = 0; i < newOutputActual.length; i++) {
+                if (newOutputActual[i] !== prev.datasets[0].data[i] || newOutputAccum[i] !== prev.datasets[2].data[i]) {
+                    hasChanges = true;
+                    break;
+                }
+            }
+            if (!hasChanges) return prev;
+
+            const newDatasets = prev.datasets.map((ds: any, idx: number) => {
+                if (idx === 0) return { ...ds, data: newOutputActual };
+                if (idx === 2) return { ...ds, data: newOutputAccum };
+                return ds;
+            });
             return { ...prev, datasets: newDatasets };
         });
 
-        // 3. Update Graph 2
+        // 3. Update Graph 2 — ✅ sync ทีละ index เหมือน machine_working
         setGraph2Data((prev: any) => {
             if (!prev) return prev;
-            const newDatasets = [...prev.datasets];
-            // Dataset 0: CT Actual (Bar)
-            if (newDatasets[0]) newDatasets[0] = { ...newDatasets[0], data: filterFutureDataInternal(hourly.cycleTime, prev.labels, serverCurrentHourStr) };
-            // Dataset 2: Eff Actual (Line)
-            if (newDatasets[2]) newDatasets[2] = { ...newDatasets[2], data: filterFutureDataInternal(hourly.efficiency, prev.labels, serverCurrentHourStr) };
+            const newCtActual = [...prev.datasets[0].data];
+            const newEffActual = [...prev.datasets[2].data];
+            const shiftIndex = currentHour.shiftIndex;
+
+            // ✅ Sync ทุกแท่งที่ผ่านมาแล้ว + ปัจจุบัน
+            if (hourly.cycleTime && hourly.efficiency) {
+                for (let i = 0; i <= shiftIndex && i < hourly.cycleTime.length; i++) {
+                    newCtActual[i] = hourly.cycleTime[i];
+                    newEffActual[i] = hourly.efficiency[i];
+                }
+            }
+
+            // 🛑 Bail out
+            let hasChanges = false;
+            for (let i = 0; i < newCtActual.length; i++) {
+                if (newCtActual[i] !== prev.datasets[0].data[i] || newEffActual[i] !== prev.datasets[2].data[i]) {
+                    hasChanges = true;
+                    break;
+                }
+            }
+            if (!hasChanges) return prev;
+
+            const newDatasets = prev.datasets.map((ds: any, idx: number) => {
+                if (idx === 0) return { ...ds, data: newCtActual };
+                if (idx === 2) return { ...ds, data: newEffActual };
+                return ds;
+            });
             return { ...prev, datasets: newDatasets };
         });
 
@@ -217,12 +313,33 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
         fetchAllData();
     }, [machineName, date]); // Removed refreshTrigger to prevent socket-induced polling
 
+    // ✅ Real-Time Operator Update via Socket.IO
+    // Listens for "machine_updated" events emitted by backend on login/logout.
+    // Triggers fetchAllData() to silently refresh operator details on this card.
+    useEffect(() => {
+        const socket = getSocket();
+
+        const handleMachineUpdate = (data: any) => {
+            if (data.machine_name === machineName) {
+                const todayStr = new Date().toISOString().split("T")[0];
+                if (date === todayStr) {
+                    fetchAllData();
+                }
+            }
+        };
+
+        socket.on("machine_updated", handleMachineUpdate);
+        return () => {
+            socket.off("machine_updated", handleMachineUpdate);
+        };
+    }, [machineName, date]);
+
     const fetchAllData = async () => {
         try {
             const timestamp = Date.now();
 
-            // ✅ Check if viewing "Today" first (to determine which API to call)
-            const todayStr = dayjs().format("YYYY-MM-DD");
+            // ✅ Check if viewing "Today" first (to determine which API to call, matching machine_working UTC logic)
+            const todayStr = new Date().toISOString().split("T")[0];
             const isToday = date === todayStr;
 
             // ✅ 1. Fetch models list first
@@ -263,12 +380,12 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
             let currentOpName = "-";
             let opPicUrl = "";
 
-            // Find active operator (end_time is null) OR last operator
+            // Find active operator (end_time is null)
             const activeOp = historyList.find((h: any) => h.end_time === null);
-            const lastOp = historyList.length > 0 ? historyList[historyList.length - 1] : null;
 
-            // ✅ Priority: Cross-Day Active -> Today's Active -> Today's Last
-            const displayOp = activeCrossDayOp || activeOp || lastOp;
+            // ✅ Priority: Cross-Day Active -> Today's Active
+            // (No fallback to lastOp — show empty when no one is logged in)
+            const displayOp = activeCrossDayOp || activeOp;
 
             if (displayOp) {
                 currentOpCode = displayOp.emp_no || "-";
@@ -293,12 +410,15 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
                 operatorName: currentOpName,
                 operatorCode: currentOpCode,
                 operatorPic: opPicUrl,
+                historyId: displayOp ? displayOp.id : null, // ✅ Save history ID for logout target
                 outputActual: tableDataRaw.outputActual || 0,
                 outputTarget: tableDataRaw.outputTarget || 0,
                 ctActual: tableDataRaw.cycleTimeActual || 0,
                 ctTarget: tableDataRaw.cycleTimeTarget || 0,
                 effActual: tableDataRaw.efficiencyActual || 0,
                 effTarget: tableDataRaw.efficiencyTarget || 0,
+                liveStatus: "Offline",
+                liveAlarm: null,
             });
 
 
@@ -310,7 +430,7 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
 
                 const currentHour = new Date().getHours();
                 // Find index of current hour (e.g., "08:00" -> index 1)
-                // Assume hoursArray are strings "07:00", "08:00" etc.
+                // Assume hoursArray are strings "08", "09" etc.
                 const currentIndex = hoursArray.findIndex((h: string) => parseInt(h) === currentHour);
 
                 if (currentIndex === -1) return dataArray; // Safety check or outside hours
@@ -332,7 +452,24 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
                             data: filterFutureData(g1.outputActual, g1.hours),
                             backgroundColor: "#00b050",
                             yAxisID: "y_qty",
-                            order: 4
+                            order: 4,
+                            datalabels: {
+                                display: true,
+                                align: 'end',
+                                anchor: 'end',
+                                rotation: -90,
+                                color: '#222',
+                                offset: 1,
+                                font: (context: any) => {
+                                    const cw = context.chart?.width || 300;
+                                    return {
+                                        weight: 'bold',
+                                        // ลดขนาดลงอีกตามความกว้างของจอ (5px - 8px)
+                                        size: Math.max(5, Math.min(8, Math.round(cw / 45)))
+                                    };
+                                },
+                                formatter: (value: any) => value > 0 ? value : null
+                            }
                         },
                         {
                             type: "line",
@@ -391,7 +528,7 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
                         {
                             type: "bar",
                             label: "Cycle Time Actual",
-                            data: g2.cycleTimeActual,
+                            data: filterFutureData(g2.cycleTimeActual, g2.hours),
                             backgroundColor: "#5b9bd5",
                             yAxisID: "y_ct",
                             order: 4
@@ -571,13 +708,14 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
                     const todayStr = dayjs().format("YYYY-MM-DD");
                     if (date === todayStr) {
                         const now = new Date();
-                        endMin = now.getUTCHours() * 60 + now.getUTCMinutes() + now.getUTCSeconds() / 60;
+                        // ✅ Bug 3 Fix: cap endMin to totalMinutes to prevent overflow
+                        endMin = Math.min(now.getUTCHours() * 60 + now.getUTCMinutes() + now.getUTCSeconds() / 60, totalMinutes);
                     } else {
                         endMin = totalMinutes;
                     }
                     endTimeLabel = minToTimeStr(endMin);
                 }
-                if (endMin <= startMin) endMin += totalMinutes;
+                // ✅ Bug 2 Fix: Removed wrap-around (endMin += totalMinutes) — it incorrectly stretched the last segment full-width
                 segments.push({
                     startMin, endMin: Math.min(endMin, totalMinutes),
                     status: mcStatusData[i].mc_status,
@@ -587,15 +725,15 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
         }
         mcSegmentsRef.current = segments;
 
-        // Draw status bar
-        ctx.fillStyle = "#e9ecef";
-        ctx.fillRect(chartX, barY, chartW, barH);
+        // ✅ Bug 1 Fix: Draw segments directly without pre-filling the bar gray.
+        // Pre-filling with #e9ecef made empty time slots look like Machine Stop blocks.
         for (const seg of segments) {
             const x1 = chartX + (seg.startMin / totalMinutes) * chartW;
             const x2 = chartX + (seg.endMin / totalMinutes) * chartW;
-            ctx.fillStyle = MC_STATUS_COLORS[seg.status]?.color || "#ccc";
+            ctx.fillStyle = statusColors[seg.status]?.color || "#ccc";
             ctx.fillRect(x1, barY, x2 - x1, barH);
         }
+        // Border only — no background fill
         ctx.strokeStyle = "#dee2e6";
         ctx.strokeRect(chartX, barY, chartW, barH);
 
@@ -630,30 +768,21 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
             durationMap[seg.status] = (durationMap[seg.status] || 0) + dur;
             totalElapsed += dur;
         }
-        if (totalElapsed === 0) { setDowntimeChartData(null); return; }
-
-        const DOWNTIME_KEYS = [
-            "Plan_Stop", "Break_Time",
-            "MM_Repair", "MM_Check_Master", "MM_Preventive",
-            "Setter_Adjust", "Setter_Check_Master", "Setter_Preventive",
-            "QC_Quality", "QC_Check_Master",
-            "Prod_Cleaning", "Prod_Check_Master",
-            "Wait_Part", "MC_Stop", "MC_Alarm", "Cut_Lot", "Signal_Lost",
-        ];
+        if (totalElapsed === 0 || downtimeKeys.length === 0) { setDowntimeChartData(null); return; }
 
         const labels: string[] = [];
         const values: number[] = [];
         const colors: string[] = [];
-        for (const key of DOWNTIME_KEYS) {
-            labels.push(MC_STATUS_COLORS[key]?.label || key);
+        for (const key of downtimeKeys) {
+            labels.push(statusColors[key]?.label || key);
             values.push(parseFloat((((durationMap[key] || 0) / totalElapsed) * 100).toFixed(1)));
-            colors.push(MC_STATUS_COLORS[key]?.color || "#ccc");
+            colors.push(statusColors[key]?.color || "#ccc");
         }
 
         // เก็บ durationMap ใน state (Chart.js จะ strip custom props ออกจาก data)
         const durMap: Record<string, number> = {};
-        for (const key of DOWNTIME_KEYS) {
-            durMap[MC_STATUS_COLORS[key]?.label || key] = durationMap[key] || 0;
+        for (const key of downtimeKeys) {
+            durMap[statusColors[key]?.label || key] = durationMap[key] || 0;
         }
         setDowntimeDurationMap(durMap);
 
@@ -835,33 +964,59 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
 
     // ================= RENDER =================
 
+    // Dynamic header styling based on liveStatus
+    const isToday = typeof window !== "undefined" && date === new Date().toISOString().split("T")[0];
+    let headerBgClass = "bg-primary";
+    let headerStyle: React.CSSProperties = { flexShrink: 0, height: "32px", border: "none" };
+
+    if (isToday) {
+        if (tableData.liveAlarm) {
+            headerBgClass = "bg-danger";
+            headerStyle.animation = "blink 1s linear infinite"; // Will blink red if CSS is set
+        } else {
+            const statusColor = statusColors[tableData.liveStatus]?.color;
+            if (statusColor) {
+                headerBgClass = "";
+                headerStyle.backgroundColor = statusColor;
+            } else {
+                headerBgClass = "bg-secondary"; // Fallback for offline/unknown
+            }
+        }
+    }
+
     return (
-        <div className="card shadow-sm h-100 d-flex flex-column" style={{ minHeight: 0, overflow: "hidden" }}>
-            <div className="card-header py-1 px-2 d-flex justify-content-center align-items-center bg-primary text-white" style={{ flexShrink: 0 }}>
-                <span className="fw-bold" style={{ fontSize: fontSize.base }}>{machineName}</span>
+        <div className="card shadow-sm h-100 d-flex flex-column position-relative" style={{ minHeight: 0, overflow: "hidden" }}>
+            <div className={`card-header d-flex justify-content-between align-items-center text-white p-2 ${headerBgClass}`} style={headerStyle}>
+                <span className="fw-bold" style={{ fontSize: fontSize.header, letterSpacing: "0.5px", lineHeight: "1", padding: 0, margin: 0 }}>
+                    {machineName}
+                </span>
+                <div className="d-flex flex-column align-items-end" style={{ fontSize: fontSize.tiny, lineHeight: "1" }}>
+                    <span className="fw-bold">{isToday ? (statusColors[tableData.liveStatus]?.label || tableData.liveStatus) : "Historical"}</span>
+                    {tableData.liveAlarm && <span className="fw-bold text-white mt-1"><i className="fas fa-exclamation-triangle"></i> {tableData.liveAlarm}</span>}
+                </div>
             </div>
             <div className="card-body p-1 d-flex flex-column" style={{ overflow: "hidden", minHeight: 0, flex: 1 }}>
                 {/* --- TABLE HEADER — แสดงเสมอทั้ง Output และ MC Status --- */}
                 <div className="table-responsive mb-1" style={{ flexShrink: 0 }}>
-                    <table className="table table-bordered align-middle text-center m-0" style={{ fontSize: fontSize.tiny }}>
+                    <table className="table table-bordered align-middle text-center m-0" style={{ fontSize: fontSize.small }}>
                         <thead className="table-primary">
                             <tr>
-                                <th className="p-0" style={{ width: "12%", verticalAlign: "middle" }}>Date</th>
-                                <th className="p-0" style={{ width: "15%", verticalAlign: "middle" }}>MC Name</th>
-                                <th className="p-0" style={{ width: "15%", verticalAlign: "middle" }}>Model</th>
-                                <th className="p-0" style={{ width: "15%", verticalAlign: "middle" }}>Achieve</th>
-                                <th className="p-0" style={{ width: "18%", verticalAlign: "middle" }}>OEE</th>
-                                <th className="p-0" style={{ width: "25%", verticalAlign: "middle" }}>Operator</th>
+                                <th className="p-1 align-middle" style={{ width: "12%" }}>Date</th>
+                                <th className="p-1 align-middle" style={{ width: "15%" }}>MC Name</th>
+                                <th className="p-1 align-middle" style={{ width: "15%" }}>Model</th>
+                                <th className="p-1 align-middle" style={{ width: "15%" }}>Achieve</th>
+                                <th className="p-1 align-middle" style={{ width: "18%" }}>OEE</th>
+                                <th className="p-1 align-middle" style={{ width: "25%" }}>Operator</th>
                             </tr>
                         </thead>
                         <tbody>
                             <tr>
-                                <td rowSpan={2} className="p-0 fw-bold bg-white">
+                                <td rowSpan={2} className="p-1 fw-bold bg-white align-middle">
                                     <div style={{ fontSize: fontSize.small }}>{dayjs(date).format("DD/MM/YYYY")}</div>
                                     <div className="text-primary" style={{ fontSize: fontSize.tiny }}>{clientTime}</div>
                                 </td>
-                                <td className="p-0 fw-bold text-primary">{machineName}</td>
-                                <td className="p-0">
+                                <td className="p-1 fw-bold text-primary align-middle">{machineName}</td>
+                                <td className="p-1 align-middle">
                                     {modelsList.length > 1 ? (
                                         <select
                                             className="form-select form-select-sm d-inline-block w-auto"
@@ -880,61 +1035,96 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
                                         <span>{tableData.model}</span>
                                     )}
                                 </td>
-                                <td className="p-0">
+                                <td className="p-1 align-middle">
                                     <span className={`fw-bold ${tableData.achieve >= 100 ? "text-success" : "text-danger"}`}>
-                                        {tableData.achieve.toFixed(1)}%
+                                        {tableData.achieve.toFixed(2)}%
                                     </span>
                                 </td>
-                                <td rowSpan={4} className="p-0 align-middle bg-white">
-                                    <div className="d-flex flex-column justify-content-center h-100">
-                                        <div className={`fw-bold ${tableData.oee >= 85 ? "text-success" : "text-danger"}`} style={{ fontSize: fontSize.large }}>
-                                            {tableData.oee.toFixed(1)}%
+                                <td rowSpan={4} className="p-1 align-middle bg-white">
+                                    <div className="d-flex flex-column justify-content-center align-items-center h-100 w-100">
+                                        <div className={`fw-bold ${tableData.oee >= 85 ? "text-success" : "text-danger"}`} style={{ fontSize: fontSize.large, lineHeight: 1.2 }}>
+                                            {tableData.oee.toFixed(2)}%
                                         </div>
                                         <div className="text-muted" style={{ fontSize: fontSize.tiny }}>
                                             {tableData.oeeDate}
                                         </div>
                                     </div>
                                 </td>
-                                <td rowSpan={4} className="p-0 align-middle bg-white">
-                                    <div className="d-flex flex-column align-items-center justify-content-center h-100 p-1">
-                                        <img
-                                            src={tableData.operatorPic || "/dist/img/avg.png"}
-                                            alt="Op"
-                                            className="rounded border mb-1"
-                                            style={{ width: "30px", height: "30px", objectFit: "cover" }}
-                                            onError={(e) => { (e.target as HTMLImageElement).src = "/dist/img/avg.png" }}
-                                        />
-                                        <div className="fw-bold text-dark" style={{ fontSize: "0.6rem", lineHeight: 1 }}>{tableData.operatorCode}</div>
-                                        <div className="text-muted text-truncate w-100" style={{ fontSize: "0.5rem" }}>{tableData.operatorName}</div>
+                                <td rowSpan={4} className="p-1 align-middle bg-white">
+                                    <div className="d-flex flex-column align-items-center justify-content-center h-100 w-100">
+                                        {tableData.operatorCode === "-" ? (
+                                            // ✅ No operator logged in — show default picture and Login button
+                                            <>
+                                                <img
+                                                    src="/dist/img/avg.png"
+                                                    alt="No Op"
+                                                    className="rounded border mb-1"
+                                                    style={{ width: "35px", height: "35px", objectFit: "cover", opacity: 0.5 }}
+                                                />
+                                                <div className="fw-bold mt-1 text-muted" style={{ fontSize: fontSize.small, lineHeight: 1.2, opacity: 0.5 }}>(EMP ID)</div>
+                                                <div className="text-muted text-truncate w-100" style={{ fontSize: fontSize.tiny, opacity: 0.5 }}>(Emp Name)</div>
+                                                <button
+                                                    className="btn btn-success btn-sm mt-1 fw-bold px-2 shadow-sm d-flex align-items-center justify-content-center"
+                                                    style={{ fontSize: fontSize.tiny, padding: "2px", width: "fit-content", minWidth: "50px" }}
+                                                    onClick={() => onLoginClick?.(machineName)}
+                                                >
+                                                    <i className="fas fa-sign-in-alt me-1"></i>Login
+                                                </button>
+                                            </>
+                                        ) : (
+                                            // ✅ Operator logged in — show picture and info
+                                            <>
+                                                <img
+                                                    src={tableData.operatorPic || "/dist/img/avg.png"}
+                                                    alt="Op"
+                                                    className="rounded border mb-1"
+                                                    style={{ width: "35px", height: "35px", objectFit: "cover" }}
+                                                    onError={(e) => { (e.target as HTMLImageElement).src = "/dist/img/avg.png" }}
+                                                />
+                                                <div className="fw-bold text-dark mt-1" style={{ fontSize: fontSize.small, lineHeight: 1.2 }}>{tableData.operatorCode}</div>
+                                                <div className="text-muted text-truncate w-100" style={{ fontSize: fontSize.tiny }}>{tableData.operatorName}</div>
+                                                
+                                                {/* ✅ Optional Logout Button if function is passed */}
+                                                {onLogoutClick && tableData.historyId && canShowLogout && (
+                                                    <button
+                                                        onClick={(e) => { e.stopPropagation(); onLogoutClick(machineName, tableData.historyId!, tableData.operatorCode); }}
+                                                        className="btn btn-danger btn-sm mt-1 px-2 fw-bold shadow-sm d-flex align-items-center justify-content-center"
+                                                        style={{ fontSize: fontSize.tiny, padding: "2px", width: "fit-content", minWidth: "50px" }}
+                                                    >
+                                                        <i className="fa-solid fa-right-from-bracket me-1"></i>Logout
+                                                    </button>
+                                                )}
+                                            </>
+                                        )}
                                     </div>
                                 </td>
                             </tr>
                             <tr className="bg-light text-secondary fw-bold">
-                                <td className="p-0">Output</td>
-                                <td className="p-0">Cycle Time</td>
-                                <td className="p-0">Availability</td>
+                                <td className="p-1 align-middle">Output</td>
+                                <td className="p-1 align-middle">Cycle Time</td>
+                                <td className="p-1 align-middle">Availability</td>
                             </tr>
                             <tr>
-                                <td className="p-0 fw-bold bg-light text-secondary">Actual</td>
-                                <td className="p-0 fw-bold text-dark">
+                                <td className="p-1 fw-bold bg-light text-secondary align-middle">Actual</td>
+                                <td className="p-1 fw-bold text-dark align-middle">
                                     {tableData.outputActual.toLocaleString()}
                                 </td>
-                                <td className={`p-0 fw-bold ${tableData.ctActual > tableData.ctTarget ? "text-danger" : "text-success"}`}>
+                                <td className={`p-1 fw-bold align-middle ${tableData.ctActual > tableData.ctTarget ? "text-danger" : "text-success"}`}>
                                     {tableData.ctActual.toFixed(2)}
                                 </td>
-                                <td className={`p-0 fw-bold ${tableData.effActual < tableData.effTarget ? "text-danger" : "text-success"}`}>
+                                <td className={`p-1 fw-bold align-middle ${tableData.effActual < tableData.effTarget ? "text-danger" : "text-success"}`}>
                                     {tableData.effActual.toFixed(2)}%
                                 </td>
                             </tr>
                             <tr>
-                                <td className="p-0 fw-bold bg-light text-secondary">Target</td>
-                                <td className="p-0 text-muted">
+                                <td className="p-1 fw-bold bg-light text-secondary align-middle">Target</td>
+                                <td className="p-1 text-dark align-middle">
                                     {tableData.outputTarget.toLocaleString()}
                                 </td>
-                                <td className="p-0 text-muted">
+                                <td className="p-1 text-muted align-middle">
                                     {tableData.ctTarget.toFixed(2)}
                                 </td>
-                                <td className="p-0 text-muted">
+                                <td className="p-1 text-muted align-middle">
                                     {tableData.effTarget.toFixed(2)}%
                                 </td>
                             </tr>
@@ -945,75 +1135,149 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
                 {/* --- CONTENT AREA — toggle เฉพาะส่วนนี้ --- */}
                 {activeView === "output" ? (
                     /* --- GRAPH SECTION --- */
-                    <div className="d-flex flex-row flex-grow-1" style={{ minHeight: 0, gap: "4px" }}>
-                        <div className="flex-fill position-relative w-50" style={{ minHeight: 0 }}>
-                            {renderGraph1Data ? (
-                                <Chart type="bar" data={renderGraph1Data} options={optionsGraph1} />
+                    <div className={isSingleView ? "row g-3 flex-grow-1" : "d-flex flex-row flex-grow-1"} style={isSingleView ? { margin: 0 } : { minHeight: 0, gap: "4px" }}>
+                        <div className={isSingleView ? "col-md-6 d-flex" : "flex-fill position-relative w-50 d-flex flex-column h-100"} style={isSingleView ? { minHeight: 0 } : { minHeight: 0 }}>
+                            {isSingleView ? (
+                                <div className="card w-100 shadow-sm border border-dark position-relative d-flex flex-column">
+                                    <div className="card-header bg-white fw-bold text-center py-1 fs-5" style={{ flexShrink: 0 }}>Output Monitor</div>
+                                    <div className="card-body p-2 position-relative flex-grow-1" style={{ minHeight: 0 }}>
+                                        {renderGraph1Data ? <Chart type="bar" data={renderGraph1Data} options={optionsGraph1} /> : <div className="d-flex align-items-center justify-content-center h-100 text-muted small">Loading...</div>}
+                                    </div>
+                                </div>
                             ) : (
-                                <div className="d-flex align-items-center justify-content-center h-100 text-muted small">Loading...</div>
+                                renderGraph1Data ? <Chart type="bar" data={renderGraph1Data} options={optionsGraph1} /> : <div className="d-flex align-items-center justify-content-center h-100 text-muted small">Loading...</div>
                             )}
                         </div>
-                        <div className="flex-fill position-relative w-50" style={{ minHeight: 0 }}>
-                            {renderGraph2Data ? (
-                                <Chart type="bar" data={renderGraph2Data} options={optionsGraph2} />
+                        <div className={isSingleView ? "col-md-6 d-flex" : "flex-fill position-relative w-50 d-flex flex-column h-100"} style={isSingleView ? { minHeight: 0 } : { minHeight: 0 }}>
+                            {isSingleView ? (
+                                <div className="card w-100 shadow-sm border border-dark position-relative d-flex flex-column">
+                                    <div className="card-header bg-white fw-bold text-center py-1 fs-5" style={{ flexShrink: 0 }}>CT & Avail Monitor</div>
+                                    <div className="card-body p-2 position-relative flex-grow-1" style={{ minHeight: 0 }}>
+                                        {renderGraph2Data ? <Chart type="bar" data={renderGraph2Data} options={optionsGraph2} /> : <div className="d-flex align-items-center justify-content-center h-100 text-muted small">Loading...</div>}
+                                    </div>
+                                </div>
                             ) : (
-                                <div className="d-flex align-items-center justify-content-center h-100 text-muted small">Loading...</div>
+                                renderGraph2Data ? <Chart type="bar" data={renderGraph2Data} options={optionsGraph2} /> : <div className="d-flex align-items-center justify-content-center h-100 text-muted small">Loading...</div>
                             )}
                         </div>
                     </div>
                 ) : (
                     /* --- MC STATUS VIEW: Canvas Timeline --- */
-                    <div className="d-flex flex-column flex-grow-1 p-1">
-                        <div className="text-center mb-1">
-                            <span className="fw-bold" style={{ fontSize: "0.7rem" }}>Machine Status Timeline</span>
-                        </div>
-                        {mcStatusData.length === 0 ? (
-                            <div className="d-flex align-items-center justify-content-center flex-grow-1 text-muted">
-                                <div className="text-center">
-                                    <i className="fas fa-info-circle fs-4 mb-1"></i>
-                                    <div style={{ fontSize: "0.8rem" }}>No Status Data</div>
-                                </div>
+                    <div className={isSingleView ? "card shadow-sm border border-dark flex-grow-1 d-flex flex-column position-relative" : "d-flex flex-column flex-grow-1 p-1"} style={isSingleView ? { minHeight: 0 } : {}}>
+                        {isSingleView ? (
+                            <div className="card-header bg-white fw-bold text-center py-1 fs-5" style={{ flexShrink: 0 }}>
+                                Machine Status Timeline
                             </div>
                         ) : (
-                            <>
-                                <div className="position-relative" style={{ flexShrink: 0 }}>
-                                    <canvas
-                                        ref={mcStatusCanvasRef}
-                                        style={{ width: "100%", height: "70px", display: "block", cursor: "crosshair" }}
-                                        onMouseMove={handleCanvasMouseMove}
-                                        onMouseLeave={handleCanvasMouseLeave}
-                                    />
-                                    {mcTooltip && mcTooltip.visible && (
-                                        <div
-                                            className="position-absolute bg-dark text-white rounded shadow px-2 py-1"
-                                            style={{
-                                                left: mcTooltip.x,
-                                                top: mcTooltip.y,
-                                                transform: "translateX(-50%) translateY(-100%)",
-                                                pointerEvents: "none",
-                                                zIndex: 100,
-                                                fontSize: "0.7rem",
-                                                whiteSpace: "nowrap",
-                                            }}
-                                        >
-                                            <div className="d-flex align-items-center gap-1">
-                                                <div style={{
-                                                    width: 8, height: 8,
-                                                    backgroundColor: MC_STATUS_COLORS[mcTooltip.status]?.color || "#ccc",
-                                                    borderRadius: 2,
-                                                }}></div>
-                                                <strong>{MC_STATUS_COLORS[mcTooltip.status]?.label || mcTooltip.status}</strong>
-                                            </div>
-                                            <div>{mcTooltip.startTime} → {mcTooltip.endTime} ({mcTooltip.duration})</div>
-                                        </div>
-                                    )}
+                            <div className="text-center mb-1">
+                                <span className="fw-bold" style={{ fontSize: "0.7rem" }}>Machine Status Timeline</span>
+                            </div>
+                        )}
+                        <div className={isSingleView ? "card-body p-2 position-relative flex-grow-1 d-flex flex-column" : "d-flex flex-column flex-grow-1"}>
+                            {mcStatusData.length === 0 ? (
+                                <div className="d-flex align-items-center justify-content-center flex-grow-1 text-muted">
+                                    <div className="text-center">
+                                        <i className="fas fa-info-circle fs-4 mb-1"></i>
+                                        <div style={{ fontSize: "0.8rem" }}>No Status Data</div>
+                                    </div>
                                 </div>
+                            ) : (
+                                <>
+                                    <div className="position-relative" style={{ flexShrink: 0 }}>
+                                        <canvas
+                                            ref={mcStatusCanvasRef}
+                                            style={{ width: "100%", height: isSingleView ? "100px" : "70px", display: "block", cursor: "crosshair" }}
+                                            onMouseMove={handleCanvasMouseMove}
+                                            onMouseLeave={handleCanvasMouseLeave}
+                                        />
+                                        {mcTooltip && mcTooltip.visible && (
+                                            <div
+                                                className="position-absolute bg-dark text-white rounded shadow px-2 py-1"
+                                                style={{
+                                                    left: mcTooltip.x,
+                                                    top: mcTooltip.y,
+                                                    transform: "translateX(-50%) translateY(-100%)",
+                                                    pointerEvents: "none",
+                                                    zIndex: 100,
+                                                    fontSize: "0.7rem",
+                                                    whiteSpace: "nowrap",
+                                                }}
+                                            >
+                                                <span className="badge px-3 py-2 text-white shadow-sm mb-1 d-block w-100"
+                                                    style={{
+                                                        backgroundColor: statusColors[mcTooltip.status]?.color || "#ccc",
+                                                        fontSize: "1.1rem"
+                                                    }}>
+                                                <strong>{statusColors[mcTooltip.status]?.label || mcTooltip.status}</strong>
+                                                </span>
+                                                <div>{mcTooltip.startTime} → {mcTooltip.endTime} ({mcTooltip.duration})</div>
+                                            </div>
+                                        )}
+                                    </div>
 
-                                {/* Compact Downtime Breakdown Chart — flex-grow */}
                                 {downtimeChartData && (
-                                    <div className="mt-0" style={{ flex: 1, minHeight: "60px", maxHeight: "150px" }}>
-                                        <div className="text-center fw-bold" style={{ fontSize: Math.max(7, Math.round(9 * scaleFactor)) + "px", color: "#333", marginBottom: 1 }}>Downtime (%)</div>
-                                        <Chart type="bar" data={downtimeChartData} options={{
+                                    <div className={isSingleView ? "mt-2" : "mt-0"} style={{ flex: isSingleView ? "1 1 0" : 1, minHeight: isSingleView ? "220px" : "60px", maxHeight: isSingleView ? "none" : "150px", overflow: "visible" }}>
+                                        <div className={isSingleView ? "text-center fw-bold text-dark mb-2" : "text-center fw-bold"} style={isSingleView ? { fontSize: "0.9rem" } : { fontSize: Math.max(7, Math.round(9 * scaleFactor)) + "px", color: "#333", marginBottom: 1 }}>{isSingleView ? "Downtime Breakdown (%)" : "Downtime (%)"}</div>
+                                        <Chart type="bar" data={downtimeChartData} 
+                                            plugins={isSingleView ? [{
+                                                id: "coloredXLabels",
+                                                afterDraw: (chart: any) => {
+                                                    const { ctx, chartArea } = chart;
+                                                    const xAxis = chart.scales.x;
+                                                    const bgColors = chart.data.datasets[0]?.backgroundColor || [];
+                                                    const labels = chart.data.labels || [];
+                                                    const yBase = chartArea.bottom + 4;
+                                                    const boxSize = 10;
+        
+                                                    const slotWidth = labels.length > 0 ? chartArea.width / labels.length : 9999;
+                                                    let angleDeg = 0;
+                                                    if (slotWidth < 45) angleDeg = 90;
+                                                    else if (slotWidth < 80) angleDeg = 45;
+                                                    const angleRad = (angleDeg * Math.PI) / 180;
+        
+                                                    ctx.save();
+                                                    ctx.font = "9px sans-serif";
+                                                    ctx.textBaseline = "middle";
+        
+                                                    labels.forEach((label: string, i: number) => {
+                                                        const x = xAxis.getPixelForTick(i);
+                                                        ctx.save();
+        
+                                                        if (angleDeg === 0) {
+                                                            ctx.translate(x, yBase + boxSize / 2);
+                                                            const textWidth = ctx.measureText(label).width;
+                                                            const totalWidth = boxSize + 3 + textWidth;
+                                                            const startX = -(totalWidth / 2);
+        
+                                                            ctx.fillStyle = bgColors[i] || "#ccc";
+                                                            ctx.fillRect(startX, -boxSize / 2, boxSize, boxSize);
+                                                            ctx.strokeStyle = "#bbb";
+                                                            ctx.lineWidth = 0.5;
+                                                            ctx.strokeRect(startX, -boxSize / 2, boxSize, boxSize);
+        
+                                                            ctx.fillStyle = "#333";
+                                                            ctx.textAlign = "left";
+                                                            ctx.fillText(label, startX + boxSize + 3, 0);
+                                                        } else {
+                                                            ctx.translate(x, yBase);
+                                                            ctx.rotate(angleRad);
+        
+                                                            ctx.fillStyle = bgColors[i] || "#ccc";
+                                                            ctx.fillRect(-boxSize / 2, -boxSize / 2, boxSize, boxSize);
+                                                            ctx.strokeStyle = "#bbb";
+                                                            ctx.lineWidth = 0.5;
+                                                            ctx.strokeRect(-boxSize / 2, -boxSize / 2, boxSize, boxSize);
+        
+                                                            ctx.fillStyle = "#333";
+                                                            ctx.textAlign = "left";
+                                                            ctx.fillText(label, boxSize / 2 + 3, 0);
+                                                        }
+                                                        ctx.restore();
+                                                    });
+                                                    ctx.restore();
+                                                }
+                                            }] : []}
+                                            options={{
                                             responsive: true,
                                             maintainAspectRatio: false,
                                             animation: false,
@@ -1037,33 +1301,50 @@ export default function OverallMachineCard({ machineName, date, scaleFactor = 1.
                                                     display: true,
                                                     anchor: "end",
                                                     align: "top",
-                                                    offset: 1,
+                                                    offset: isSingleView ? 2 : 1,
                                                     color: "#333",
-                                                    font: { weight: "bold", size: Math.max(7, Math.round(9 * scaleFactor)) },
-                                                    formatter: (val: number) => val > 0 ? `${val}%` : null,
+                                                    font: { weight: "bold", size: isSingleView ? 11 : Math.max(7, Math.round(9 * scaleFactor)) },
+                                                    formatter: (val: number) => val > 0 ? (isSingleView ? `${val.toFixed(1)}%` : `${val}%`) : null,
                                                 },
                                             },
-                                            layout: { padding: { top: 20 } },
+                                            layout: { padding: { top: isSingleView ? 24 : 20, bottom: isSingleView ? 80 : 0 } },
                                             scales: {
-                                                x: { grid: { display: false }, ticks: { font: { size: Math.max(6, Math.round(8 * scaleFactor)) }, maxRotation: 45, minRotation: 0 } },
-                                                y: { beginAtZero: true, ticks: { callback: (val: any) => `${val}%`, font: { size: Math.max(6, Math.round(8 * scaleFactor)) } }, grid: { color: "#eee" } },
+                                                x: {
+                                                    grid: { display: false }, 
+                                                    ticks: { 
+                                                        display: !isSingleView, 
+                                                        font: { size: isSingleView ? 11 : Math.max(6, Math.round(8 * scaleFactor)) }, 
+                                                        maxRotation: 45, minRotation: 0 
+                                                    } 
+                                                },
+                                                y: { 
+                                                    beginAtZero: true, 
+                                                    ticks: { 
+                                                        callback: (val: any) => `${val}%`, 
+                                                        font: { size: isSingleView ? 10 : Math.max(6, Math.round(8 * scaleFactor)) } 
+                                                    }, 
+                                                    grid: { color: "#eee" } 
+                                                },
                                             },
                                         } as any} />
                                     </div>
                                 )}
 
                                 {/* Compact Legend — at the bottom */}
-                                <div className="d-flex flex-wrap gap-1 mt-1 pt-1 border-top" style={{ fontSize: "0.55rem", flexShrink: 0 }}>
-                                    {Object.entries(MC_STATUS_COLORS).map(([key, val]) => (
-                                        <div key={key} className="d-flex align-items-center gap-1">
-                                            <div style={{ width: 8, height: 8, backgroundColor: val.color, borderRadius: 1, border: "1px solid #ccc" }}></div>
-                                            <span>{val.label}</span>
-                                        </div>
-                                    ))}
-                                </div>
+                                {!isSingleView && (
+                                    <div className="d-flex flex-wrap gap-1 mt-1 pt-1 border-top" style={{ fontSize: "0.55rem", flexShrink: 0 }}>
+                                        {Object.entries(statusColors).map(([key, val]) => (
+                                            <div key={key} className="d-flex align-items-center mb-1">
+                                                <div style={{ width: "12px", height: "12px", backgroundColor: val.color, marginRight: "4px", flexShrink: 0, borderRadius: "2px" }}></div>
+                                                <span style={{ fontSize: "0.6rem", whiteSpace: "nowrap" }}>{val.label}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
                             </>
                         )}
                     </div>
+                </div>
                 )}
             </div>
         </div>

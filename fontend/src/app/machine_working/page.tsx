@@ -24,8 +24,53 @@ import config from "@/app/config";
 import { getSocket } from "@/app/lib/socketManager";
 import type { Socket } from "socket.io-client";
 
+// ✅ Extend Chart.js types for custom blinkOverlay plugin
+declare module "chart.js" {
+    interface PluginOptionsByType<TType extends import("chart.js").ChartType> {
+        blinkOverlay?: {
+            enabled: boolean;
+            barIndex: number;
+        };
+    }
+}
+
+// ✅ Blink Overlay Plugin — lightweight alternative to cloning datasets every 600ms
+// Uses requestAnimationFrame to pulse a semi-transparent overlay on the current hour bar
+const blinkOverlayPlugin = {
+    id: "blinkOverlay",
+    afterDatasetsDraw(chart: any) {
+        const blinkMeta = chart.options?.plugins?.blinkOverlay;
+        if (!blinkMeta?.enabled || blinkMeta?.barIndex == null) return;
+
+        const barIndex = blinkMeta.barIndex;
+        const meta = chart.getDatasetMeta(0); // First dataset = bar
+        if (!meta || meta.type !== "bar" || !meta.data[barIndex]) return;
+
+        const bar = meta.data[barIndex];
+        const ctx = chart.ctx;
+        if (!ctx) return;
+
+        // Smooth pulse using sine wave (0.0 ~ 0.45 opacity range)
+        const t = (Date.now() % 1200) / 1200; // 1.2s cycle
+        const alpha = 0.1 + Math.sin(t * Math.PI) * 0.35;
+
+        ctx.save();
+        ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+        ctx.fillRect(bar.x - bar.width / 2, bar.y, bar.width, bar.base - bar.y);
+        ctx.restore();
+
+        // ✅ Throttled redraw: 10fps instead of 60fps → smooth blink, low CPU
+        if (!chart._blinkTimer) {
+            chart._blinkTimer = setTimeout(() => {
+                chart._blinkTimer = null;
+                if (chart.ctx) chart.draw();
+            }, 200); // 200ms = 5fps
+        }
+    }
+};
+
 // ✅ Register ChartJS components
-ChartJS.register(CategoryScale, LinearScale, BarElement, LineElement, PointElement, Legend, Tooltip, ChartDataLabels, BarController, LineController)
+ChartJS.register(CategoryScale, LinearScale, BarElement, LineElement, PointElement, Legend, Tooltip, ChartDataLabels, BarController, LineController, blinkOverlayPlugin)
 
 export default function Page() {
     return (
@@ -34,6 +79,8 @@ export default function Page() {
         </Suspense>
     );
 }
+
+import { getStatusColors, getDowntimeKeys } from "@/app/lib/machineStatusConfig";
 
 function MachineWorkingInner() {
     const router = useRouter();
@@ -46,7 +93,7 @@ function MachineWorkingInner() {
     const [clientTime, setClientTime] = useState<string>("");
     const [serverTimeRef, setServerTimeRef] = useState<Date>(new Date());
     const [currentDateStr, setCurrentDateStr] = useState(""); // YYYY-MM-DD
-    const [blink, setBlink] = useState(true);
+    // blink state removed — now handled by blinkOverlayPlugin (CSS-like animation)
     const [socketRef, setSocketRef] = useState<Socket | null>(null);
     const [isViewingToday, setIsViewingToday] = useState(true);
     // 2. Table Data State
@@ -65,11 +112,29 @@ function MachineWorkingInner() {
         effActual: 0,
         effTarget: 0,
         operators: [] as any[], // ✅ Store list of operators
+        liveStatus: "Offline", // 🆕
+        liveAlarm: null as string | null, // 🆕
     });
 
     // 3. History / Logout State
     const [historyId, setHistoryId] = useState<number | null>(null);
     const [canLogout, setCanLogout] = useState(false);
+
+    // 🆕 Config-driven Status Colors
+    const [statusColors, setStatusColors] = useState<Record<string, { color: string; label: string }>>({});
+    const [downtimeKeys, setDowntimeKeys] = useState<string[]>([]);
+
+    useEffect(() => {
+        const loadConfig = async () => {
+            if (!machineName) return;
+            const type = machineName.split("-")[0];
+            const colors = await getStatusColors(type);
+            const dKeys = await getDowntimeKeys(type);
+            if (colors) setStatusColors(colors);
+            if (dKeys) setDowntimeKeys(dKeys);
+        };
+        loadConfig();
+    }, [machineName]);
 
     // 4. Multi-Model Support
     const [modelsList, setModelsList] = useState<string[]>([]);
@@ -96,72 +161,8 @@ function MachineWorkingInner() {
     const [downtimeDurationMap, setDowntimeDurationMap] = useState<Record<string, number>>({});
 
     // ================= Effects =================
-    useEffect(() => {
-        const interval = setInterval(() => {
-            setBlink(prev => !prev);
-        }, 600); // ความเร็วการกระพริบ (ms)
-        return () => clearInterval(interval);
-    }, []);
-    // ✅ Effect สำหรับอัปเดตสีกราฟให้กระพริบ
-    useEffect(() => {
-        const todayStr = serverTimeRef.toISOString().split("T")[0];
-
-        // ✅ ถ้าไม่ใช่วันนี้ ไม่ต้องกระพริบ (แสดงสีปกติ)
-        if (currentDateStr !== todayStr) {
-            return;
-        }
-
-        const currentHour = serverTimeRef.getUTCHours();
-        const thHour = (currentHour + 7) % 24;
-
-        // --- Update Graph 1 (Output) ---
-        setGraph1Data((prev: any) => {
-            if (!prev) return null;
-
-            // สร้าง Array สีใหม่
-            const newColors = prev.labels.map((h: string) => {
-                // ถ้าเป็นชั่วโมงปัจจุบัน ให้สลับสีตาม blink
-                if (parseInt(h) === thHour) {
-                    return blink ? "#00b050" : "#00b05080"; // สีเขียวปกติ สลับกับ สีเขียวจางๆ (Hex Alpha)
-                }
-                return "#00b050"; // สีปกติสำหรับแท่งอื่น
-            });
-
-            // อัปเดตเฉพาะ dataset ของ Bar (Output Actual)
-            const newDatasets = prev.datasets.map((ds: any) => {
-                if (ds.label === "Output Actual") {
-                    return { ...ds, backgroundColor: newColors };
-                }
-                return ds;
-            });
-
-            return { ...prev, datasets: newDatasets };
-        });
-
-        // --- Update Graph 2 (Cycle Time) ---
-        setGraph2Data((prev: any) => {
-            if (!prev) return null;
-
-            // สร้าง Array สีใหม่
-            const newColors = prev.labels.map((h: string) => {
-                if (parseInt(h) === thHour) {
-                    return blink ? "#5b9bd5" : "#5b9bd580"; // สีฟ้าปกติ สลับกับ สีฟ้าจางๆ
-                }
-                return "#5b9bd5";
-            });
-
-            // อัปเดตเฉพาะ dataset ของ Bar (Cycle Time Actual)
-            const newDatasets = prev.datasets.map((ds: any) => {
-                if (ds.label === "Cycle Time Actual") {
-                    return { ...ds, backgroundColor: newColors };
-                }
-                return ds;
-            });
-
-            return { ...prev, datasets: newDatasets };
-        });
-
-    }, [blink]); // ทำงานเมื่อ blink เปลี่ยนค่า
+    // ✅ Blink effect is now handled by blinkOverlayPlugin (registered globally)
+    // No more setInterval/useEffect cloning datasets every 600ms
 
 
     useEffect(() => {
@@ -248,22 +249,49 @@ function MachineWorkingInner() {
             const shiftIndex = currentHour.shiftIndex;
 
             // ✅ อัปเดต Table Data
-            setTableData((prev) => ({
-                ...prev,
-                outputActual: daily.totalOutput,
-                outputTarget: daily.accumTarget || prev.outputTarget,
-                achieve: daily.achieve || 0,
-                ctActual: daily.avgCycleTime,
-                effActual: daily.overallEfficiency,
-            }));
+            setTableData((prev) => {
+                const newOutputTarget = daily.accumTarget || prev.outputTarget;
+                const newAchieve = daily.achieve || 0;
 
-            // ✅ อัปเดต Graph 1 (Output + Accum)
+                // 🛑 Bail out: ป้องกัน React Re-render หากค่าทุกอย่างเหมือนเดิม
+                if (
+                    prev.outputActual === daily.totalOutput &&
+                    prev.outputTarget === newOutputTarget &&
+                    prev.achieve === newAchieve &&
+                    prev.ctActual === daily.avgCycleTime &&
+                    prev.effActual === daily.overallEfficiency
+                ) {
+                    return prev;
+                }
+
+                return {
+                    ...prev,
+                    outputActual: daily.totalOutput,
+                    outputTarget: newOutputTarget,
+                    achieve: newAchieve,
+                    ctActual: daily.avgCycleTime,
+                    effActual: daily.overallEfficiency,
+                    liveStatus: currentHour.live_status || "Offline", // 🆕 Update from real-time
+                    liveAlarm: currentHour.live_alarm || null, // 🆕 Update from real-time
+                };
+            });
+
+            // ✅ อัปเดต Graph 1 (Output + Accum) — sync ทุกชม.จาก Backend
             setGraph1Data((prev: any) => {
                 if (!prev) return prev;
                 const newOutputActual = [...prev.datasets[0].data];
                 const newOutputAccum = [...prev.datasets[2].data];
 
-                newOutputActual[shiftIndex] = currentHour.output;
+                // ✅ Sync ทุกแท่งที่ผ่านมาแล้ว + ปัจจุบัน จาก Backend hourly arrays
+                const serverOutput = daily.hourly?.output;
+                if (serverOutput) {
+                    for (let i = 0; i <= shiftIndex && i < serverOutput.length; i++) {
+                        newOutputActual[i] = serverOutput[i];
+                    }
+                } else {
+                    newOutputActual[shiftIndex] = currentHour.output;
+                }
+
                 let runningAccum = 0;
                 for (let i = 0; i < newOutputActual.length; i++) {
                     const v = newOutputActual[i];
@@ -273,6 +301,16 @@ function MachineWorkingInner() {
                     newOutputAccum[i] = i <= shiftIndex ? runningAccum : (prev.datasets[2].data[i]);
                 }
 
+                // 🛑 Bail out: ถ้ายอดแต่ละแท่งไม่เปลี่ยนเลย ไม่ต้องสร้าง Object ใหม่ให้ Chart.js วาดใหม่
+                let hasChanges = false;
+                for (let i = 0; i < newOutputActual.length; i++) {
+                    if (newOutputActual[i] !== prev.datasets[0].data[i] || newOutputAccum[i] !== prev.datasets[2].data[i]) {
+                        hasChanges = true;
+                        break;
+                    }
+                }
+                if (!hasChanges) return prev;
+
                 const newDatasets = prev.datasets.map((ds: any, idx: number) => {
                     if (idx === 0) return { ...ds, data: newOutputActual };
                     if (idx === 2) return { ...ds, data: newOutputAccum };
@@ -281,14 +319,34 @@ function MachineWorkingInner() {
                 return { ...prev, datasets: newDatasets };
             });
 
-            // ✅ อัปเดต Graph 2 (CT & Eff)
+            // ✅ อัปเดต Graph 2 (CT & Eff) — sync ทุกชม.จาก Backend
             setGraph2Data((prev: any) => {
                 if (!prev) return prev;
                 const newCtActual = [...prev.datasets[0].data];
                 const newEffActual = [...prev.datasets[2].data];
 
-                newCtActual[shiftIndex] = currentHour.cycleTime;
-                newEffActual[shiftIndex] = currentHour.efficiency;
+                // ✅ Sync ทุกแท่งที่ผ่านมาแล้ว + ปัจจุบัน
+                const serverCt = daily.hourly?.cycleTime;
+                const serverEff = daily.hourly?.efficiency;
+                if (serverCt && serverEff) {
+                    for (let i = 0; i <= shiftIndex && i < serverCt.length; i++) {
+                        newCtActual[i] = serverCt[i];
+                        newEffActual[i] = serverEff[i];
+                    }
+                } else {
+                    newCtActual[shiftIndex] = currentHour.cycleTime;
+                    newEffActual[shiftIndex] = currentHour.efficiency;
+                }
+
+                // 🛑 Bail out: ถ้ายอดแต่ละแท่งไม่เปลี่ยนเลย ไม่ต้องสร้าง Object ใหม่ให้ Chart.js วาดใหม่
+                let hasChanges = false;
+                for (let i = 0; i < newCtActual.length; i++) {
+                    if (newCtActual[i] !== prev.datasets[0].data[i] || newEffActual[i] !== prev.datasets[2].data[i]) {
+                        hasChanges = true;
+                        break;
+                    }
+                }
+                if (!hasChanges) return prev;
 
                 const newDatasets = prev.datasets.map((ds: any, idx: number) => {
                     if (idx === 0) return { ...ds, data: newCtActual };
@@ -298,12 +356,12 @@ function MachineWorkingInner() {
                 return { ...prev, datasets: newDatasets };
             });
 
-            // ✅ Date rollover check
+            // ✅ Date rollover check — server shiftDate is the authority (00:00 UTC = 07:00 TH)
             const serverDate = data.shiftDate;
-            if (serverDate && currentDateStr !== serverDate) {
-                const isLoggedIn = !!localStorage.getItem("operatorLocal");
+            if (serverDate && currentDateStr && currentDateStr !== serverDate) {
                 const urlDate = searchParams.get("date");
-                if (isLoggedIn && !urlDate) {
+                // Guard: only auto-advance if NOT in history mode (?date= param locks the view)
+                if (!urlDate) {
                     console.log("Date Rollover: " + currentDateStr + " -> " + serverDate);
                     setCurrentDateStr(serverDate);
                     localStorage.setItem("machineDateLocal", serverDate);
@@ -312,8 +370,42 @@ function MachineWorkingInner() {
             }
         };
 
+        // ✅ Listen for Remote Logout (e.g. from Overall Machine Working)
+        const updateHandler = (msgData: any) => {
+            if (msgData.machine_name === machineName && msgData.status === "inactive") {
+                // Check if we are currently logged in
+                const localOperator = localStorage.getItem("operatorLocal");
+                if (localOperator) {
+                    localStorage.removeItem("operatorLocal");
+                    localStorage.removeItem("machineDateLocal");
+                    // Do not remove machineNameLocal, they might want to stay on the screen or redirect
+                    // Wait, the user requested "เหมือน logout ที่หน้าของเครื่องจักรเองทุกอย่าง"
+                    localStorage.removeItem("machineNameLocal");
+
+                    Swal.fire({
+                        icon: "info",
+                        title: "Session Ended",
+                        text: "You have been logged out remotely.",
+                        timer: 3000,
+                        showConfirmButton: false
+                    }).then(() => {
+                        router.push("/oee_production/machine_area");
+                    });
+                } else {
+                    fetchAllData(machineName, currentDateStr); // just refresh data since operator left
+                }
+            } else if (msgData.machine_name === machineName && msgData.status === "active") {
+                fetchAllData(machineName, currentDateStr); // refresh since someone logged in remotely
+            }
+        };
+
         socketRef.on("realtime_output", fastHandler);
-        return () => { socketRef.off("realtime_output", fastHandler); };
+        socketRef.on("machine_updated", updateHandler);
+
+        return () => { 
+            socketRef.off("realtime_output", fastHandler); 
+            socketRef.off("machine_updated", updateHandler);
+        };
     }, [socketRef, machineName, currentDateStr, searchParams]);
 
     // ✅ Socket.IO: Slow status update ทุก 5 นาที (เฉพาะ OEE จาก MCStatus)
@@ -442,7 +534,13 @@ function MachineWorkingInner() {
             // Check Logout Permission
             const localOperatorCode = localStorage.getItem("operatorLocal");
             if (activeOp && localOperatorCode && localOperatorCode === activeOp.emp_no) {
-                setCanLogout(true);
+                // ✅ Prevent logout from different page/device
+                const loginSource = localStorage.getItem(`loginSource_h${currentHistoryId}`);
+                if (loginSource === "machine_working") {
+                    setCanLogout(true);
+                } else {
+                    setCanLogout(false);
+                }
             } else {
                 setCanLogout(false);
             }
@@ -467,6 +565,8 @@ function MachineWorkingInner() {
                 ctTarget: tableDataRaw.cycleTimeTarget || 0,
                 effActual: tableDataRaw.efficiencyActual || 0,
                 effTarget: tableDataRaw.efficiencyTarget || 0,
+                liveStatus: "Offline", // fallback until socket updates
+                liveAlarm: null, // fallback until socket updates
             });
             const now = new Date();
             // เช็คว่าเป็น "วันนี้" หรือไม่ (เทียบวันที่จาก param กับวันที่ปัจจุบัน)
@@ -504,11 +604,17 @@ function MachineWorkingInner() {
                             datalabels: {
                                 display: true,        // บังคับให้แสดง (Override ค่า global)
                                 align: 'end',         // จัดตำแหน่งให้อยู่ด้านบนแท่ง
-                                anchor: 'start',        // ยึดจุดอ้างอิงที่ส่วนท้ายของแท่ง
-                                color: 'white',       // สีตัวอักษร
-                                font: {
-                                    weight: 'bold'    // ตัวหนา
+                                anchor: 'end',        // ยึดจุดอ้างอิงที่ส่วนบนของแท่ง
+                                rotation: (context: any) => {
+                                    // จอแคบให้ตั้งฉาก ป้องกันข้อความทับกัน
+                                    return typeof window !== "undefined" && window.innerWidth < 1400 ? -90 : 0;
                                 },
+                                color: '#222',        // สีตัวอักษรเข้มให้อ่านง่าย
+                                offset: 2,
+                                font: (context: any) => ({
+                                    weight: 'bold',
+                                    size: typeof window !== "undefined" ? Math.max(9, Math.round((window.innerWidth / 1920) * 14)) : 11
+                                }),
                                 // ✅ Logic: ถ้าค่า > 0 ให้แสดงค่า, ถ้าไม่ ให้ return null (ไม่แสดง)
                                 formatter: (value: any) => {
                                     return value > 0 ? value : null;
@@ -667,27 +773,6 @@ function MachineWorkingInner() {
 
     // ================= Machine Status =================
 
-    const MC_STATUS_COLORS: Record<string, { color: string; label: string }> = {
-        Run_Time: { color: "#2ca02c", label: "Run Time" },
-        Plan_Stop: { color: "#aec7e8", label: "Plan Stop" },
-        Break_Time: { color: "#ffbb78", label: "Break Time" },
-        MM_Repair: { color: "#d62728", label: "MM Repair" },
-        MM_Check_Master: { color: "#ff7f0e", label: "MM Check Master" },
-        MM_Preventive: { color: "#e377c2", label: "MM Preventive" },
-        Setter_Adjust: { color: "#9467bd", label: "Setter Adjust" },
-        Setter_Check_Master: { color: "#8c564b", label: "Setter Check Master" },
-        Setter_Preventive: { color: "#c49c94", label: "Setter Preventive" },
-        QC_Quality: { color: "#1f77b4", label: "QC Quality" },
-        QC_Check_Master: { color: "#17becf", label: "QC Check Master" },
-        Prod_Cleaning: { color: "#bcbd22", label: "Prod Cleaning" },
-        Prod_Check_Master: { color: "#98df8a", label: "Prod Check Master" },
-        Wait_Part: { color: "#ff9896", label: "Wait Part" },
-        MC_Stop: { color: "#7f7f7f", label: "Machine Stop" },
-        MC_Alarm: { color: "#c62828", label: "MC Alarm" },
-        Cut_Lot: { color: "#dbdb8d", label: "Cut Lot" },
-        Signal_Lost: { color: "#2f2f2f", label: "Signal Lost" },
-    };
-
     const fetchMcStatus = useCallback(async () => {
         if (!machineName || !currentDateStr) return;
         try {
@@ -837,7 +922,7 @@ function MachineWorkingInner() {
             const x1 = chartX + (seg.startMin / totalMinutes) * chartW;
             const x2 = chartX + (seg.endMin / totalMinutes) * chartW;
             const w = Math.max(x2 - x1, 1);
-            const statusInfo = MC_STATUS_COLORS[seg.status];
+            const statusInfo = statusColors[seg.status];
             ctx.fillStyle = statusInfo ? statusInfo.color : "#ccc";
             ctx.fillRect(x1, barY, w, barH);
         }
@@ -874,31 +959,21 @@ function MachineWorkingInner() {
             durationMap[seg.status] = (durationMap[seg.status] || 0) + dur;
             totalElapsed += dur;
         }
-        if (totalElapsed === 0) { setDowntimeChartData(null); return; }
-
-        // Categories to show (exclude Run_Time, Break_Time — show all others)
-        const DOWNTIME_KEYS = [
-            "Plan_Stop", "Break_Time",
-            "MM_Repair", "MM_Check_Master", "MM_Preventive",
-            "Setter_Adjust", "Setter_Check_Master", "Setter_Preventive",
-            "QC_Quality", "QC_Check_Master",
-            "Prod_Cleaning", "Prod_Check_Master",
-            "Wait_Part", "MC_Stop", "MC_Alarm", "Cut_Lot", "Signal_Lost",
-        ];
+        if (totalElapsed === 0 || downtimeKeys.length === 0) { setDowntimeChartData(null); return; }
 
         const labels: string[] = [];
         const values: number[] = [];
         const colors: string[] = [];
-        for (const key of DOWNTIME_KEYS) {
-            labels.push(MC_STATUS_COLORS[key]?.label || key);
+        for (const key of downtimeKeys) {
+            labels.push(statusColors[key]?.label || key);
             values.push(parseFloat((((durationMap[key] || 0) / totalElapsed) * 100).toFixed(1)));
-            colors.push(MC_STATUS_COLORS[key]?.color || "#ccc");
+            colors.push(statusColors[key]?.color || "#ccc");
         }
 
         // เก็บ durationMap ใน state (Chart.js จะ strip custom props ออกจาก data)
         const durMap: Record<string, number> = {};
-        for (const key of DOWNTIME_KEYS) {
-            durMap[MC_STATUS_COLORS[key]?.label || key] = durationMap[key] || 0;
+        for (const key of downtimeKeys) {
+            durMap[statusColors[key]?.label || key] = durationMap[key] || 0;
         }
         setDowntimeDurationMap(durMap);
 
@@ -1022,7 +1097,14 @@ function MachineWorkingInner() {
 
     // ================= Chart Options =================
 
-    // ================= Chart Options (Updated) =================
+    // ✅ Compute current hour bar index for blink plugin
+    const currentUtcHour = serverTimeRef.getUTCHours();
+    const currentThHour = (currentUtcHour + 7) % 24;
+    const todayStr = serverTimeRef.toISOString().split("T")[0];
+    const blinkEnabled = isViewingToday && currentDateStr === todayStr;
+    // Find bar index from graph labels (e.g., ["7","8",..."6"])
+    const blinkBarIndex1 = graph1Data?.labels?.findIndex((h: string) => parseInt(h) === currentThHour) ?? -1;
+    const blinkBarIndex2 = graph2Data?.labels?.findIndex((h: string) => parseInt(h) === currentThHour) ?? -1;
 
     // [Graph 1] Output Monitor Options (Dual Axis)
     const optionsGraph1: ChartOptions<"bar" | "line"> = {
@@ -1033,17 +1115,17 @@ function MachineWorkingInner() {
             legend: {
                 position: 'top',
                 labels: {
-                    usePointStyle: false, // ✅ เปลี่ยนเป็น false เพื่อให้ Bar เป็นกล่อง และ Line เป็นเส้น
-                    boxWidth: 25,         // ✅ ปรับความกว้างเพื่อให้เห็นเส้นชัดขึ้น (โดยเฉพาะเส้นประ)
-                    padding: 15,          // ระยะห่างระหว่างรายการ
+                    usePointStyle: false,
+                    boxWidth: 25,
+                    padding: 15,
                     font: {
                         size: 12
                     }
                 }
             },
             title: { display: false },
-
-            datalabels: { display: false }
+            datalabels: { display: false },
+            blinkOverlay: { enabled: blinkEnabled, barIndex: blinkBarIndex1 },
         },
         scales: {
             x: { grid: { display: false } },
@@ -1082,7 +1164,8 @@ function MachineWorkingInner() {
                 }
             },
             title: { display: false },
-            datalabels: { display: false }
+            datalabels: { display: false },
+            blinkOverlay: { enabled: blinkEnabled, barIndex: blinkBarIndex2 },
         },
         scales: {
             x: { grid: { display: false } },
@@ -1150,7 +1233,24 @@ function MachineWorkingInner() {
                                                 )}
                                             </td>
                                             {/* Machine Info */}
-                                            <td className="fw-bold text-primary">{machineName}</td>
+                                            <td className="fw-bold">
+                                                <div className="text-primary">{machineName}</div>
+                                                <div className="d-flex flex-column align-items-center mt-1" style={{ fontSize: "0.75rem" }}>
+                                                    {currentDateStr === new Date().toISOString().split("T")[0] ? (
+                                                        <>
+                                                            <span className="badge rounded-pill" style={{ 
+                                                                backgroundColor: tableData.liveAlarm ? "#dc3545" : (statusColors[tableData.liveStatus]?.color || "#6c757d"),
+                                                                animation: tableData.liveAlarm ? "blink 1s linear infinite" : "none" 
+                                                            }}>
+                                                                {statusColors[tableData.liveStatus]?.label || tableData.liveStatus}
+                                                            </span>
+                                                            {tableData.liveAlarm && <span className="text-danger mt-1"><i className="fas fa-exclamation-triangle"></i> {tableData.liveAlarm}</span>}
+                                                        </>
+                                                    ) : (
+                                                        <span className="badge rounded-pill bg-secondary">Historical</span>
+                                                    )}
+                                                </div>
+                                            </td>
                                             <td>
                                                 {modelsList.length > 1 ? (
                                                     <select
@@ -1279,20 +1379,21 @@ function MachineWorkingInner() {
                             <div className="col-md-6 d-flex">
                                 <div className="card w-100 shadow-sm border border-dark position-relative">
                                     {/* Tab buttons + status badge in header */}
-                                    <div className="card-header bg-white py-1 d-flex align-items-center">
-                                        <span className="fw-bold fs-5 flex-grow-1 text-center">Cycle Time & Availability Monitor</span>
-                                        <div className="d-flex gap-1 ms-2 align-items-center">
+                                    <div className="card-header bg-white py-1 d-flex align-items-center" style={{ position: "relative" }}>
+                                        <span className="fw-bold fs-5" style={{ position: "absolute", left: 0, right: 180, textAlign: "center", pointerEvents: "none" }}>CT & Avail Monitor</span>
+                                        <div className="d-flex gap-1 ms-auto align-items-center">
                                             {isViewingToday ? (
                                                 <span className="badge bg-success">📡 Real-time</span>
                                             ) : (
                                                 <span className="badge bg-secondary">History</span>
                                             )}
                                             <button
-                                                className="btn btn-sm btn-outline-primary fw-bold px-2 py-0"
+                                                className="btn btn-sm btn-outline-primary fw-bold px-4 py-0"
                                                 onClick={() => { setActiveTab("status"); localStorage.setItem("machineWorkingTab", "status"); }}
                                                 title="Switch to Machine Status"
+                                                style={{ minWidth: "120px" }}
                                             >
-                                                <i className="fas fa-cogs me-1"></i>MC Status
+                                                <i className="fas fa-cogs me-2"></i>Status
                                             </button>
                                         </div>
                                     </div>
@@ -1361,10 +1462,10 @@ function MachineWorkingInner() {
                                                     <div className="d-flex align-items-center gap-1">
                                                         <div style={{
                                                             width: 10, height: 10,
-                                                            backgroundColor: MC_STATUS_COLORS[mcTooltip.status]?.color || "#ccc",
+                                                            backgroundColor: statusColors[mcTooltip.status]?.color || "#ccc",
                                                             borderRadius: 2,
                                                         }}></div>
-                                                        <strong>{MC_STATUS_COLORS[mcTooltip.status]?.label || mcTooltip.status}</strong>
+                                                        <strong>{statusColors[mcTooltip.status]?.label || mcTooltip.status}</strong>
                                                     </div>
                                                     <div>{mcTooltip.startTime} → {mcTooltip.endTime} ({mcTooltip.duration})</div>
                                                 </div>
@@ -1379,31 +1480,70 @@ function MachineWorkingInner() {
                                                     plugins={[{
                                                         id: "coloredXLabels",
                                                         afterDraw: (chart: any) => {
-                                                            const { ctx } = chart;
+                                                            const { ctx, chartArea } = chart;
                                                             const xAxis = chart.scales.x;
                                                             const bgColors = chart.data.datasets[0]?.backgroundColor || [];
                                                             const labels = chart.data.labels || [];
-                                                            const y = xAxis.bottom + 6;
+                                                            const yBase = chartArea.bottom + 4;
                                                             const boxSize = 10;
+
+                                                            // คำนวณความกว้าง slot จริง
+                                                            const slotWidth = labels.length > 0 ? chartArea.width / labels.length : 9999;
+                                                            // 1. เลือกมุมตามพื้นที่
+                                                            let angleDeg = 0;
+                                                            if (slotWidth < 45) angleDeg = 90;       // กลายเป็นแนวตั้งตรงๆ (เมื่อจอเล็ก) ที 90 องศา
+                                                            else if (slotWidth < 80) angleDeg = 45;  // 45 องศา สำหรับจอกลาง
+                                                            const angleRad = (angleDeg * Math.PI) / 180;
+
                                                             ctx.save();
                                                             ctx.font = "9px sans-serif";
-                                                            ctx.textBaseline = "top";
+                                                            ctx.textBaseline = "middle"; // ✅ จัดตำแหน่งให้อยู่กึ่งกลางแนวตั้งแทนเพื่อให้ข้อความไม่เบี้ยวเมื่อหมุน
+
                                                             labels.forEach((label: string, i: number) => {
                                                                 const x = xAxis.getPixelForTick(i);
-                                                                const textWidth = ctx.measureText(label).width;
-                                                                const totalWidth = boxSize + 3 + textWidth;
-                                                                const startX = x - totalWidth / 2;
-                                                                // สี่เหลี่ยมสี
-                                                                ctx.fillStyle = bgColors[i] || "#ccc";
-                                                                ctx.fillRect(startX, y, boxSize, boxSize);
-                                                                ctx.strokeStyle = "#bbb";
-                                                                ctx.lineWidth = 0.5;
-                                                                ctx.strokeRect(startX, y, boxSize, boxSize);
-                                                                // ข้อความสีดำ
-                                                                ctx.fillStyle = "#333";
-                                                                ctx.textAlign = "left";
-                                                                ctx.fillText(label, startX + boxSize + 3, y);
+
+                                                                ctx.save();
+
+                                                                // ✅ 2. ถ้าเป็นแนวนอน (0 องศา) = จัดกึ่งกลางพอดีแทนการเริ่มกึ่งกลาง
+                                                                if (angleDeg === 0) {
+                                                                    ctx.translate(x, yBase + boxSize / 2); // ย้ายจุดหมุนมาที่กึ่งกลางของกล่องสี
+                                                                    const textWidth = ctx.measureText(label).width;
+                                                                    const totalWidth = boxSize + 3 + textWidth; // ความกว้างของก้อนออบเจ็กต์ภาพรวม
+                                                                    const startX = -(totalWidth / 2);
+
+                                                                    // สี่เหลี่ยมสี
+                                                                    ctx.fillStyle = bgColors[i] || "#ccc";
+                                                                    ctx.fillRect(startX, -boxSize / 2, boxSize, boxSize);
+                                                                    ctx.strokeStyle = "#bbb";
+                                                                    ctx.lineWidth = 0.5;
+                                                                    ctx.strokeRect(startX, -boxSize / 2, boxSize, boxSize);
+
+                                                                    // ข้อความ
+                                                                    ctx.fillStyle = "#333";
+                                                                    ctx.textAlign = "left";
+                                                                    ctx.fillText(label, startX + boxSize + 3, 0);
+
+                                                                } else {
+                                                                    // ✅ กรณีหมุน (45 หรือ 90 องศา)
+                                                                    ctx.translate(x, yBase);
+                                                                    ctx.rotate(angleRad);
+
+                                                                    // เลื่อนกล่องสีไปทางซ้ายครึ่งนึง และเลื่อนแกน Y ขึ้นครึ่งนึงเพื่อให้กึ่งกลางแนวตั้งตรงกับจุดหมุนแกนพอดี
+                                                                    ctx.fillStyle = bgColors[i] || "#ccc";
+                                                                    ctx.fillRect(-boxSize / 2, -boxSize / 2, boxSize, boxSize);
+                                                                    ctx.strokeStyle = "#bbb";
+                                                                    ctx.lineWidth = 0.5;
+                                                                    ctx.strokeRect(-boxSize / 2, -boxSize / 2, boxSize, boxSize);
+
+                                                                    // ข้อความชิดกล่องสี (Y=0 เพราะ textBaseline = "middle" แล้ว)
+                                                                    ctx.fillStyle = "#333";
+                                                                    ctx.textAlign = "left";
+                                                                    ctx.fillText(label, boxSize / 2 + 3, 0);
+                                                                }
+
+                                                                ctx.restore();
                                                             });
+
                                                             ctx.restore();
                                                         },
                                                     }]}
@@ -1437,7 +1577,7 @@ function MachineWorkingInner() {
                                                                 formatter: (val: number) => val > 0 ? `${val}%` : null,
                                                             },
                                                         },
-                                                        layout: { padding: { top: 24, bottom: 28 } },
+                                                        layout: { padding: { top: 24, bottom: 80 } },
                                                         scales: {
                                                             x: {
                                                                 grid: { display: false },

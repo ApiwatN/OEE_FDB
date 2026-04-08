@@ -1,0 +1,63 @@
+import axios from "axios";
+import config from "@/app/config";
+
+export interface StatusDefinition {
+    key: string;
+    label: string;
+    color: string;
+    group: "running" | "excluded" | "downtime" | "offline";
+}
+
+let cachedConfig: any = null;
+let fetchPromise: Promise<any> | null = null;
+
+export async function fetchMachineStatusConfig() {
+    if (cachedConfig) return cachedConfig;
+    if (fetchPromise) return fetchPromise;
+
+    fetchPromise = axios.get(`${config.apiServer}/api/config/machine-status`)
+        .then(res => {
+            if (res.data && res.data.success) {
+                cachedConfig = res.data.data;
+            }
+            return cachedConfig;
+        })
+        .catch(err => {
+            console.error("Failed to fetch machine status config", err);
+            return null;
+        });
+
+    return fetchPromise;
+}
+
+export async function getStatusColors(machineType?: string): Promise<Record<string, { color: string; label: string }> | null> {
+    const sysConfig = await fetchMachineStatusConfig();
+    if (!sysConfig) return null;
+
+    const targetTypeConfig = sysConfig.machineTypes[machineType || "default"] || sysConfig.default;
+    const statuses: StatusDefinition[] = targetTypeConfig?.statuses || sysConfig.default.statuses || [];
+
+    const colorMap: Record<string, { color: string; label: string }> = {};
+    for (const st of statuses) {
+        colorMap[st.key] = { color: st.color, label: st.label };
+    }
+    return colorMap;
+}
+
+export async function getDowntimeKeys(machineType?: string): Promise<string[]> {
+    const sysConfig = await fetchMachineStatusConfig();
+    if (!sysConfig) return [];
+
+    const targetTypeConfig = sysConfig.machineTypes[machineType || "default"] || sysConfig.default;
+    const statuses: StatusDefinition[] = targetTypeConfig?.statuses || sysConfig.default.statuses || [];
+
+    // Filter out running status, keep downtime and others? 
+    // In our original code DOWNTIME_KEYS included Plan_Stop, Break_Time, etc., basically everything except Run_Time.
+    const keys: string[] = [];
+    for (const st of statuses) {
+        if (st.group !== "running") {
+            keys.push(st.key);
+        }
+    }
+    return keys;
+}
