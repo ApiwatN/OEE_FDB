@@ -8,7 +8,8 @@ const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const influxService = require("./influxService");
 const cacheService = require("./cacheService");
-const { calcMcStatusDurations, calcAvailability, calcPerformance } = require("./oeeCalcService");
+const { getMachineStateMem } = require("./mqttService"); // 🆕 Use MQTT Memory
+const { getMachineRunTimeMode, calcMcStatusDurations, calcAvailability, calcPerformance } = require("./oeeCalcService");
 const {
     SHIFT_HOURS,
     utcHourToThColumn,
@@ -20,17 +21,24 @@ const {
 
 let fastTimer = null;
 let slowTimer = null;
-let ioInstance = null;
+// ✅ Worker Thread: Abstract emit functions (replaces ioInstance)
+let emitFn = null;      // (room, event, data) => void
+let broadcastFn = null; // (event, data) => void
+// ✅ Fix #5: Delta update — track last emitted data per machine for dashboard
+const lastEmittedData = new Map(); // key: machineName, value: { output, cycleTime }
 
 /**
  * Start real-time polling — 2 loops
+ * @param {Function} _emitFn - (room, event, data) → emit to room
+ * @param {Function} _broadcastFn - (event, data) → broadcast to all
  */
-function startRealtimePolling(io) {
-    ioInstance = io;
+function startRealtimePolling(_emitFn, _broadcastFn) {
+    emitFn = _emitFn;
+    broadcastFn = _broadcastFn;
     const fastMs = parseInt(process.env.REALTIME_FAST_POLL_MS || "2000", 10);
     const slowMs = parseInt(process.env.REALTIME_SLOW_POLL_MS || "300000", 10);  // 5 นาที
 
-    // ── Fast Loop (InfluxDB + Cache → Production Data) ──
+    // ── Fast Loop (MQTT Memory + Cache → Production Data) ──
     async function fastLoop() {
         try {
             await fastPollAndEmit();
@@ -54,15 +62,12 @@ function startRealtimePolling(io) {
 
     // Server time broadcast (every 1s)
     setInterval(() => {
-        io.emit("server_time", new Date().toISOString());
+        if (broadcastFn) broadcastFn("server_time", new Date().toISOString());
     }, 1000);
 
     console.log(`📡 Real-time polling started: Fast=${fastMs}ms, Slow=${slowMs}ms (safe-loop)`);
 }
 
-/**
- * Stop real-time polling
- */
 function stopRealtimePolling() {
     if (fastTimer) { clearTimeout(fastTimer); fastTimer = null; }
     if (slowTimer) { clearTimeout(slowTimer); slowTimer = null; }
@@ -81,10 +86,32 @@ async function fastPollAndEmit() {
         const elapsedSeconds = getElapsedSecondsInHour(now);
         const currentShiftIndex = getShiftIndex(thColumn);
 
-        // 1. Query InfluxDB — เฉพาะชั่วโมงปัจจุบัน (1 query เบาๆ)
-        const currentHourData = await influxService.queryAllMachinesForHour(start, now);
+        // 1. Get current hour data from MQTT Memory
+        const machineStateMem = getMachineStateMem();
 
-        // 2. รวม machine names จาก Cache + InfluxDB
+        // Convert MQTT data format to match expected structure
+        // ✅ Fix: Only use MQTT data if it matches the current hour
+        // If the machine hasn't received a new message yet in this hour,
+        // its memory still has old hour data → treat as 0
+        const currentHourData = {};
+        for (const [machineName, state] of machineStateMem.entries()) {
+            if (state.current_hour_label === thColumn) {
+                currentHourData[machineName] = {
+                    output_count: state.current_hour_actual || 0,
+                    avg_cycle_time: state.last_cycle_time || 0,
+                    station_ng: state.current_hour_station_ng || {} // 🆕 Include station NG
+                };
+            } else {
+                // MQTT memory still has old hour data — don't use it
+                currentHourData[machineName] = {
+                    output_count: 0,
+                    avg_cycle_time: 0,
+                    station_ng: {} // 🆕
+                };
+            }
+        }
+
+        // 2. Combine machine names from Cache + MQTT
         const allCache = cacheService.getAllMachinesCache();
         const allMachineNames = new Set([
             ...Object.keys(allCache),
@@ -98,9 +125,18 @@ async function fastPollAndEmit() {
             const cached = cacheService.getFullDay(machineName);
             const currentData = currentHourData[machineName] || { output_count: 0, avg_cycle_time: 0 };
 
+            // Calculate excluded seconds in current hour
+            let currentHourExcluded = 0;
+            const mcRecords = mcStatusCache.recordsByMachine[machineName] || [];
+            if (mcRecords.length > 0) {
+                const { excludedSeconds } = calcMcStatusDurations(mcRecords, new Date(start), now);
+                currentHourExcluded = excludedSeconds;
+            }
+            const adjustedElapsedSeconds = Math.max(0, elapsedSeconds - currentHourExcluded);
+
             // Current hour efficiency
-            const theoreticalMax = currentData.avg_cycle_time > 0 && elapsedSeconds > 0
-                ? elapsedSeconds / currentData.avg_cycle_time : 0;
+            const theoreticalMax = currentData.avg_cycle_time > 0 && adjustedElapsedSeconds > 0
+                ? adjustedElapsedSeconds / currentData.avg_cycle_time : 0;
             const currentEfficiency = theoreticalMax > 0
                 ? (currentData.output_count / theoreticalMax) * 100 : 0;
 
@@ -159,7 +195,7 @@ async function fastPollAndEmit() {
                 const h = SHIFT_HOURS[i];
                 const targetVal = targets[`target_${h}`] || 0;
                 if (targetVal > 0) {
-                    totalValidSeconds += (i < currentShiftIndex) ? 3600 : elapsedSeconds;
+                    totalValidSeconds += (i < currentShiftIndex) ? 3600 : adjustedElapsedSeconds;
                 }
             }
 
@@ -192,6 +228,7 @@ async function fastPollAndEmit() {
                     output: currentData.output_count,
                     cycleTime: parseFloat(currentData.avg_cycle_time.toFixed(2)),
                     efficiency: parseFloat(currentEfficiency.toFixed(2)),
+                    stationNg: currentData.station_ng || {}, // 🆕 Pass to frontend
                 },
                 daily: {
                     totalOutput,
@@ -210,30 +247,59 @@ async function fastPollAndEmit() {
             };
 
             // ── ส่งเฉพาะเครื่องที่มีคนดู (Room: "machine:<name>") — มี hourly arrays ──
-            if (ioInstance) {
-                ioInstance.to(`machine:${machineName}`).emit("realtime_output", {
+            if (emitFn) {
+                emitFn(`machine:${machineName}`, "realtime_output", {
                     serverTimeUTC: now.toISOString(),
                     shiftDate: dateStr,
                     currentHourTH: thColumn,
                     currentShiftIndex,
-                    elapsedSeconds,
+                    elapsedSeconds: adjustedElapsedSeconds,
                     machines: { [machineName]: machinePayload },
                 });
             }
 
-            // Dashboard: ส่งข้อมูลเต็ม (OverallMachineCard ต้องใช้ hourly arrays สำหรับกราฟ)
-            dashboardMachines[machineName] = machinePayload;
+            // Dashboard: check for changes (delta update)
+            // ✅ Fix #5: Only include machines whose key values changed
+            // ✅ Bug fix: Also track shiftIndex — when hour changes, ALL machines must update
+            const lastData = lastEmittedData.get(machineName);
+            const currentOutput = machinePayload.daily.totalOutput;
+            const currentCt = machinePayload.currentHour.cycleTime;
+            const currentTarget = machinePayload.daily.accumTarget;
+            const currentAchieve = machinePayload.daily.achieve;
+            const currentStationNgStr = JSON.stringify(machinePayload.currentHour.stationNg); // 🆕 Convert to string for deep compare
+
+            const hasChanged = !lastData ||
+                lastData.output !== currentOutput ||
+                lastData.cycleTime !== currentCt ||
+                lastData.accumTarget !== currentTarget ||
+                lastData.achieve !== currentAchieve ||
+                lastData.shiftIndex !== currentShiftIndex ||
+                lastData.stationNgStr !== currentStationNgStr; // 🆕 Check if station NG changed
+
+            if (hasChanged) {
+                dashboardMachines[machineName] = machinePayload;
+                lastEmittedData.set(machineName, {
+                    output: currentOutput,
+                    cycleTime: currentCt,
+                    accumTarget: currentTarget,
+                    achieve: currentAchieve,
+                    shiftIndex: currentShiftIndex,
+                    stationNgStr: currentStationNgStr // 🆕 Store stringified state
+                });
+            }
         }
 
         // ── ส่งข้อมูลรวมให้ Dashboard (Room: "dashboard") ──
-        if (ioInstance) {
-            ioInstance.to("dashboard").emit("realtime_output", {
+        // ✅ Fix #5: Only emit if there are changed machines (delta)
+        if (emitFn && Object.keys(dashboardMachines).length > 0) {
+            emitFn("dashboard", "realtime_output", {
                 serverTimeUTC: now.toISOString(),
                 shiftDate: dateStr,
                 currentHourTH: thColumn,
                 currentShiftIndex,
-                elapsedSeconds,
+                elapsedSeconds, // For global backward compatibility, though individual machines use adjustedElapsedSeconds to compute theoretical max
                 machines: dashboardMachines,
+                isDelta: true, // ✅ Frontend should merge, not replace
             });
         }
     } catch (err) {
@@ -241,52 +307,103 @@ async function fastPollAndEmit() {
     }
 }
 
+// ✅ Fix #1: MCStatus incremental cache — avoid querying full day every 5 min
+const mcStatusCache = {
+    shiftDateStr: null,         // Track which date this cache belongs to
+    lastQueryTime: null,        // Last query upper bound (for incremental)
+    recordsByMachine: {},       // { machineName: [...records] }
+    carryOverByMachine: {},     // { machineName: { MC, Datetime, MCStatus } } — stable within day
+};
+
 // ═══════════════════════════════════════════════════════
 // Slow Loop: MSSQL only → MCStatus + Quality + OEE
 // Query: 2 MSSQL queries (MCStatus + tb_oee) | ไม่ Query InfluxDB
 // emit "realtime_update" ทุก 5 นาที
+// ✅ Timeout protection: ไม่ให้ค้างเกิน 30 วินาที
 // ═══════════════════════════════════════════════════════
 async function slowPollAndEmit() {
+    const TIMEOUT_MS = 30000;
+    try {
+        await Promise.race([
+            _slowPollAndEmitInner(),
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error("SlowPoll timeout (30s)")), TIMEOUT_MS)
+            ),
+        ]);
+    } catch (err) {
+        console.error("⚠️ [SlowPoll] timed out or failed:", err.message);
+    }
+}
+
+async function _slowPollAndEmitInner() {
     try {
         const now = new Date();
         const { dateStr } = getCurrentHourBoundaries(now);
 
-        // 1. Query tb_MCStatus for today's shift (all machines)
-        // ✅ DB เก็บเวลาไทย (+7) ตรงๆ ใน Datetime column
-        // Prisma ส่ง UTC value ของ JS Date ไป SQL query
-        // ดังนั้นต้อง:
-        //   - shiftStart = Date.UTC(year, month, day, 7) → Prisma ส่ง '07:00' → ตรงกับ 07:00 ไทยใน DB
-        //   - nowTH = now + 7h → Prisma ส่งเวลาไทยไป → ตรงกับเวลาไทยใน DB
         const year = parseInt(dateStr.substring(0, 4));
         const month = parseInt(dateStr.substring(5, 7)) - 1;
         const day = parseInt(dateStr.substring(8, 10));
         const shiftStart = new Date(Date.UTC(year, month, day, 7, 0, 0));
 
-        // ✅ แปลง now เป็นเวลาไทย (+7h) เพื่อเปรียบเทียบกับ DB ที่เก็บเวลาไทย
         const TH_OFFSET_MS = 7 * 60 * 60 * 1000;
         const nowTH = new Date(now.getTime() + TH_OFFSET_MS);
 
-        const todayMcStatus = await prisma.tb_MCStatus.findMany({
-            where: { Datetime: { gte: shiftStart, lte: nowTH } },
-            orderBy: { Datetime: "asc" },
-            select: { MC: true, Datetime: true, MCStatus: true },
-        });
+        // ✅ Fix #1: Incremental MCStatus query
+        let mcStatusByMachine;
+        const isNewDay = mcStatusCache.shiftDateStr !== dateStr;
 
-        const carryOverRows = await prisma.$queryRaw`
-            SELECT MC, MCStatus, Datetime FROM (
-                SELECT MC, MCStatus, Datetime, ROW_NUMBER() OVER (PARTITION BY MC ORDER BY Datetime DESC) AS rn
-                FROM tb_MCStatus WHERE Datetime < ${shiftStart}
-            ) t WHERE rn = 1
-        `;
+        if (isNewDay || !mcStatusCache.lastQueryTime) {
+            // === First poll of the day OR new shift date → Full query ===
+            const todayMcStatus = await prisma.tb_MCStatus.findMany({
+                where: { Datetime: { gte: shiftStart, lte: nowTH } },
+                orderBy: { Datetime: "asc" },
+                select: { MC: true, Datetime: true, MCStatus: true },
+            });
 
-        // Build grouped records
-        const mcStatusByMachine = {};
-        for (const row of carryOverRows) {
-            mcStatusByMachine[row.MC] = [{ MC: row.MC, Datetime: shiftStart, MCStatus: row.MCStatus }];
-        }
-        for (const rec of todayMcStatus) {
-            if (!mcStatusByMachine[rec.MC]) mcStatusByMachine[rec.MC] = [];
-            mcStatusByMachine[rec.MC].push(rec);
+            const carryOverRows = await prisma.$queryRaw`
+                SELECT MC, MCStatus, Datetime FROM (
+                    SELECT MC, MCStatus, Datetime, ROW_NUMBER() OVER (PARTITION BY MC ORDER BY Datetime DESC) AS rn
+                    FROM tb_MCStatus WHERE Datetime < ${shiftStart}
+                ) t WHERE rn = 1
+            `;
+
+            // Build cache
+            mcStatusCache.shiftDateStr = dateStr;
+            mcStatusCache.recordsByMachine = {};
+            mcStatusCache.carryOverByMachine = {};
+
+            for (const row of carryOverRows) {
+                mcStatusCache.carryOverByMachine[row.MC] = row;
+                mcStatusCache.recordsByMachine[row.MC] = [{ MC: row.MC, Datetime: shiftStart, MCStatus: row.MCStatus }];
+            }
+            for (const rec of todayMcStatus) {
+                if (!mcStatusCache.recordsByMachine[rec.MC]) mcStatusCache.recordsByMachine[rec.MC] = [];
+                mcStatusCache.recordsByMachine[rec.MC].push(rec);
+            }
+
+            mcStatusCache.lastQueryTime = nowTH;
+            mcStatusByMachine = mcStatusCache.recordsByMachine;
+            console.log(`   📊 [SlowPoll] Full MCStatus query: ${todayMcStatus.length} records cached`);
+        } else {
+            // === Incremental query — only new records since last poll ===
+            const incrementalRecords = await prisma.tb_MCStatus.findMany({
+                where: { Datetime: { gt: mcStatusCache.lastQueryTime, lte: nowTH } },
+                orderBy: { Datetime: "asc" },
+                select: { MC: true, Datetime: true, MCStatus: true },
+            });
+
+            // Append to cache
+            for (const rec of incrementalRecords) {
+                if (!mcStatusCache.recordsByMachine[rec.MC]) {
+                    // New machine appeared — add carryover placeholder
+                    mcStatusCache.recordsByMachine[rec.MC] = [];
+                }
+                mcStatusCache.recordsByMachine[rec.MC].push(rec);
+            }
+
+            mcStatusCache.lastQueryTime = nowTH;
+            mcStatusByMachine = mcStatusCache.recordsByMachine;
+            console.log(`   📊 [SlowPoll] Incremental: ${incrementalRecords.length} new MCStatus records (cached total: ${Object.keys(mcStatusByMachine).length} machines)`);
         }
 
         // 2. Query tb_oee for today (Quality data)
@@ -342,26 +459,45 @@ async function slowPollAndEmit() {
         for (const machineName of allMachineNames) {
             // Availability & Performance from MCStatus
             const mcRecords = mcStatusByMachine[machineName] || [];
-            const { runTimeSeconds, excludedSeconds, totalSeconds } = calcMcStatusDurations(mcRecords, shiftStart, nowTH);
-            const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalSeconds);
+            let { runTimeSeconds, excludedSeconds, totalSeconds } = calcMcStatusDurations(mcRecords, shiftStart, nowTH);
+            const modeRunTime = getMachineRunTimeMode(machineName);
 
             // ✅ ดึง CT_target จาก pre-fetched map (ไม่ query DB)
             const targetRow = targetMap[machineName];
             const idealCT = targetRow?.cycle_time_target || 0;
 
             // totalOutput for performance: cache (past hours) + InfluxDB (current hour)
+            // ✅ ข้าม current hour จาก cache → ใช้ InfluxDB เท่านั้น (ป้องกันนับซ้ำ)
             const cached = cacheService.getFullDay(machineName);
+            const { thColumn } = getCurrentHourBoundaries(now);
+            const currentShiftIndex = getShiftIndex(thColumn);
             let totalOutput = 0;
+            let sumCtWeighted = 0;
+
             if (cached) {
-                for (const h of SHIFT_HOURS) {
-                    totalOutput += cached.output[`actual_${h}`] || 0;
+                for (let i = 0; i < SHIFT_HOURS.length; i++) {
+                    if (i === currentShiftIndex) continue; // ข้าม current hour
+                    const out = cached.output[`actual_${SHIFT_HOURS[i]}`] || 0;
+                    const ct = cached.cycleTime[`cycle_${SHIFT_HOURS[i]}`] || 0;
+                    totalOutput += out;
+                    if (out > 0 && ct > 0) sumCtWeighted += ct * out;
                 }
             }
+            // current hour → InfluxDB เท่านั้น (source of truth)
             const currentData = currentHourData[machineName];
-            if (currentData && currentData.output_count > 0) {
-                totalOutput += currentData.output_count;
+            const currOut = currentData?.output_count || 0;
+            const currCt = currentData?.avg_cycle_time || 0;
+            totalOutput += currOut;
+            if (currOut > 0 && currCt > 0) sumCtWeighted += currCt * currOut;
+
+            const overallAvgCt = totalOutput > 0 ? sumCtWeighted / totalOutput : 0;
+
+            if (modeRunTime === "output_based") {
+                const avgToUse = overallAvgCt > 0 ? overallAvgCt : idealCT;
+                runTimeSeconds = totalOutput * avgToUse;
             }
 
+            const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalSeconds);
             const performance = calcPerformance(totalOutput, idealCT, runTimeSeconds);
 
             // Quality & OEE — แยกตาม oee_mode (auto/manual)
@@ -387,15 +523,22 @@ async function slowPollAndEmit() {
                     : oeeData?.oee_value || 0;
             }
 
+            let dailyPayload = {
+                availability: parseFloat(availability.toFixed(2)),
+                performance: parseFloat(performance.toFixed(2)),
+                ngQty,
+                oeeMode: mode,
+            };
+
+            // ✅ For manual machines, prevent overwriting yesterday's OEE with today's incomplete OEE
+            const todayStr = getShiftDateUTC();
+            if (mode === "auto" || dateStr !== todayStr) {
+                dailyPayload.quality = parseFloat(quality.toFixed(2));
+                dailyPayload.oee = parseFloat(oeeValue.toFixed(2));
+            }
+
             machines[machineName] = {
-                daily: {
-                    availability: parseFloat(availability.toFixed(2)),
-                    performance: parseFloat(performance.toFixed(2)),
-                    quality: parseFloat(quality.toFixed(2)),
-                    oee: parseFloat(oeeValue.toFixed(2)),
-                    ngQty,
-                    oeeMode: mode,
-                },
+                daily: dailyPayload,
             };
 
             // ✅ Queue upsert (ไม่ await ทีละตัว)
@@ -442,8 +585,8 @@ async function slowPollAndEmit() {
 
 
         // 3. Emit status update (broadcast to all — ข้อมูล MCStatus ทุกคนต้องได้)
-        if (ioInstance) {
-            ioInstance.emit("realtime_update", {
+        if (broadcastFn) {
+            broadcastFn("realtime_update", {
                 serverTimeUTC: now.toISOString(),
                 shiftDate: dateStr,
                 machines,

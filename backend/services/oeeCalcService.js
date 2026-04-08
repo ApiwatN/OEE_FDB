@@ -4,9 +4,33 @@
  */
 
 // MC Statuses that are excluded from operating time (not counted as downtime NOR running)
-const EXCLUDED_STATUSES = new Set(["Plan_Stop", "Break_Time"]);
+const EXCLUDED_STATUSES = new Set(["Plan_Stop", "Break_Time", "Preventive"]);
 // MC Status that counts as running
 const RUNNING_STATUS = "Run_Time";
+
+const fs = require('fs');
+const path = require('path');
+let machineCalcConfig = null;
+
+function getMachineRunTimeMode(machineName) {
+    if (!machineCalcConfig) {
+        try {
+            const configPath = path.join(__dirname, '../config/machine_calc.json');
+            machineCalcConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        } catch (e) {
+            console.error("⚠️ [Config] failed to load machine_calc.json:", e.message);
+            machineCalcConfig = { default_mode: "status_based", custom_modes: {} };
+        }
+    }
+    
+    // Check prefix match
+    for (const prefix of Object.keys(machineCalcConfig.custom_modes)) {
+        if (machineName.startsWith(prefix)) {
+            return machineCalcConfig.custom_modes[prefix];
+        }
+    }
+    return machineCalcConfig.default_mode || "status_based";
+}
 
 /**
  * Calculate run time and excluded time from MC Status records for a given shift period.
@@ -78,6 +102,7 @@ function calcPerformance(totalOutput, idealCT, runTimeSeconds) {
 module.exports = {
     EXCLUDED_STATUSES,
     RUNNING_STATUS,
+    getMachineRunTimeMode,
     calcMcStatusDurations,
     calcAvailability,
     calcPerformance,

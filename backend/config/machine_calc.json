@@ -1,0 +1,7 @@
+{
+    "default_mode": "status_based",
+    "custom_modes": {
+        "AHV": "output_based",
+        "ABR": "status_based"
+    }
+}
