@@ -65,7 +65,7 @@ const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
         });
     });
 
-    client.on("message", (topic, message) => {
+    client.on("message", async (topic, message) => {
         try {
             // Telegraf sends JSON Payload
             const data = JSON.parse(message.toString());
@@ -121,47 +121,112 @@ const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
                 if (measurementName === "status_tb") {
                     const statusStr = data.fields?.Status;
                     if (statusStr) {
-                        currentState.live_status = statusStr;
-                        currentState.last_update = now;
-                        machineStateMem.set(machineName, currentState);
-
-                        prisma.tb_MCStatus.create({
-                            data: {
-                                Datetime: dataTime,
-                                MC: machineName,
-                                MCStatus: statusStr
-                            }
-                        }).catch(e => console.error(`[MQTT] tb_MCStatus Insert Error for ${machineName}:`, e.message));
+                                                // 1. เขียนลง MSSQL (ต้องบวก 7 ชั่วโมงเพราะ MSSQL เก็บเวลา Local ไทยตรงๆ แกล้งเป็น UTC)
+                        // ตรวจสอบว่า Time เป็น UTC (ABR) หรือ Local (AHV)
+                        // ถ้าระยะเวลาใกล้เคียงกับเวลาปัจจุบัน (True UTC) ให้บวก 7 ชั่วโมง
+                        // แต่ถ้าล่วงหน้าไปแล้วราวๆ 7 ชั่วโมง (เพราะ AHV ส่งเป็นเวลาไทยโดยตรง) ไม่ต้องบวกเพิ่ม
+                        let thaiDataTimeMs = dataTime.getTime();
+                        if (thaiDataTimeMs - Date.now() < 3 * 3600 * 1000) {
+                            thaiDataTimeMs += 7 * 60 * 60 * 1000; // ABR: Convert UTC to Local Thai Time
+                        }
+                        const thaiDataTime = new Date(thaiDataTimeMs);
 
                         try {
-                            const rtService = require("./realtimeService");
-                            if (rtService && typeof rtService.pushRealtimeMcStatus === "function") {
-                                rtService.pushRealtimeMcStatus(machineName, statusStr, dataTime);
+                            await prisma.tb_MCStatus.create({
+                                data: {
+                                    Datetime: thaiDataTime,
+                                    MC: machineName,
+                                    MCStatus: statusStr
+                                }
+                            });
+                            // ✅ [Phase 2] Feed live status into In-Memory OEE Stopwatch
+                            // เรียก processStatusChange ทันทีหลังเขียน MSSQL สำเร็จ
+                            // เพื่อให้ Stopwatch เริ่มนับวินาทีใหม่จาก status นี้ได้เลย
+                            try {
+                                const memOeeService = require('./memoryOeeService');
+                                memOeeService.processStatusChange(machineName, statusStr, thaiDataTime);
+                            } catch (memErr) {
+                                console.error(`[MQTT] memoryOeeService.processStatusChange error (${machineName}):`, memErr.message);
                             }
-                        } catch (err) {}
+                        } catch (e) {
+                            console.error(`[MQTT] tb_MCStatus Insert Error for ${machineName}:`, e.message);
+                        }
 
-                        const mcUpdatePayload = { machine_name: machineName, status: statusStr, datetime: dataTime.toISOString() };
-                        if (localEmitToRoomFn) localEmitToRoomFn(`machine:${machineName}`, "mc_status_updated", mcUpdatePayload);
-                        if (localBroadcastFn) localBroadcastFn("mc_status_updated", mcUpdatePayload);
+                        // 2. เมื่อเขียนเสร็จให้ไปดึงจาก MSSQL มาแสดง เพื่อ update ปัจจุบัน
+                        const latestStatus = await prisma.tb_MCStatus.findFirst({
+                            where: { MC: machineName },
+                            orderBy: { Datetime: 'desc' },
+                            select: { MCStatus: true, Datetime: true }
+                        });
+                        
+                        if (latestStatus) {
+                            currentState.live_status = latestStatus.MCStatus;
+                            currentState.last_update = now;
+                            machineStateMem.set(machineName, currentState);
+
+                            // แปลงกลับเป็น UTC จริง (ลบ 7 ชั่วโมง) ก่อนแจ้งให้ Frontend
+                            // ถ้าเวลาล่าสุดมันเป็น Local Thai (เดินหน้าไป 7 ชม.) 
+                            // เราต้องลบ 7 กลับเป็น UTC ก่อนใช้แสดงในไทม์ไลน์หน้าบ้าน
+                            let realUtcMs = latestStatus.Datetime.getTime();
+                            if (realUtcMs - Date.now() > 3 * 3600 * 1000) {
+                                realUtcMs -= 7 * 60 * 60 * 1000;
+                            }
+                            const realUtcTime = new Date(realUtcMs);
+
+                            // (Removed pushRealtimeMcStatus call)
+
+                            const mcUpdatePayload = { machine_name: machineName, status: latestStatus.MCStatus, datetime: realUtcTime.toISOString() };
+                            if (localEmitToRoomFn) localEmitToRoomFn(`machine:${machineName}`, "mc_status_updated", mcUpdatePayload);
+                            if (localBroadcastFn) localBroadcastFn("mc_status_updated", mcUpdatePayload);
+                        }
                     }
                 } else if (measurementName === "alarm_tb") {
                     const alarmStr = data.fields?.Alarm;
                     if (alarmStr) {
-                        currentState.live_alarm = alarmStr;
-                        currentState.last_update = now;
-                        machineStateMem.set(machineName, currentState);
+                                                // 1. เขียนลง MSSQL (ต้องบวก 7 ชั่วโมงเพราะ MSSQL เก็บเวลา Local ไทยตรงๆ แกล้งเป็น UTC)
+                        // ตรวจสอบว่า Time เป็น UTC (ABR) หรือ Local (AHV)
+                        // ถ้าระยะเวลาใกล้เคียงกับเวลาปัจจุบัน (True UTC) ให้บวก 7 ชั่วโมง
+                        // แต่ถ้าล่วงหน้าไปแล้วราวๆ 7 ชั่วโมง (เพราะ AHV ส่งเป็นเวลาไทยโดยตรง) ไม่ต้องบวกเพิ่ม
+                        let thaiDataTimeMs = dataTime.getTime();
+                        if (thaiDataTimeMs - Date.now() < 3 * 3600 * 1000) {
+                            thaiDataTimeMs += 7 * 60 * 60 * 1000; // ABR: Convert UTC to Local Thai Time
+                        }
+                        const thaiDataTime = new Date(thaiDataTimeMs);
 
-                        prisma.tb_MCAlarm.create({
-                            data: {
-                                Datetime: dataTime,
-                                MC: machineName,
-                                MCAlarm: alarmStr
+                        try {
+                            await prisma.tb_MCAlarm.create({
+                                data: {
+                                    Datetime: thaiDataTime,
+                                    MC: machineName,
+                                    MCAlarm: alarmStr
+                                }
+                            });
+                        } catch (e) {
+                            console.error(`[MQTT] tb_MCAlarm Insert Error for ${machineName}:`, e.message);
+                        }
+
+                        // 2. ไปดึงจาก MSSQL มาแสดง
+                        const latestAlarm = await prisma.tb_MCAlarm.findFirst({
+                            where: { MC: machineName },
+                            orderBy: { Datetime: 'desc' },
+                            select: { MCAlarm: true, Datetime: true }
+                        });
+                        
+                        if (latestAlarm) {
+                            currentState.live_alarm = latestAlarm.MCAlarm;
+                            currentState.last_update = now;
+                            machineStateMem.set(machineName, currentState);
+
+                            let realUtcMs = latestAlarm.Datetime.getTime();
+                            if (realUtcMs - Date.now() > 3 * 3600 * 1000) {
+                                realUtcMs -= 7 * 60 * 60 * 1000;
                             }
-                        }).catch(e => console.error(`[MQTT] tb_MCAlarm Insert Error for ${machineName}:`, e.message));
+                            const realUtcTime = new Date(realUtcMs);
 
-                        const alarmUpdatePayload = { machine_name: machineName, alarm: alarmStr, datetime: dataTime.toISOString() };
-                        if (localEmitToRoomFn) localEmitToRoomFn(`machine:${machineName}`, "mc_status_updated", alarmUpdatePayload);
-                        if (localBroadcastFn) localBroadcastFn("mc_status_updated", alarmUpdatePayload);
+                            const alarmUpdatePayload = { machine_name: machineName, alarm: latestAlarm.MCAlarm, datetime: realUtcTime.toISOString() };
+                            if (localEmitToRoomFn) localEmitToRoomFn(`machine:${machineName}`, "mc_status_updated", alarmUpdatePayload);
+                            if (localBroadcastFn) localBroadcastFn("mc_status_updated", alarmUpdatePayload);
+                        }
                     }
                 }
                 return; // จบการทำงาน Status / Alarm

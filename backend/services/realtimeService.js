@@ -26,7 +26,12 @@ let emitFn = null;      // (room, event, data) => void
 let broadcastFn = null; // (event, data) => void
 // ✅ Fix #5: Delta update — track last emitted data per machine for dashboard
 const lastEmittedData = new Map(); // key: machineName, value: { output, cycleTime }
+const lastAutoEmittedData = new Map(); // 🆕 Track auto machine OEE changes
 let lastOeeUpsertTime = 0; // 🆕 Throttle MSSQL writes
+
+let machineModeCache = new Map(); // 🆕 Cached machine modes (auto/manual)
+let autoNgCache = { data: {}, lastFetch: 0 }; // 🆕 Cached NG counts for auto machines
+let modeCacheTimer = null;
 
 /**
  * Start real-time polling — 2 loops
@@ -37,7 +42,30 @@ function startRealtimePolling(_emitFn, _broadcastFn) {
     emitFn = _emitFn;
     broadcastFn = _broadcastFn;
     const fastMs = parseInt(process.env.REALTIME_FAST_POLL_MS || "2000", 10);
-    const slowMs = parseInt(process.env.REALTIME_SLOW_POLL_MS || "2000", 10);  // 🆕 ปรับ Default ให้ใกล้เคียง Fast Loop เพื่อให้ OEE ไหลแบบ 2s
+    const slowMs = parseInt(process.env.REALTIME_SLOW_POLL_MS || "300000", 10);  // 🆕 ปรับ Default เป็น 5 นาที (300000) กลับสู่ปกติ
+
+    // 🆕 ข้อมูล Mode เครื่องจักร (อัปเดตทุกๆ 2 นาทีโดยไม่กวนลูปความเร็วสูง)
+    async function refreshModeCache() {
+        try {
+            const configs = await prisma.tb_machine_plan_config.findMany({ select: { machine_name: true, oee_mode: true } });
+            const machines = await prisma.tbm_machine.findMany({ select: { machine_name: true, machine_type: true } });
+            
+            const fs = require("fs");
+            const path = require("path");
+            const machineCalcConfig = JSON.parse(fs.readFileSync(path.join(__dirname, "../config/machine_calc.json"), "utf-8"));
+            const ngModes = machineCalcConfig.ng_modes || {};
+
+            const typeMap = new Map(machines.map(m => [m.machine_name, m.machine_type]));
+            
+            machineModeCache = new Map(configs.map(c => {
+                const mType = typeMap.get(c.machine_name) || "Unknown";
+                const ngMode = ngModes[mType] || ngModes["default"] || "visual_ng";
+                return [c.machine_name, { oee_mode: c.oee_mode || "manual", ng_mode: ngMode }];
+            }));
+        } catch(e) {}
+        modeCacheTimer = setTimeout(refreshModeCache, 120000);
+    }
+    refreshModeCache();
 
     // ── Fast Loop (MQTT Memory + Cache → Production Data) ──
     async function fastLoop() {
@@ -72,6 +100,7 @@ function startRealtimePolling(_emitFn, _broadcastFn) {
 function stopRealtimePolling() {
     if (fastTimer) { clearTimeout(fastTimer); fastTimer = null; }
     if (slowTimer) { clearTimeout(slowTimer); slowTimer = null; }
+    if (modeCacheTimer) { clearTimeout(modeCacheTimer); modeCacheTimer = null; }
     console.log("📡 Real-time polling stopped");
 }
 
@@ -86,6 +115,15 @@ async function fastPollAndEmit() {
         const { dateStr, thColumn, start } = getCurrentHourBoundaries(now);
         const elapsedSeconds = getElapsedSecondsInHour(now);
         const currentShiftIndex = getShiftIndex(thColumn);
+
+        // 🆕 Light fetch for Auto total NG (ทุกๆ 10 วินาที เพื่อสร้าง Quality OEE ในโหมด Auto)
+        if (now.getTime() - autoNgCache.lastFetch > 10000) {
+            autoNgCache.lastFetch = now.getTime();
+            const shiftUTCStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
+            influxService.queryAllMachinesNgCount(shiftUTCStart, now)
+                .then(data => { autoNgCache.data = data; })
+                .catch(e => console.error("Fast poll NG sync failed:", e.message));
+        }
 
         // 1. Get current hour data from MQTT Memory
         const machineStateMem = getMachineStateMem();
@@ -128,6 +166,7 @@ async function fastPollAndEmit() {
 
         // 3. Build payload per machine — ใช้ Cache + InfluxDB เท่านั้น
         const dashboardMachines = {};
+        const dashboardMachinesUpdate = {}; // 🆕 Update OEE เฉพาะ Auto Machine
 
         for (const machineName of allMachineNames) {
             const cached = cacheService.getFullDay(machineName);
@@ -303,6 +342,84 @@ async function fastPollAndEmit() {
                     alarm: currentAlarm,
                 });
             }
+
+            // 🆕 [Phase 3] Auto Machine Real-Time OEE Calculation using In-Memory Stopwatch
+            // ใช้ memoryOeeService.getDurationsNow() แทน calcMcStatusDurations() จาก MSSQL Cache
+            // → A/P/Q/OEE อัปเดตทุก 2 วินาทีโดยไม่ Query MSSQL
+            const mCacheConfig = machineModeCache.get(machineName) || {};
+            if (mCacheConfig.oee_mode === "auto") {
+                const memOeeService = require('./memoryOeeService');
+                // ✅ [Bug Fix] ส่ง now (UTC ms) ตรงๆ — ไม่บวก +7h
+                // lastStatusTime ใน State เก็บเป็น UTC ms (จาก new Date() ใน mqttService)
+                // ถ้าบวก +7h → tickingSec ใหญ่เกิน 7 ชั่วโมง → A ≈ 100% ผิดพลาด
+
+                // ✅ ดึงเวลาจาก Stopwatch RAM แทน MSSQL (Zero DB Load)
+                let { runTimeSec: runTimeSeconds, excludedSec: excludedSeconds, totalSec: totalSeconds } = memOeeService.getDurationsNow(machineName, now);
+
+                const targetEntry = cacheService.getTarget(machineName);
+                const idealCT = targetEntry?.target?.cycle_time_target || 0;
+
+                const modeRunTime = getMachineRunTimeMode(machineName);
+                if (modeRunTime === "output_based") {
+                    // AHV: ไม่ใช้ Stopwatch → ใช้ Output × AvgCT แทน
+                    const avgToUse = overallAvgCt > 0 ? overallAvgCt : idealCT;
+                    runTimeSeconds = totalOutput * avgToUse;
+                }
+
+                let outputForOee = totalOutput;
+                const ngQty = autoNgCache.data[machineName] || 0;
+
+                if (mCacheConfig.ng_mode === "over_reject") {
+                    outputForOee = Math.max(0, totalOutput - ngQty);
+                }
+
+                let availability = calcAvailability(runTimeSeconds, excludedSeconds, totalSeconds);
+                let performance = calcPerformance(outputForOee, idealCT, runTimeSeconds);
+
+                let quality = outputForOee > 0 && mCacheConfig.ng_mode !== "over_reject"
+                    ? ((outputForOee - ngQty) / outputForOee) * 100
+                    : 100;
+
+                if (mCacheConfig.ng_mode === "over_reject") {
+                    quality = 100;
+                } else {
+                    if (quality < 0) quality = 0;
+                }
+
+                let oeeValue = (availability > 0 && performance > 0 && quality > 0)
+                    ? (availability / 100) * (performance / 100) * (quality / 100) * 100
+                    : 0;
+
+                const autoOeePayload = {
+                    availability: parseFloat(availability.toFixed(2)),
+                    performance: parseFloat(performance.toFixed(2)),
+                    quality: parseFloat(quality.toFixed(2)),
+                    oee: parseFloat(oeeValue.toFixed(2)),
+                    over_reject_qty: mCacheConfig.ng_mode === "over_reject" ? ngQty : undefined,
+                    ngQty: mCacheConfig.ng_mode === "over_reject" ? 0 : ngQty,
+                    oeeMode: "auto"
+                };
+
+                const lastAutoData = lastAutoEmittedData.get(machineName);
+                if (!lastAutoData ||
+                    lastAutoData.oee !== autoOeePayload.oee ||
+                    lastAutoData.availability !== autoOeePayload.availability ||
+                    lastAutoData.performance !== autoOeePayload.performance ||
+                    lastAutoData.quality !== autoOeePayload.quality ||
+                    lastAutoData.ngQty !== autoOeePayload.ngQty ||
+                    lastAutoData.over_reject_qty !== autoOeePayload.over_reject_qty ||
+                    lastAutoData.status !== currentStatus) {
+
+                    dashboardMachinesUpdate[machineName] = {
+                        daily: autoOeePayload,
+                        currentHour: { live_status: currentStatus }
+                    };
+                    lastAutoEmittedData.set(machineName, {
+                        ...autoOeePayload,
+                        status: currentStatus
+                    });
+                }
+            }
         }
 
         // ── ส่งข้อมูลรวมให้ Dashboard (Room: "dashboard") ──
@@ -318,18 +435,21 @@ async function fastPollAndEmit() {
                 isDelta: true, // ✅ Frontend should merge, not replace
             });
         }
+
+        // ── ส่งข้อมูล OEE ของตัวลูก Auto (หลอกยิงจาก FastLoop) ทับ realtime_update ──
+        if (broadcastFn && Object.keys(dashboardMachinesUpdate).length > 0) {
+            broadcastFn("realtime_update", {
+                serverTimeUTC: now.toISOString(),
+                shiftDate: dateStr,
+                machines: dashboardMachinesUpdate, // contains daily {availability, performance...}
+            });
+        }
     } catch (err) {
         console.error("❌ Fast poll error:", err.message);
     }
 }
 
-// ✅ Fix #1: MCStatus incremental cache — avoid querying full day every 5 min
-const mcStatusCache = {
-    shiftDateStr: null,         // Track which date this cache belongs to
-    lastQueryTime: null,        // Last query upper bound (for incremental)
-    recordsByMachine: {},       // { machineName: [...records] }
-    carryOverByMachine: {},     // { machineName: { MC, Datetime, MCStatus } } — stable within day
-};
+// Removed mcStatusCache and pushRealtimeMcStatus as they are no longer used
 
 // ═══════════════════════════════════════════════════════
 // Slow Loop: MSSQL only → MCStatus + Quality + OEE
@@ -364,62 +484,29 @@ async function _slowPollAndEmitInner() {
         const TH_OFFSET_MS = 7 * 60 * 60 * 1000;
         const nowTH = new Date(now.getTime() + TH_OFFSET_MS);
 
-        // ✅ Fix #1: Incremental MCStatus query
-        let mcStatusByMachine;
-        const isNewDay = mcStatusCache.shiftDateStr !== dateStr;
+        // ✅ Fix #1: Removing complex incremental cache because it causes late-arriving events
+        // (MQTT latency, reconnects) to be completely dropped if inserted with retroactive Datetime.
+        // Querying a single day's records takes <10ms and is fully cached by DB buffers.
+        const todayMcStatus = await prisma.tb_MCStatus.findMany({
+            where: { Datetime: { gte: shiftStart, lte: nowTH } },
+            orderBy: { Datetime: "asc" },
+            select: { MC: true, Datetime: true, MCStatus: true },
+        });
 
-        if (isNewDay || !mcStatusCache.lastQueryTime) {
-            // === First poll of the day OR new shift date → Full query ===
-            const todayMcStatus = await prisma.tb_MCStatus.findMany({
-                where: { Datetime: { gte: shiftStart, lte: nowTH } },
-                orderBy: { Datetime: "asc" },
-                select: { MC: true, Datetime: true, MCStatus: true },
-            });
+        const carryOverRows = await prisma.$queryRaw`
+            SELECT MC, MCStatus, Datetime FROM (
+                SELECT MC, MCStatus, Datetime, ROW_NUMBER() OVER (PARTITION BY MC ORDER BY Datetime DESC) AS rn
+                FROM tb_MCStatus WHERE Datetime < ${shiftStart}
+            ) t WHERE rn = 1
+        `;
 
-            const carryOverRows = await prisma.$queryRaw`
-                SELECT MC, MCStatus, Datetime FROM (
-                    SELECT MC, MCStatus, Datetime, ROW_NUMBER() OVER (PARTITION BY MC ORDER BY Datetime DESC) AS rn
-                    FROM tb_MCStatus WHERE Datetime < ${shiftStart}
-                ) t WHERE rn = 1
-            `;
-
-            // Build cache
-            mcStatusCache.shiftDateStr = dateStr;
-            mcStatusCache.recordsByMachine = {};
-            mcStatusCache.carryOverByMachine = {};
-
-            for (const row of carryOverRows) {
-                mcStatusCache.carryOverByMachine[row.MC] = row;
-                mcStatusCache.recordsByMachine[row.MC] = [{ MC: row.MC, Datetime: shiftStart, MCStatus: row.MCStatus }];
-            }
-            for (const rec of todayMcStatus) {
-                if (!mcStatusCache.recordsByMachine[rec.MC]) mcStatusCache.recordsByMachine[rec.MC] = [];
-                mcStatusCache.recordsByMachine[rec.MC].push(rec);
-            }
-
-            mcStatusCache.lastQueryTime = nowTH;
-            mcStatusByMachine = mcStatusCache.recordsByMachine;
-            console.log(`   📊 [SlowPoll] Full MCStatus query: ${todayMcStatus.length} records cached`);
-        } else {
-            // === Incremental query — only new records since last poll ===
-            const incrementalRecords = await prisma.tb_MCStatus.findMany({
-                where: { Datetime: { gt: mcStatusCache.lastQueryTime, lte: nowTH } },
-                orderBy: { Datetime: "asc" },
-                select: { MC: true, Datetime: true, MCStatus: true },
-            });
-
-            // Append to cache
-            for (const rec of incrementalRecords) {
-                if (!mcStatusCache.recordsByMachine[rec.MC]) {
-                    // New machine appeared — add carryover placeholder
-                    mcStatusCache.recordsByMachine[rec.MC] = [];
-                }
-                mcStatusCache.recordsByMachine[rec.MC].push(rec);
-            }
-
-            mcStatusCache.lastQueryTime = nowTH;
-            mcStatusByMachine = mcStatusCache.recordsByMachine;
-            console.log(`   📊 [SlowPoll] Incremental: ${incrementalRecords.length} new MCStatus records (cached total: ${Object.keys(mcStatusByMachine).length} machines)`);
+        const mcStatusByMachine = {};
+        for (const row of carryOverRows) {
+            mcStatusByMachine[row.MC] = [{ MC: row.MC, Datetime: shiftStart, MCStatus: row.MCStatus }];
+        }
+        for (const rec of todayMcStatus) {
+            if (!mcStatusByMachine[rec.MC]) mcStatusByMachine[rec.MC] = [];
+            mcStatusByMachine[rec.MC].push(rec);
         }
 
         // 2. Query tb_oee for today (Quality data)
@@ -433,11 +520,8 @@ async function _slowPollAndEmitInner() {
             oeeByMachine[row.machine_name] = row;
         }
 
-        // 2b. ดึง oee_mode config ทุกเครื่อง
-        const configs = await prisma.tb_machine_plan_config.findMany({
-            select: { machine_name: true, oee_mode: true },
-        });
-        const modeMap = new Map(configs.map(c => [c.machine_name, c.oee_mode || "manual"]));
+        // 2b. ใช้ machineModeCache จากลูปใหญ่แทนการ query ใหม่
+        const modeMap = machineModeCache;
 
         // 2c. Query NG count จาก InfluxDB สำหรับวันนี้ (ใช้เฉพาะ auto mode)
         const shiftStartUTC = new Date(Date.UTC(year, month, day, 0, 0, 0)); // 07:00 TH = 00:00 UTC
@@ -517,11 +601,12 @@ async function _slowPollAndEmitInner() {
             }
 
             const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalSeconds);
-            const performance = calcPerformance(totalOutput, idealCT, runTimeSeconds);
+            let performance = calcPerformance(totalOutput, idealCT, runTimeSeconds);
 
             // Quality & OEE — แยกตาม oee_mode (auto/manual)
             const oeeData = oeeByMachine[machineName];
-            const mode = modeMap.get(machineName) || "manual";
+            const mCacheConfig = modeMap.get(machineName) || { oee_mode: "manual", ng_mode: "visual_ng" };
+            const mode = mCacheConfig.oee_mode;
 
             let quality = 0;
             let oeeValue = 0;
@@ -529,8 +614,18 @@ async function _slowPollAndEmitInner() {
 
             if (mode === "auto") {
                 ngQty = ngByMachine[machineName] || 0;
-                quality = totalOutput > 0 ? ((totalOutput - ngQty) / totalOutput) * 100 : 0;
-                if (quality < 0) quality = 0;
+                
+                let outputForOee = totalOutput;
+                if (mCacheConfig.ng_mode === "over_reject") {
+                    // หักลบของเสียออกจากยอดเป้าหมายสำหรับ Performance
+                    outputForOee = Math.max(0, totalOutput - ngQty);
+                    performance = calcPerformance(outputForOee, idealCT, runTimeSeconds);
+                    quality = 100; // ล็อคให้ Quality เป็น 100% เสมอ
+                } else {
+                    quality = totalOutput > 0 ? ((totalOutput - ngQty) / totalOutput) * 100 : 0;
+                    if (quality < 0) quality = 0;
+                }
+
                 oeeValue = (availability > 0 && performance > 0 && quality > 0)
                     ? (availability / 100) * (performance / 100) * (quality / 100) * 100
                     : 0;
@@ -545,7 +640,8 @@ async function _slowPollAndEmitInner() {
             let dailyPayload = {
                 availability: parseFloat(availability.toFixed(2)),
                 performance: parseFloat(performance.toFixed(2)),
-                ngQty,
+                ngQty: mCacheConfig.ng_mode === "over_reject" ? 0 : ngQty,
+                over_reject_qty: mCacheConfig.ng_mode === "over_reject" ? ngQty : undefined,
                 oeeMode: mode,
             };
 
@@ -570,6 +666,11 @@ async function _slowPollAndEmitInner() {
                     live_status: latestMcStatus, // 🆕 ส่งสถานะล่าสุดจาก MSSQL (ทุก 5 นาที)
                 },
             };
+
+            if (machineName === "ABR-003") {
+                console.log(`[DEBUG ABR-003] slowLoop writing to DB: A=${availability}, P=${performance}, Q=${quality}, OEE=${oeeValue}`);
+                console.log(`                runTime=${runTimeSeconds}, excluded=${excludedSeconds}, total=${totalSeconds}`);
+            }
 
             // ✅ Queue upsert (ไม่ await ทีละตัว)
             const upsertData = {
@@ -635,4 +736,5 @@ module.exports = {
     stopRealtimePolling,
     fastPollAndEmit,
     slowPollAndEmit,
+    pushRealtimeMcStatus, // 🆕 Expose ให้ MQTT อัดค่าเข้า Cache
 };
