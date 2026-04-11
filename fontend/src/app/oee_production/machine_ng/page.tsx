@@ -1,5 +1,5 @@
 "use client";
-import { Suspense, useEffect, useState, useRef } from "react";
+import React, { Suspense, useEffect, useState, useRef, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import axios from "axios";
 import dayjs from "dayjs";
@@ -32,9 +32,6 @@ export default function MachineNgPage() {
 
 function MachineNgReportPage() {
     const searchParams = useSearchParams();
-    const leftTableRef = useRef<HTMLDivElement>(null);
-    const rightTableRef = useRef<HTMLDivElement>(null);
-    const horizontalScrollRef = useRef<HTMLDivElement>(null);
 
     // ==========================
     // 🔹 State & Filters
@@ -54,26 +51,6 @@ function MachineNgReportPage() {
     const [serverTimeStr, setServerTimeStr] = useState("");
     const [socketConnected, setSocketConnected] = useState(false);
 
-    // 🆕 Scrollbar width sync
-    const [tableScrollWidth, setTableScrollWidth] = useState<number | string>("100%");
-    const [leftTableWidth, setLeftTableWidth] = useState<number | string>("550px");
-    
-    useEffect(() => {
-        const updateWidth = () => {
-            if (rightTableRef.current) {
-                setTableScrollWidth(rightTableRef.current.scrollWidth);
-            }
-            if (leftTableRef.current) {
-                setLeftTableWidth(`${leftTableRef.current.offsetWidth}px`);
-            }
-        };
-        const timer = setTimeout(updateWidth, 100);
-        window.addEventListener("resize", updateWidth);
-        return () => {
-            clearTimeout(timer);
-            window.removeEventListener("resize", updateWidth);
-        };
-    }, [reportData, selectedMonth]);
 
     // ==========================
     // 🔸 Init
@@ -265,6 +242,93 @@ function MachineNgReportPage() {
         await fetchReport(month, selectedArea, selectedType);
     };
 
+    // ==========================
+    // 🔸 Data Grouping (By Machine Type)
+    // ==========================
+    const isDayEmpty = (dailyData: Record<string, any>, day: number, month: string): boolean => {
+        const dateKey = `${month}-${String(day).padStart(2, '0')}`;
+        const data = dailyData[dateKey];
+        if (!data) return true;
+        return !data.has_production;
+    };
+
+    const groupedReportData = useMemo(() => {
+        const groups: any[] = [];
+        const typeMap = new Map();
+
+        reportData.forEach(machine => {
+            const type = machine.machine_type || "Unknown";
+            if (!typeMap.has(type)) {
+                typeMap.set(type, { type, machines: [], modelTypes: new Set(), modelNames: new Set(), processes: new Set(), allStations: new Set() });
+                groups.push(typeMap.get(type));
+            }
+            const g = typeMap.get(type);
+            g.machines.push(machine);
+            if (machine.model_info?.model_type && machine.model_info.model_type !== "-") g.modelTypes.add(machine.model_info.model_type);
+            
+            const names = (machine.model_info?.model_name || "").split(",").map((s: string) => s.trim()).filter((s: string) => s && s !== "-");
+            names.forEach((n: string) => g.modelNames.add(n));
+            
+            if (machine.model_info?.process_name && machine.model_info.process_name !== "-") g.processes.add(machine.model_info.process_name);
+            machine.stations.forEach((st: string) => g.allStations.add(st));
+        });
+
+        groups.forEach(g => {
+            g.stations = Array.from(g.allStations);
+            const summaryData: any = {};
+
+            for (let d = 1; d <= 31; d++) {
+                const dateKey = `${selectedMonth}-${String(d).padStart(2, '0')}`;
+                const dayData: any = { has_production: false, stations: {} };
+
+                let sumTotalOutput = 0, sumAll = 0, sumVisualNg = 0, sumOverReject = 0;
+                
+                g.stations.forEach((st: string) => dayData.stations[st] = 0);
+
+                g.machines.forEach((m: any) => {
+                    const data = m.dailyData[dateKey];
+                    if (!data) return;
+                    
+                    if (!isDayEmpty(m.dailyData, d, selectedMonth)) {
+                        dayData.has_production = true;
+                    }
+
+                    if (data.Total_Output !== undefined && data.Total_Output !== "-") sumTotalOutput += Number(data.Total_Output);
+                    if (data.All !== undefined && data.All !== "-") sumAll += Number(data.All);
+                    if (data.Visual_NG !== undefined && data.Visual_NG !== "-") sumVisualNg += Number(data.Visual_NG);
+                    if (data.Over_Reject !== undefined && data.Over_Reject !== "-") sumOverReject += Number(data.Over_Reject);
+
+                    g.stations.forEach((st: string) => {
+                        if (data.stations && data.stations[st] !== undefined) {
+                            dayData.stations[st] += Number(data.stations[st] || 0);
+                        }
+                    });
+                });
+
+                if (dayData.has_production) {
+                    dayData.Total_Output = sumTotalOutput;
+                    dayData.All = sumAll;
+                    dayData.Visual_NG = sumVisualNg;
+                    dayData.Over_Reject = sumOverReject;
+                    dayData.Over_Reject_Percent = sumTotalOutput > 0 ? parseFloat(((sumOverReject / sumTotalOutput) * 100).toFixed(2)) : 0;
+                } else {
+                    dayData.Total_Output = "-";
+                    dayData.All = 0;
+                    dayData.Visual_NG = "-";
+                    dayData.Over_Reject = "-";
+                    dayData.Over_Reject_Percent = "-";
+                }
+
+                summaryData[dateKey] = dayData;
+            }
+            g.summaryData = summaryData;
+            g.modelTypesArr = Array.from(g.modelTypes).join(", ") || "-";
+            g.modelNamesArr = Array.from(g.modelNames).join(", ") || "-";
+            g.processesArr = Array.from(g.processes).join(", ") || "-";
+        });
+        return groups;
+    }, [reportData, selectedMonth]);
+
     const handleExport = () => {
         if (!reportData || reportData.length === 0) return;
 
@@ -292,39 +356,99 @@ function MachineNgReportPage() {
         // 2. Data Rows
         let currentRowIndex = 5; // Start after summary (4 rows) and header (1 row) -> Index 5
 
-        reportData.forEach((machine) => {
-            const { machine_name, model_info, dailyData, stations } = machine;
-            
-            // Generate dynamic rows based on stations + standard fields
+        groupedReportData.forEach((group) => {
+            // Render specific machines in group
+            group.machines.forEach((machine: any) => {
+                const { machine_name, model_info, dailyData, stations } = machine;
+                
+                const rows: { label: string; key: string; isStation: boolean; isPercent: boolean, showZero: boolean }[] = [];
+                stations.forEach((st: string) => rows.push({ label: st, key: st, isStation: true, isPercent: false, showZero: false }));
+                rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
+                rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                rows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
+                rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
+                rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
+
+                const startRow = currentRowIndex;
+                const endRow = startRow + rows.length - 1;
+
+                for (let col = 0; col <= 3; col++) {
+                    merges.push({ s: { r: startRow, c: col }, e: { r: endRow, c: col } });
+                }
+
+                rows.forEach((r) => {
+                    const rowData: any[] = [
+                        machine_name,
+                        model_info?.model_type || "-",
+                        model_info?.model_name || "-",
+                        model_info?.process_name || "-",
+                        r.label
+                    ];
+
+                    daysArray.forEach(day => {
+                        const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
+                        const dData = dailyData[dateKey];
+                        let val = undefined;
+                        
+                        if (dData) {
+                            if (r.isStation) val = dData.stations[r.key];
+                            else val = dData[r.key as "Total_Output" | "All" | "Visual_NG" | "Over_Reject" | "Over_Reject_Percent"];
+                        }
+
+                        const isManualToday = machine.oee_mode !== "auto" && dateKey === dayjs.utc().format("YYYY-MM-DD");
+                        const hideNgFields = isManualToday && ["Visual_NG", "Over_Reject", "Over_Reject_Percent"].includes(r.key);
+                        const isFuture = dayjs(dateKey).isAfter(dayjs(), 'day');
+                        const hasProduction = dData && dData.has_production;
+
+                        let cellVal: any = "";
+                        
+                        if (isFuture || !hasProduction) {
+                             cellVal = "";
+                        } else if (hideNgFields || val === "-") {
+                             cellVal = "-";
+                        } else if (val === 0 || val === "0.00") {
+                             cellVal = r.showZero ? (r.isPercent ? "0%" : 0) : "";
+                        } else if (val !== undefined && val !== null && val !== "") {
+                             cellVal = r.isPercent ? `${val}%` : val;
+                        }
+                        rowData.push(cellVal);
+                    });
+
+                    // Add Total Column
+                    const totalVal = getRowTotal(dailyData, r.key, r.isStation);
+                    rowData.push(renderCell(totalVal, r.isPercent, r.showZero));
+                    wsData.push(rowData);
+                    currentRowIndex++;
+                });
+            });
+
+            // Render Group Summary Row
             const rows: { label: string; key: string; isStation: boolean; isPercent: boolean, showZero: boolean }[] = [];
-            stations.forEach((st: string) => rows.push({ label: st, key: st, isStation: true, isPercent: false, showZero: false }));
+            group.stations.forEach((st: string) => rows.push({ label: st, key: st, isStation: true, isPercent: false, showZero: false }));
             rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
             rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
             rows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
             rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
             rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
 
-            // Merge Info Columns for this Machine Block
             const startRow = currentRowIndex;
             const endRow = startRow + rows.length - 1;
-
-            // Merge Cols 0, 1, 2, 3 (Machine, Model Type, Model Name, Process)
             for (let col = 0; col <= 3; col++) {
                 merges.push({ s: { r: startRow, c: col }, e: { r: endRow, c: col } });
             }
 
             rows.forEach((r) => {
                 const rowData: any[] = [
-                    machine_name,
-                    model_info?.model_type || "-",
-                    model_info?.model_name || "-",
-                    model_info?.process_name || "-",
+                    `${group.type}-ALL`,
+                    group.modelTypesArr,
+                    group.modelNamesArr,
+                    group.processesArr,
                     r.label
                 ];
 
                 daysArray.forEach(day => {
                     const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
-                    const dData = dailyData[dateKey];
+                    const dData = group.summaryData[dateKey];
                     let val = undefined;
                     
                     if (dData) {
@@ -332,41 +456,28 @@ function MachineNgReportPage() {
                         else val = dData[r.key as "Total_Output" | "All" | "Visual_NG" | "Over_Reject" | "Over_Reject_Percent"];
                     }
 
-                    const isManualToday = machine.oee_mode !== "auto" && dateKey === dayjs.utc().format("YYYY-MM-DD");
-                    const hideNgFields = isManualToday && ["Visual_NG", "Over_Reject", "Over_Reject_Percent"].includes(r.key);
                     const isFuture = dayjs(dateKey).isAfter(dayjs(), 'day');
                     const hasProduction = dData && dData.has_production;
 
                     let cellVal: any = "";
-                    
-                    if (isFuture) {
+                    if (isFuture || !hasProduction) {
                          cellVal = "";
-                    } else if (!hasProduction) {
-                         cellVal = "";
-                    } else if (hideNgFields) {
-                         cellVal = "-";
                     } else if (val === "-") {
                          cellVal = "-";
                     } else if (val === 0 || val === "0.00") {
                          cellVal = r.showZero ? (r.isPercent ? "0%" : 0) : "";
                     } else if (val !== undefined && val !== null && val !== "") {
-                        if (r.isPercent) {
-                            cellVal = `${val}%`;
-                        } else {
-                            cellVal = val;
-                        }
+                         cellVal = r.isPercent ? `${val}%` : val;
                     }
-
                     rowData.push(cellVal);
                 });
 
-                // Add Total Column to Export
-                const totalVal = getRowTotal(dailyData, r.key, r.isStation);
+                const totalVal = getRowTotal(group.summaryData, r.key, r.isStation);
                 rowData.push(renderCell(totalVal, r.isPercent, r.showZero));
-
                 wsData.push(rowData);
                 currentRowIndex++;
             });
+
         });
 
         const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -517,15 +628,6 @@ function MachineNgReportPage() {
         return machine.holidays?.includes(dateKey) || false;
     };
 
-    // Helper: Check if a specific day has NO data 
-    const isDayEmpty = (dailyData: Record<string, any>, day: number): boolean => {
-        const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
-        const data = dailyData[dateKey];
-        if (!data) return true;
-        // ✅ Bug 1 Fix: use has_production flag set by backend
-        return !data.has_production;
-    };
-
     const renderCell = (val: any, isPercent: boolean = false, showZero: boolean = false) => {
         if (val === undefined || val === null) return "\u00A0";
         if (typeof val === "string" && val === "-") return "-"; // Handle manual visual ng case
@@ -586,187 +688,195 @@ function MachineNgReportPage() {
                 {loading ? (
                     <div className="text-center p-5"><div className="spinner-border text-primary"></div></div>
                 ) : (
-                    // 🆕 Split Table Layout - Outer wrapper handles vertical scroll
-                    <div className="table-outer-wrapper" style={{ overflow: "hidden", border: "1px solid #dee2e6", height: "calc(100vh - 140px)", display: "flex", flexDirection: "column" }}>
-                        <div className="table-wrapper" style={{ display: "grid", gridTemplateColumns: "auto 1fr", flex: 1, overflow: "hidden" }}>
+                    // 🆕 Unified Sticky Table Layout
+                    <div className="table-wrapper hide-scrollbar" style={{ overflowX: "auto", overflowY: "auto", height: "calc(100vh - 140px)", border: "1px solid #dee2e6", background: "white" }}>
+                        <table className="table table-bordered table-sm text-center align-middle mb-0" style={{ fontSize: "0.8rem", width: "max-content", borderCollapse: "separate", borderSpacing: 0, tableLayout: "fixed" }}>
+                            <thead className="table-light" style={{ position: "sticky", top: 0, zIndex: 100 }}>
+                                <tr>
+                                    {/* Sticky Left Headers */}
+                                    <th style={{ position: "sticky", left: 0, top: 0, minWidth: "100px", width: "100px", maxWidth: "100px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000", textAlign: "center", verticalAlign: "middle", zIndex: 110 }}>Machine No</th>
+                                    <th style={{ position: "sticky", left: "100px", top: 0, minWidth: "100px", width: "100px", maxWidth: "100px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000", zIndex: 110 }}>Model Type</th>
+                                    <th style={{ position: "sticky", left: "200px", top: 0, minWidth: "120px", width: "120px", maxWidth: "120px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000", zIndex: 110 }}>Model Name</th>
+                                    <th style={{ position: "sticky", left: "320px", top: 0, minWidth: "80px", width: "80px", maxWidth: "80px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000", zIndex: 110 }}>Process</th>
+                                    <th style={{ position: "sticky", left: "400px", top: 0, minWidth: "150px", width: "150px", maxWidth: "150px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000", zIndex: 110, boxShadow: "2px 0 5px rgba(0,0,0,0.1)" }}>Data</th>
+                                    
+                                    {/* Scrollable Right Headers */}
+                                    {daysArray.map(d => (
+                                        <th key={d} style={{ minWidth: "60px", width: "60px", maxWidth: "60px", height: "40px", background: "#f8f9fa", borderBottom: "3px double #000", zIndex: 100 }}>{d}-{dayjs(selectedMonth).format("MMM")}</th>
+                                    ))}
+                                    <th style={{ minWidth: "80px", width: "80px", maxWidth: "80px", height: "40px", background: "#fff3cd", borderBottom: "3px double #000", borderLeft: "2px solid #ccc", zIndex: 100 }}>Total</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {groupedReportData.map((group, gIdx) => {
+                                    const rows: { label: string; key: string; isStation: boolean; isPercent: boolean, showZero: boolean }[] = [];
+                                    group.stations.forEach((st: string) => rows.push({ label: st, key: st, isStation: true, isPercent: false, showZero: false }));
+                                    rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
+                                    rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                                    rows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
+                                    rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
+                                    rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
 
-                            {/* 🔹 Fixed Left Table */}
-                            <div ref={leftTableRef} className="fixed-table" style={{ overflowY: "hidden", overflowX: "hidden", background: "white", zIndex: 2, boxShadow: "2px 0 5px rgba(0,0,0,0.1)", height: "100%" }} onWheel={(e) => {
-                                if (rightTableRef.current) {
-                                    rightTableRef.current.scrollTop += e.deltaY;
-                                }
-                            }}>
-                                <table className="table table-bordered table-sm text-center align-middle mb-0" style={{ fontSize: "0.8rem", width: "max-content", borderCollapse: "separate", borderSpacing: 0, tableLayout: "fixed" }}>
-                                    <thead className="table-light" style={{ position: "sticky", top: 0, zIndex: 10 }}>
-                                        <tr>
-                                            <th style={{ minWidth: "100px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000", textAlign: "center", verticalAlign: "middle" }}>Machine No</th>
-                                            <th style={{ minWidth: "100px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000" }}>Model Type</th>
-                                            <th style={{ minWidth: "120px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000" }}>Model Name</th>
-                                            <th style={{ minWidth: "80px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000" }}>Process</th>
-                                            <th style={{ minWidth: "150px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000" }}>Data</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                            {reportData.map((machine, idx) => {
-                                            const { machine_name, model_info, stations } = machine;
-                                            
-                                            // Generate dynamic rows based on stations + standard fields
-                                            const rows = [];
-                                            stations.forEach((st: string) => rows.push({ label: st, key: st }));
-                                            rows.push({ label: "Total Output" });
-                                            rows.push({ label: "Total (All Station)" });
-                                            rows.push({ label: "Visual NG" });
-                                            rows.push({ label: "Over Reject" });
-                                            rows.push({ label: "Over Reject %" });
+                                    return (
+                                        <React.Fragment key={`group-${group.type}-${gIdx}`}>
+                                            {/* Machines in Group */}
+                                            {group.machines.map((machine: any, mIdx: number) => {
+                                                const { machine_name, model_info, dailyData, stations } = machine;
+                                                const mRows: { label: string; key: string; isStation: boolean; isPercent: boolean, showZero: boolean }[] = [];
+                                                stations.forEach((st: string) => mRows.push({ label: st, key: st, isStation: true, isPercent: false, showZero: false }));
+                                                mRows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
+                                                mRows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                                                mRows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
+                                                mRows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
+                                                mRows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
 
-                                            return rows.map((row, rIdx) => {
+                                                return mRows.map((row, rIdx) => {
+                                                    const isLastRow = rIdx === mRows.length - 1;
+                                                    const borderBottomStyle = isLastRow ? "2px solid #333" : "1px solid #dee2e6";
+                                                    const rowStyle = { height: "30px", lineHeight: "30px" };
+
+                                                    return (
+                                                        <tr key={`${machine_name}-${rIdx}`} style={rowStyle}>
+                                                            {/* Sticky Left Cells */}
+                                                            {rIdx === 0 && (
+                                                                <>
+                                                                    <td rowSpan={mRows.length} style={{ position: "sticky", left: 0, zIndex: 50, background: "white", fontWeight: "bold", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{machine_name}</td>
+                                                                    <td rowSpan={mRows.length} style={{ position: "sticky", left: "100px", zIndex: 50, background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{model_info.model_type}</td>
+                                                                    <td rowSpan={mRows.length} style={{ position: "sticky", left: "200px", zIndex: 50, background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px", wordBreak: "break-word", fontSize: "0.75rem", lineHeight: "1.2" }}>{model_info.model_name}</td>
+                                                                    <td rowSpan={mRows.length} style={{ position: "sticky", left: "320px", zIndex: 50, background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{model_info.process_name}</td>
+                                                                </>
+                                                            )}
+                                                            <td style={{ position: "sticky", left: "400px", zIndex: 50, textAlign: "left", paddingLeft: "10px", borderRight: "2px solid #000", borderBottom: borderBottomStyle, fontWeight: "500", background: "#fcfcfc", height: "30px", boxSizing: "border-box", padding: "0 10px", boxShadow: "2px 0 5px rgba(0,0,0,0.1)" }}>{row.label}</td>
+
+                                                            {/* Scrollable Right Cells */}
+                                                            {daysArray.map(day => {
+                                                                const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
+                                                                const dData = dailyData[dateKey];
+                                                                let val = undefined;
+                                                                
+                                                                if (dData) {
+                                                                    if (row.isStation) val = dData.stations[row.key];
+                                                                    else val = dData[row.key as "Total_Output" | "All" | "Visual_NG" | "Over_Reject" | "Over_Reject_Percent"];
+                                                                }
+
+                                                                const dayEmpty = isDayEmpty(dailyData, day, selectedMonth);
+                                                                const futureDay = isFutureDay(day);
+                                                                const holiday = isHoliday(machine, day);
+
+                                                                const cellStyle: React.CSSProperties = {
+                                                                    borderBottom: borderBottomStyle,
+                                                                    height: "30px",
+                                                                    boxSizing: "border-box",
+                                                                    padding: "0 4px",
+                                                                    whiteSpace: "nowrap",
+                                                                    ...(futureDay ? {} : holiday ? { backgroundColor: "#ffcccc" } : dayEmpty ? { backgroundColor: "#ffcccc" } : {})
+                                                                };
+
+                                                                const isManualToday = machine.oee_mode !== "auto" && dateKey === dayjs.utc().format("YYYY-MM-DD");
+                                                                const hideNgFields = isManualToday && ["Visual_NG", "Over_Reject", "Over_Reject_Percent"].includes(row.key);
+                                                                const hasProduction = dData && dData.has_production;
+
+                                                                let cellContent: string | React.ReactNode;
+                                                                if (futureDay || !hasProduction) {
+                                                                    cellContent = "\u00A0";
+                                                                } else if (hideNgFields || val === "-") {
+                                                                    cellContent = "-";
+                                                                } else if (val === 0 || val === "0.00") {
+                                                                    cellContent = row.showZero ? (row.isPercent ? "0%" : "0") : "\u00A0";
+                                                                } else if (val !== undefined && val !== null && val !== "") {
+                                                                    cellContent = renderCell(val, row.isPercent, row.showZero);
+                                                                } else {
+                                                                    cellContent = "\u00A0";
+                                                                }
+
+                                                                return (
+                                                                    <td key={`${machine_name}-${row.key}-${day}`} style={cellStyle}>
+                                                                        {cellContent}
+                                                                    </td>
+                                                                );
+                                                            })}
+                                                            <td style={{ borderBottom: borderBottomStyle, height: "30px", boxSizing: "border-box", padding: "0 4px", background: "#fff3cd", fontWeight: "bold", borderLeft: "2px solid #ccc", whiteSpace: "nowrap" }}>
+                                                                {renderCell(getRowTotal(dailyData, row.key, row.isStation), row.isPercent, row.showZero)}
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                });
+                                            })}
+
+                                            {/* Group Summary Row */}
+                                            {rows.map((row, rIdx) => {
                                                 const isLastRow = rIdx === rows.length - 1;
-                                                const borderBottomStyle = isLastRow ? "2px solid #333" : "1px solid #dee2e6";
+                                                const borderBottomStyle = isLastRow ? "3px double #000" : "1px solid #ffd966"; 
                                                 const rowStyle = { height: "30px", lineHeight: "30px" };
 
                                                 return (
-                                                    <tr key={`${machine_name}-${rIdx}`} style={rowStyle}>
+                                                    <tr key={`summary-${group.type}-${row.key}`} style={rowStyle}>
                                                         {rIdx === 0 && (
                                                             <>
-                                                                <td rowSpan={rows.length} style={{ background: "white", fontWeight: "bold", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{machine_name}</td>
-                                                                <td rowSpan={rows.length} style={{ background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{model_info.model_type}</td>
-                                                                <td rowSpan={rows.length} style={{ background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px", wordBreak: "break-word", fontSize: "0.75rem", lineHeight: "1.2" }}>{model_info.model_name}</td>
-                                                                <td rowSpan={rows.length} style={{ background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{model_info.process_name}</td>
+                                                                <td rowSpan={rows.length} style={{ position: "sticky", left: 0, zIndex: 50, background: "#fff2cc", fontWeight: "bold", borderRight: "2px solid #000", borderBottom: "3px double #000", verticalAlign: "middle", padding: "0 8px" }}>{group.type}-ALL</td>
+                                                                <td rowSpan={rows.length} style={{ position: "sticky", left: "100px", zIndex: 50, background: "#fff2cc", borderRight: "2px solid #000", borderBottom: "3px double #000", verticalAlign: "middle", padding: "0 8px" }}>{group.modelTypesArr}</td>
+                                                                <td rowSpan={rows.length} style={{ position: "sticky", left: "200px", zIndex: 50, background: "#fff2cc", borderRight: "2px solid #000", borderBottom: "3px double #000", verticalAlign: "middle", padding: "0 8px", wordBreak: "break-word", fontSize: "0.75rem", lineHeight: "1.2" }}>{group.modelNamesArr}</td>
+                                                                <td rowSpan={rows.length} style={{ position: "sticky", left: "320px", zIndex: 50, background: "#fff2cc", borderRight: "2px solid #000", borderBottom: "3px double #000", verticalAlign: "middle", padding: "0 8px", fontSize: "0.75rem", lineHeight: "1.2" }}>{group.processesArr}</td>
                                                             </>
                                                         )}
-                                                        <td style={{ textAlign: "left", paddingLeft: "10px", borderRight: "2px solid #000", borderBottom: borderBottomStyle, fontWeight: "500", background: "#fcfcfc", height: "30px", boxSizing: "border-box", padding: "0 10px" }}>{row.label}</td>
-                                                    </tr>
-                                                );
-                                            });
-                                        })}
-                                        {reportData.length === 0 && (
-                                            <tr><td colSpan={5} className="text-center p-4 text-muted" style={{ height: "100px" }}>No Data</td></tr>
-                                        )}
-                                    </tbody>
-                                </table>
-                            </div>
+                                                        <td style={{ position: "sticky", left: "400px", zIndex: 50, textAlign: "left", paddingLeft: "10px", borderRight: "2px solid #000", borderBottom: borderBottomStyle, fontWeight: "bold", background: "#fff2cc", color: "#b98300", height: "30px", boxSizing: "border-box", padding: "0 10px", boxShadow: "2px 0 5px rgba(0,0,0,0.1)" }}>{row.label}</td>
 
-                            {/* 🔹 Scrollable Right Table */}
-                            <div ref={rightTableRef} className="scrollable-table hide-scrollbar" style={{ overflowX: "auto", overflowY: "scroll", height: "100%" }} onScroll={() => {
-                                if (leftTableRef.current && rightTableRef.current) {
-                                    leftTableRef.current.scrollTop = rightTableRef.current.scrollTop;
-                                }
-                                if (horizontalScrollRef.current && rightTableRef.current) {
-                                    if (horizontalScrollRef.current.scrollLeft !== rightTableRef.current.scrollLeft) {
-                                        horizontalScrollRef.current.scrollLeft = rightTableRef.current.scrollLeft;
-                                    }
-                                }
-                            }}>
-                                <table className="table table-bordered table-sm text-center align-middle mb-0" style={{ fontSize: "0.8rem", width: "max-content", borderCollapse: "separate", borderSpacing: 0, tableLayout: "fixed" }}>
-                                    <thead className="table-light" style={{ position: "sticky", top: 0, zIndex: 10 }}>
-                                        <tr>
-                                            {daysArray.map(d => (
-                                                <th key={d} style={{ minWidth: "60px", height: "40px", background: "#f8f9fa", borderBottom: "3px double #000", position: "sticky", top: 0, zIndex: 10 }}>{d}-{dayjs(selectedMonth).format("MMM")}</th>
-                                            ))}
-                                            <th style={{ minWidth: "80px", height: "40px", background: "#fff3cd", borderBottom: "3px double #000", position: "sticky", top: 0, borderLeft: "2px solid #ccc", zIndex: 10 }}>Total</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {reportData.map((machine, idx) => {
-                                            const { machine_name, dailyData, stations } = machine;
-                                            
-                                            const rows = [];
-                                            stations.forEach((st: string) => rows.push({ key: st, isStation: true, isPercent: false, showZero: false }));
-                                            rows.push({ key: "Total_Output", isPercent: false, showZero: true, isStation: false });
-                                            rows.push({ key: "All", isPercent: false, showZero: false, isStation: false });
-                                            rows.push({ key: "Visual_NG", isPercent: false, showZero: true, isStation: false });
-                                            rows.push({ key: "Over_Reject", isPercent: false, showZero: true, isStation: false });
-                                            rows.push({ key: "Over_Reject_Percent", isPercent: true, showZero: true, isStation: false });
-
-                                            return rows.map((row, rIdx) => {
-                                                const isLastRow = rIdx === rows.length - 1;
-                                                const borderBottomStyle = isLastRow ? "2px solid #333" : "1px solid #dee2e6";
-                                                const rowStyle = { height: "30px", lineHeight: "30px" };
-
-                                                return (
-                                                    <tr key={`${machine_name}-${row.key}`} style={rowStyle}>
                                                         {daysArray.map(day => {
                                                             const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
-                                                            const dData = dailyData[dateKey];
-                                                            
+                                                            const dData = group.summaryData[dateKey];
                                                             let val = undefined;
+                                                            
                                                             if (dData) {
                                                                 if (row.isStation) val = dData.stations[row.key];
                                                                 else val = dData[row.key as "Total_Output" | "All" | "Visual_NG" | "Over_Reject" | "Over_Reject_Percent"];
                                                             }
 
-                                                            const dayEmpty = isDayEmpty(dailyData, day);
                                                             const futureDay = isFutureDay(day);
-                                                            const holiday = isHoliday(machine, day);
+                                                            const hasProduction = dData && dData.has_production;
 
-                                                            // Determine cell background
+                                                            let cellContent: string | React.ReactNode;
+                                                            if (futureDay || !hasProduction) {
+                                                                cellContent = "\u00A0";
+                                                            } else if (val === "-") {
+                                                                cellContent = "-";
+                                                            } else if (val === 0 || val === "0.00") {
+                                                                cellContent = row.showZero ? (row.isPercent ? "0%" : "0") : "\u00A0";
+                                                            } else if (val !== undefined && val !== null && val !== "") {
+                                                                cellContent = renderCell(val, row.isPercent, row.showZero);
+                                                            } else {
+                                                                cellContent = "\u00A0";
+                                                            }
+
                                                             const cellStyle: React.CSSProperties = {
                                                                 borderBottom: borderBottomStyle,
                                                                 height: "30px",
                                                                 boxSizing: "border-box",
                                                                 padding: "0 4px",
-                                                                ...(futureDay
-                                                                    ? {}
-                                                                    : holiday
-                                                                        ? { backgroundColor: "#ffcccc" }  // Holiday: light red
-                                                                        : dayEmpty
-                                                                            ? { backgroundColor: "#ffcccc" }  // No data: red
-                                                                            : {})
+                                                                background: "#fff2cc",
+                                                                color: "#b98300",
+                                                                fontWeight: "bold",
+                                                                whiteSpace: "nowrap"
                                                             };
-
-                                                            // Manual mode + วัน UTC ปัจจุบัน → ซ่อน Visual NG / Over Reject
-                                                            const isManualToday = machine.oee_mode !== "auto"
-                                                                && dateKey === dayjs.utc().format("YYYY-MM-DD");
-                                                            const hideNgFields = isManualToday
-                                                                && ["Visual_NG", "Over_Reject", "Over_Reject_Percent"].includes(row.key);
-
-                                                            // Determine cell content
-                                                            let cellContent: string;
-                                                            if (futureDay) {
-                                                                cellContent = "\u00A0";
-                                                            } else if (hideNgFields) {
-                                                                cellContent = "-";
-                                                            } else if (holiday) {
-                                                                // Holiday: render normally, but replace blank with "-" (not applicable)
-                                                                const rendered = renderCell(val, row.isPercent, row.showZero);
-                                                                cellContent = rendered === "\u00A0" ? "-" : rendered;
-                                                            } else if (dayEmpty) {
-                                                                cellContent = "\u00A0";
-                                                            } else {
-                                                                cellContent = renderCell(val, row.isPercent, row.showZero);
-                                                            }
-
                                                             return (
-                                                                <td key={day} style={cellStyle}>
+                                                                <td key={`summary-${group.type}-${row.key}-${day}`} style={cellStyle}>
                                                                     {cellContent}
                                                                 </td>
                                                             );
                                                         })}
-                                                        {/* Total Cell */}
-                                                        <td style={{ borderBottom: borderBottomStyle, height: "30px", boxSizing: "border-box", padding: "0 4px", background: "#fff3cd", borderLeft: "2px solid #ccc", fontWeight: "bold" }}>
-                                                            {renderCell(getRowTotal(dailyData, row.key, row.isStation || false), row.isPercent, row.showZero)}
+                                                        <td style={{ borderBottom: borderBottomStyle, height: "30px", boxSizing: "border-box", padding: "0 4px", background: "#ffeeba", color: "#b98300", fontWeight: "bold", borderLeft: "2px solid #ccc", whiteSpace: "nowrap" }}>
+                                                            {renderCell(getRowTotal(group.summaryData, row.key, row.isStation), row.isPercent, row.showZero)}
                                                         </td>
                                                     </tr>
                                                 );
-                                            });
-                                        })}
-                                        {reportData.length === 0 && (
-                                            <tr><td colSpan={daysArray.length} className="text-center p-4 text-muted" style={{ height: "100px" }}>No Data</td></tr>
-                                        )}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                        {/* 🔹 Horizontal Scrollbar at Bottom */}
-                        <div ref={horizontalScrollRef} className="horizontal-scroll-wrapper" style={{ overflowX: "auto", overflowY: "hidden", marginLeft: "auto", width: `calc(100% - ${leftTableWidth})` }} onScroll={() => {
-                            if (rightTableRef.current && horizontalScrollRef.current) {
-                                if (rightTableRef.current.scrollLeft !== horizontalScrollRef.current.scrollLeft) {
-                                    rightTableRef.current.scrollLeft = horizontalScrollRef.current.scrollLeft;
-                                }
-                            }
-                        }}>
-                            <div style={{ width: tableScrollWidth, height: "1px" }}></div>
-                        </div>
+                                            })}
+                                        </React.Fragment>
+                                    );
+                                })}
+                                {groupedReportData.length === 0 && (
+                                    <tr><td colSpan={daysArray.length + 6} className="text-center p-4 text-muted" style={{ height: "100px" }}>No Data</td></tr>
+                                )}
+                            </tbody>
+                        </table>
                     </div>
                 )}
             </div>
