@@ -30,6 +30,7 @@ const lastAutoEmittedData = new Map(); // 🆕 Track auto machine OEE changes
 let lastOeeUpsertTime = 0; // 🆕 Throttle MSSQL writes
 
 let machineModeCache = new Map(); // 🆕 Cached machine modes (auto/manual)
+let sharedMcRecordsCache = {};    // 🆕 Shared MCStatus records between slow and fast loop
 let autoNgCache = { data: {}, lastFetch: 0 }; // 🆕 Cached NG counts for auto machines
 let modeCacheTimer = null;
 
@@ -174,7 +175,7 @@ async function fastPollAndEmit() {
 
             // Calculate excluded seconds in current hour
             let currentHourExcluded = 0;
-            const mcRecords = mcStatusCache.recordsByMachine[machineName] || [];
+            const mcRecords = sharedMcRecordsCache[machineName] || [];
             if (mcRecords.length > 0) {
                 const { excludedSeconds } = calcMcStatusDurations(mcRecords, new Date(start), now);
                 currentHourExcluded = excludedSeconds;
@@ -508,6 +509,8 @@ async function _slowPollAndEmitInner() {
             if (!mcStatusByMachine[rec.MC]) mcStatusByMachine[rec.MC] = [];
             mcStatusByMachine[rec.MC].push(rec);
         }
+        
+        sharedMcRecordsCache = mcStatusByMachine; // ✅ Share updated status for fastLoop
 
         // 2. Query tb_oee for today (Quality data)
         const targetDate = new Date(dateStr);
