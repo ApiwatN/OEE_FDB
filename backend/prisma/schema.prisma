@@ -83,13 +83,13 @@ model tb_output_target {
 
   @@index([machine_name, date])
   @@index([machine_name, date, model_name])
+  @@index([date])
 }
 
 model tb_output_actual {
   id           Int      @id @default(autoincrement())
   date         DateTime @db.Date
   machine_name String
-  model_name   String?
   actual_07    Int?     @default(0)
   actual_08    Int?     @default(0)
   actual_09    Int?     @default(0)
@@ -115,9 +115,10 @@ model tb_output_actual {
   actual_05    Int?     @default(0)
   actual_06    Int?     @default(0)
   Overall      Int?
+  model_name   String?
 
   @@unique([machine_name, date])
-  @@index([machine_name, date])
+  @@index([date])
 }
 
 model tb_cycle_time_actual {
@@ -151,7 +152,7 @@ model tb_cycle_time_actual {
   cycle_time   Float?   @default(0)
 
   @@unique([machine_name, date])
-  @@index([machine_name, date])
+  @@index([date])
 }
 
 model tb_efficiency_actual {
@@ -185,7 +186,7 @@ model tb_efficiency_actual {
   eff_actual   Float?   @default(0)
 
   @@unique([machine_name, date])
-  @@index([machine_name, date])
+  @@index([date])
 }
 
 model tb_oee {
@@ -199,7 +200,7 @@ model tb_oee {
   quality      Float?   @default(0)
 
   @@unique([machine_name, date])
-  @@index([machine_name, date])
+  @@index([date])
 }
 
 model tb_history_working {
@@ -221,10 +222,94 @@ model tb_MCStatus {
   Datetime DateTime
   MC       String   @db.NVarChar(50)
   MCStatus String   @db.NVarChar(50)
+
+  @@index([Datetime])
 }
 
+model tb_MCAlarm {
+  ID       BigInt   @id(map: "PK_tb_MCAlarm") @default(autoincrement())
+  Datetime DateTime
+  MC       String   @db.NVarChar(50)
+  MCAlarm String   @db.NVarChar(50)
+
+  @@index([Datetime])
+}
+
+model tb_machine_plan_config {
+  id                Int      @id @default(autoincrement())
+  machine_name      String   @unique
+  eff_target        Float
+  cycle_time_target Float
+  process_name      String?
+  model_name        String?
+  model_type        String?
+  active_hours      String
+  updated_at        DateTime @default(now()) @updatedAt
+  oee_mode          String   @default("manual") @db.NVarChar(10)
+}
+
+model tb_machine_holiday {
+  id           Int      @id @default(autoincrement())
+  machine_name String
+  holiday_date DateTime @db.Date
+  created_at   DateTime @default(now())
+
+  @@unique([machine_name, holiday_date])
+  @@index([machine_name])
+}
+
+model tbm_machine_station {
+  id             Int      @id @default(autoincrement())
+  machine_name   String
+  ng_id          Int
+  station_number Int
+  station_name   String
+  status         String   @default("active")
+  created_at     DateTime @default(now())
+  updated_at     DateTime @default(now())
+
+  @@index([machine_name])
+}
+
+model tb_machine_ng {
+  id           Int      @id @default(autoincrement())
+  date         DateTime @db.Date
+  machine_name String
+  station_id   Int      // ✅ FK to tbm_machine_station.id (required)
+  ng_07        Int?     @default(0)
+  ng_08        Int?     @default(0)
+  ng_09        Int?     @default(0)
+  ng_10        Int?     @default(0)
+  ng_11        Int?     @default(0)
+  ng_12        Int?     @default(0)
+  ng_13        Int?     @default(0)
+  ng_14        Int?     @default(0)
+  ng_15        Int?     @default(0)
+  ng_16        Int?     @default(0)
+  ng_17        Int?     @default(0)
+  ng_18        Int?     @default(0)
+  ng_19        Int?     @default(0)
+  ng_20        Int?     @default(0)
+  ng_21        Int?     @default(0)
+  ng_22        Int?     @default(0)
+  ng_23        Int?     @default(0)
+  ng_00        Int?     @default(0)
+  ng_01        Int?     @default(0)
+  ng_02        Int?     @default(0)
+  ng_03        Int?     @default(0)
+  ng_04        Int?     @default(0)
+  ng_05        Int?     @default(0)
+  ng_06        Int?     @default(0)
+  Overall_ng   Int?     @default(0)
+
+  @@unique([machine_name, date, station_id])
+  @@index([machine_name, date])
+  @@index([date])
+}
+
+
 /// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
-model tb_MCStatusDuration {
+model tb_MCStatus_Duration {
   MachineName String   @db.NVarChar(50)
   ModelName   String?  @db.NVarChar(50)
   StateName   String   @db.NVarChar(100)
@@ -238,7 +323,7 @@ model tb_MCStatusDuration {
 }
 
 /// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
-model tb_MCStatusSum {
+model tb_MCStatus_Sum {
   ID                  Int       @default(autoincrement())
   FactoryDate         DateTime? @db.Date
   MachineName         String?   @db.NVarChar(50)
@@ -264,27 +349,4 @@ model tb_MCStatusSum {
   Cut_Lot             DateTime? @db.Time
 
   @@ignore
-}
-
-model tb_machine_plan_config {
-  id                Int      @id @default(autoincrement())
-  machine_name      String   @unique
-  eff_target        Float
-  cycle_time_target Float
-  process_name      String?
-  model_name        String?
-  model_type        String?
-  active_hours      String   @db.NVarChar(1000) // JSON: {"07":true,"08":true,...}
-  oee_mode          String   @default("manual") @db.NVarChar(10) // "auto" | "manual"
-  updated_at        DateTime @default(now()) @updatedAt
-}
-
-model tb_machine_holiday {
-  id           Int      @id @default(autoincrement())
-  machine_name String
-  holiday_date DateTime @db.Date
-  created_at   DateTime @default(now())
-
-  @@unique([machine_name, holiday_date])
-  @@index([machine_name])
 }
