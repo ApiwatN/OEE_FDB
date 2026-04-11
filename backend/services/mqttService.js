@@ -96,8 +96,79 @@ const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
             const ct = data.fields?.cycle_time || 0;
             const isNg = data.fields?.judg_result && data.fields.judg_result.includes("NG");
 
+            // ✅ 🆕 แยกประมวลผล Status / Alarm ก่อนตรวจสอบ thColumn
+            // เพราะ Status/Alarm ไม่เกี่ยวกับการตัดชั่วโมง (และเพื่อป้องกันปัญหาเวลาคาบเกี่ยว)
+            const measurementName = data.name;
+
+            if (measurementName === "status_tb" || measurementName === "alarm_tb") {
+                // ถ้าเก่าเกิน 5 นาทีให้ทิ้งไป (InfluxDB sync จะคอยถมประวัติย้อนหลังให้)
+                // ป้องกันปัญหา Telegraf อ่านไฟล์ .csv ย้อนหลังแล้วสาดข้อมูลทีละ 10,000 record
+                if (ageMs > 5 * 60 * 1000) return;
+
+                let currentState = machineStateMem.get(machineName) || {
+                    machine_name: machineName,
+                    current_hour_actual: 0,
+                    current_hour_ng: 0,
+                    current_hour_station_ng: {},
+                    last_cycle_time: 0,
+                    sum_cycle_time: 0,
+                    last_update: now,
+                    current_hour_label: currentThColumn,
+                    live_status: null,
+                    live_alarm: null,
+                };
+
+                if (measurementName === "status_tb") {
+                    const statusStr = data.fields?.Status;
+                    if (statusStr) {
+                        currentState.live_status = statusStr;
+                        currentState.last_update = now;
+                        machineStateMem.set(machineName, currentState);
+
+                        prisma.tb_MCStatus.create({
+                            data: {
+                                Datetime: dataTime,
+                                MC: machineName,
+                                MCStatus: statusStr
+                            }
+                        }).catch(e => console.error(`[MQTT] tb_MCStatus Insert Error for ${machineName}:`, e.message));
+
+                        try {
+                            const rtService = require("./realtimeService");
+                            if (rtService && typeof rtService.pushRealtimeMcStatus === "function") {
+                                rtService.pushRealtimeMcStatus(machineName, statusStr, dataTime);
+                            }
+                        } catch (err) {}
+
+                        const mcUpdatePayload = { machine_name: machineName, status: statusStr, datetime: dataTime.toISOString() };
+                        if (localEmitToRoomFn) localEmitToRoomFn(`machine:${machineName}`, "mc_status_updated", mcUpdatePayload);
+                        if (localBroadcastFn) localBroadcastFn("mc_status_updated", mcUpdatePayload);
+                    }
+                } else if (measurementName === "alarm_tb") {
+                    const alarmStr = data.fields?.Alarm;
+                    if (alarmStr) {
+                        currentState.live_alarm = alarmStr;
+                        currentState.last_update = now;
+                        machineStateMem.set(machineName, currentState);
+
+                        prisma.tb_MCAlarm.create({
+                            data: {
+                                Datetime: dataTime,
+                                MC: machineName,
+                                MCAlarm: alarmStr
+                            }
+                        }).catch(e => console.error(`[MQTT] tb_MCAlarm Insert Error for ${machineName}:`, e.message));
+
+                        const alarmUpdatePayload = { machine_name: machineName, alarm: alarmStr, datetime: dataTime.toISOString() };
+                        if (localEmitToRoomFn) localEmitToRoomFn(`machine:${machineName}`, "mc_status_updated", alarmUpdatePayload);
+                        if (localBroadcastFn) localBroadcastFn("mc_status_updated", alarmUpdatePayload);
+                    }
+                }
+                return; // จบการทำงาน Status / Alarm
+            }
+
+            // ถ้าไม่ใช่ status_tb หรือ alarm_tb (เป็น Output/Data)
             // ✅ Fix: ข้อมูลชั่วโมงเก่า → Drop ทิ้ง (ให้ InfluxDB + MSSQL Cron จัดการ)
-            // ไม่เขียน Cache จาก MQTT เพื่อป้องกันนับซ้ำเมื่อ Telegraf restart
             if (dataThColumn !== currentThColumn) {
                 return;
             }
@@ -116,69 +187,6 @@ const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
                 live_status: null,
                 live_alarm: null,
             };
-
-            // ✅ 🆕 แยกประมวลผลตาม `data.name` (ป้องกัน status/alarm ไปปนกับยอดเครื่องจักร)
-            const measurementName = data.name;
-
-            if (measurementName === "status_tb") {
-                // 1. อัปเดต Memory
-                const statusStr = data.fields?.Status;
-                if (statusStr) {
-                    currentState.live_status = statusStr;
-                    currentState.last_update = now;
-                    machineStateMem.set(machineName, currentState);
-
-                    // 2. Insert ลง MSSQL ทันที (Event-based)
-                    prisma.tb_MCStatus.create({
-                        data: {
-                            Datetime: dataTime,
-                            MC: machineName,
-                            MCStatus: statusStr
-                        }
-                    }).catch(e => console.error(`[MQTT] tb_MCStatus Insert Error for ${machineName}:`, e.message));
-
-                    // 🆕 2.5 อัดเข้า Cache ของส่วนคำนวณทันทีเพื่อรองรับ Real-Time OEE
-                    try {
-                        const rtService = require("./realtimeService");
-                        if (rtService && typeof rtService.pushRealtimeMcStatus === "function") {
-                            rtService.pushRealtimeMcStatus(machineName, statusStr, dataTime);
-                        }
-                    } catch (err) {
-                        // ignore circular warning or load error
-                    }
-
-                    // 3. ✅ Notify Frontend ทันทีว่ามี MC Status ใหม่ (Event-driven refresh)
-                    const mcUpdatePayload = { machine_name: machineName, status: statusStr, datetime: dataTime.toISOString() };
-                    if (emitToRoomFn) emitToRoomFn(`machine:${machineName}`, "mc_status_updated", mcUpdatePayload);
-                    if (broadcastFn) broadcastFn("mc_status_updated", mcUpdatePayload);
-                }
-                return; // หยุดการประมวลผล ไม่บวก Output
-            }
-
-            if (measurementName === "alarm_tb") {
-                // 1. อัปเดต Memory
-                const alarmStr = data.fields?.Alarm;
-                if (alarmStr) {
-                    currentState.live_alarm = alarmStr;
-                    currentState.last_update = now;
-                    machineStateMem.set(machineName, currentState);
-
-                    // 2. Insert ลง MSSQL ทันที (Event-based)
-                    prisma.tb_MCAlarm.create({
-                        data: {
-                            Datetime: dataTime,
-                            MC: machineName,
-                            MCAlarm: alarmStr
-                        }
-                    }).catch(e => console.error(`[MQTT] tb_MCAlarm Insert Error for ${machineName}:`, e.message));
-
-                    // 3. ✅ Notify Frontend ว่ามี Alarm ใหม่
-                    const alarmUpdatePayload = { machine_name: machineName, alarm: alarmStr, datetime: dataTime.toISOString() };
-                    if (emitToRoomFn) emitToRoomFn(`machine:${machineName}`, "mc_status_updated", alarmUpdatePayload);
-                    if (broadcastFn) broadcastFn("mc_status_updated", alarmUpdatePayload);
-                }
-                return; // หยุดการประมวลผล ไม่บวก Output
-            }
 
             // ถ้าไม่ใช่ status_tb หรือ alarm_tb แต่อาจเป็น data_tb หรือ mqtt_consumer ก็ประมวลผลต่อ (บวก Output)
 
