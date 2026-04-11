@@ -56,11 +56,15 @@ function MachineNgReportPage() {
 
     // 🆕 Scrollbar width sync
     const [tableScrollWidth, setTableScrollWidth] = useState<number | string>("100%");
+    const [leftTableWidth, setLeftTableWidth] = useState<number | string>("550px");
     
     useEffect(() => {
         const updateWidth = () => {
             if (rightTableRef.current) {
                 setTableScrollWidth(rightTableRef.current.scrollWidth);
+            }
+            if (leftTableRef.current) {
+                setLeftTableWidth(`${leftTableRef.current.offsetWidth}px`);
             }
         };
         const timer = setTimeout(updateWidth, 100);
@@ -754,7 +758,7 @@ function MachineNgReportPage() {
                             </div>
                         </div>
                         {/* 🔹 Horizontal Scrollbar at Bottom */}
-                        <div ref={horizontalScrollRef} className="horizontal-scroll-wrapper" style={{ overflowX: "auto", overflowY: "hidden", marginLeft: "auto", width: "calc(100% - 550px)" }} onScroll={() => {
+                        <div ref={horizontalScrollRef} className="horizontal-scroll-wrapper" style={{ overflowX: "auto", overflowY: "hidden", marginLeft: "auto", width: `calc(100% - ${leftTableWidth})` }} onScroll={() => {
                             if (rightTableRef.current && horizontalScrollRef.current) {
                                 if (rightTableRef.current.scrollLeft !== horizontalScrollRef.current.scrollLeft) {
                                     rightTableRef.current.scrollLeft = horizontalScrollRef.current.scrollLeft;
