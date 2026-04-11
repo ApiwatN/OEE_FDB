@@ -669,7 +669,7 @@ function MachineReportPage() {
                                             {daysArray.map(d => (
                                                 <th key={d} style={{ minWidth: "60px", height: "40px", background: "#f8f9fa", borderBottom: "3px double #000", position: "sticky", top: 0, zIndex: 10 }}>{d}-{dayjs(selectedMonth).format("MMM")}</th>
                                             ))}
-                                            <th style={{ minWidth: "80px", height: "40px", background: "#fff3cd", borderBottom: "3px double #000", position: "sticky", top: 0, borderLeft: "2px solid #ccc", zIndex: 11, right: 0 }}>Total</th>
+                                            <th style={{ minWidth: "80px", height: "40px", background: "#fff3cd", borderBottom: "3px double #000", position: "sticky", top: 0, borderLeft: "2px solid #ccc", zIndex: 10 }}>Total</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -751,7 +751,7 @@ function MachineReportPage() {
                                                             );
                                                         })}
                                                         {/* Total Cell */}
-                                                        <td style={{ borderBottom: borderBottomStyle, height: "30px", boxSizing: "border-box", padding: "0 4px", background: "#fff3cd", borderLeft: "2px solid #ccc", fontWeight: "bold", position: "sticky", right: 0, zIndex: 1 }}>
+                                                        <td style={{ borderBottom: borderBottomStyle, height: "30px", boxSizing: "border-box", padding: "0 4px", background: "#fff3cd", borderLeft: "2px solid #ccc", fontWeight: "bold" }}>
                                                             {renderCell(getRowTotal(daily_data, row.key), row.isPercent, row.key === 'ng_qty' ? true : false)}
                                                         </td>
                                                     </tr>
