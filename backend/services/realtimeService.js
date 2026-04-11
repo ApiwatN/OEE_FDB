@@ -736,5 +736,5 @@ module.exports = {
     stopRealtimePolling,
     fastPollAndEmit,
     slowPollAndEmit,
-    pushRealtimeMcStatus, // 🆕 Expose ให้ MQTT อัดค่าเข้า Cache
+    // (Removed export of pushRealtimeMcStatus)
 };
