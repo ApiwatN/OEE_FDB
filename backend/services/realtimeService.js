@@ -26,6 +26,7 @@ let emitFn = null;      // (room, event, data) => void
 let broadcastFn = null; // (event, data) => void
 // ✅ Fix #5: Delta update — track last emitted data per machine for dashboard
 const lastEmittedData = new Map(); // key: machineName, value: { output, cycleTime }
+let lastOeeUpsertTime = 0; // 🆕 Throttle MSSQL writes
 
 /**
  * Start real-time polling — 2 loops
@@ -36,7 +37,7 @@ function startRealtimePolling(_emitFn, _broadcastFn) {
     emitFn = _emitFn;
     broadcastFn = _broadcastFn;
     const fastMs = parseInt(process.env.REALTIME_FAST_POLL_MS || "2000", 10);
-    const slowMs = parseInt(process.env.REALTIME_SLOW_POLL_MS || "300000", 10);  // 5 นาที
+    const slowMs = parseInt(process.env.REALTIME_SLOW_POLL_MS || "2000", 10);  // 🆕 ปรับ Default ให้ใกล้เคียง Fast Loop เพื่อให้ OEE ไหลแบบ 2s
 
     // ── Fast Loop (MQTT Memory + Cache → Production Data) ──
     async function fastLoop() {
@@ -581,21 +582,24 @@ async function _slowPollAndEmitInner() {
                 upsertData.oee_value = parseFloat(oeeValue.toFixed(2));
             }
 
-            upsertOps.push(
-                prisma.tb_oee.upsert({
-                    where: { machine_name_date: { machine_name: machineName, date: targetDate } },
-                    update: upsertData,
-                    create: {
-                        date: targetDate,
-                        machine_name: machineName,
-                        availability: parseFloat(availability.toFixed(2)),
-                        performance: parseFloat(performance.toFixed(2)),
-                        ng_qty: mode === "auto" ? ngQty : 0,
-                        quality: mode === "auto" ? parseFloat(quality.toFixed(2)) : 0,
-                        oee_value: mode === "auto" ? parseFloat(oeeValue.toFixed(2)) : 0,
-                    },
-                }).catch(err => console.error(`   ❌ Slow poll upsert tb_oee failed for ${machineName}:`, err.message))
-            );
+            // ✅ Write to DB at most once every 30 seconds to prevent huge disk I/O when running at 2s interval
+            if (now.getTime() - lastOeeUpsertTime >= 30000) {
+                upsertOps.push(
+                    prisma.tb_oee.upsert({
+                        where: { machine_name_date: { machine_name: machineName, date: targetDate } },
+                        update: upsertData,
+                        create: {
+                            date: targetDate,
+                            machine_name: machineName,
+                            availability: parseFloat(availability.toFixed(2)),
+                            performance: parseFloat(performance.toFixed(2)),
+                            ng_qty: mode === "auto" ? ngQty : 0,
+                            quality: mode === "auto" ? parseFloat(quality.toFixed(2)) : 0,
+                            oee_value: mode === "auto" ? parseFloat(oeeValue.toFixed(2)) : 0,
+                        },
+                    }).catch(err => console.error(`   ❌ Slow poll upsert tb_oee failed for ${machineName}:`, err.message))
+                );
+            }
         }
 
         // ✅ Batch execute all upserts with event loop yielding
@@ -608,9 +612,9 @@ async function _slowPollAndEmitInner() {
                     await new Promise(resolve => setImmediate(resolve));
                 }
             }
+            lastOeeUpsertTime = now.getTime();
+            console.log(`✅ [SlowPoll] OEE upserted to DB for ${Object.keys(machines).length} machines (${dateStr})`);
         }
-
-        console.log(`✅ [SlowPoll] OEE upserted to DB for ${Object.keys(machines).length} machines (${dateStr})`);
 
 
         // 3. Emit status update (broadcast to all — ข้อมูล MCStatus ทุกคนต้องได้)
