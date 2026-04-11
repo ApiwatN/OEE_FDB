@@ -313,26 +313,7 @@ export default function OverallMachineCard({
         fetchAllData();
     }, [machineName, date]); // Removed refreshTrigger to prevent socket-induced polling
 
-    // ✅ Real-Time Operator Update via Socket.IO
-    // Listens for "machine_updated" events emitted by backend on login/logout.
-    // Triggers fetchAllData() to silently refresh operator details on this card.
-    useEffect(() => {
-        const socket = getSocket();
-
-        const handleMachineUpdate = (data: any) => {
-            if (data.machine_name === machineName) {
-                const todayStr = new Date().toISOString().split("T")[0];
-                if (date === todayStr) {
-                    fetchAllData();
-                }
-            }
-        };
-
-        socket.on("machine_updated", handleMachineUpdate);
-        return () => {
-            socket.off("machine_updated", handleMachineUpdate);
-        };
-    }, [machineName, date]);
+    // ✅ Removed useEffect from here, moved down below fetchMcStatus
 
     const fetchAllData = async () => {
         try {
@@ -359,7 +340,8 @@ export default function OverallMachineCard({
             }
 
             // ✅ 4. Call ALL APIs in parallel (including cross-day operator)
-            const [resOEE, resTable, resGraph1, resGraph2, resOperator, resCrossDay] = await Promise.all([
+            // 🆕 เพิ่ม latest-all เพื่อดึง liveStatus จาก MSSQL ทันที (ไม่รอ MQTT)
+            const [resOEE, resTable, resGraph1, resGraph2, resOperator, resCrossDay, resLatestStatus] = await Promise.all([
                 axios.get(`${config.apiServer}/api/oee/getLastOEE?machine_name=${machineName}&date=${date}${modelParam}&t=${timestamp}`),
                 axios.get(`${config.apiServer}/api/oee/getDataTable?machine_name=${machineName}&date=${date}${modelParam}&t=${timestamp}`),
                 axios.get(`${config.apiServer}/api/oee/getGraph1?machine_name=${machineName}&date=${date}${modelParam}&t=${timestamp}`),
@@ -368,8 +350,13 @@ export default function OverallMachineCard({
                 // ✅ Fetch cross-day operator in parallel (conditional API based on date)
                 isToday
                     ? axios.get(`${config.apiServer}/api/historyWorking/getOperatorIdWorking/${machineName}?t=${timestamp}`).catch(() => ({ data: { results: null } }))
-                    : axios.get(`${config.apiServer}/api/historyWorking/getActiveCrossDayOperator?machine_name=${machineName}&date=${date}&t=${timestamp}`).catch(() => ({ data: { results: null } }))
+                    : axios.get(`${config.apiServer}/api/historyWorking/getActiveCrossDayOperator?machine_name=${machineName}&date=${date}&t=${timestamp}`).catch(() => ({ data: { results: null } })),
+                // 🆕 ดึง latest MCStatus จาก MSSQL โดยตรง (สำหรับ liveStatus ตอนโหลดหน้า)
+                axios.get(`${config.apiServer}/api/mcstatus/latest-all`).catch(() => ({ data: { results: {} } }))
             ]);
+
+            // 🆕 Extract liveStatus จาก MSSQL (ใช้เฉพาะวันนี้)
+            const latestAllStatus: Record<string, string> = resLatestStatus.data?.results || {};
 
             // ✅ Extract cross-day operator from parallel result
             const activeCrossDayOp = resCrossDay.data?.results || null;
@@ -417,7 +404,7 @@ export default function OverallMachineCard({
                 ctTarget: tableDataRaw.cycleTimeTarget || 0,
                 effActual: tableDataRaw.efficiencyActual || 0,
                 effTarget: tableDataRaw.efficiencyTarget || 0,
-                liveStatus: "Offline",
+                liveStatus: isToday ? (latestAllStatus[machineName] || "Offline") : "Offline", // 🆕 อ่านจาก MSSQL ทันที
                 liveAlarm: null,
             });
 
@@ -425,7 +412,7 @@ export default function OverallMachineCard({
 
             // Helper for filtering future data (Moved to scope for re-use)
             const filterFutureData = (dataArray: number[], hoursArray: any[]) => {
-                const todayStr = dayjs().format("YYYY-MM-DD");
+                const todayStr = new Date().toISOString().split("T")[0]; // ✅ Use Shift Date, not local Midnight
                 if (date !== todayStr) return dataArray; // Show all data if not today
 
                 const currentHour = new Date().getHours();
@@ -616,6 +603,40 @@ export default function OverallMachineCard({
             console.error("MC Status fetch error:", e);
         }
     }, [machineName, date]);
+
+    // ✅ Real-Time Operator Update via Socket.IO
+    // Listens for "machine_updated" events emitted by backend on login/logout.
+    // Triggers fetchAllData() to silently refresh operator details on this card.
+    useEffect(() => {
+        const socket = getSocket();
+
+        const handleMachineUpdate = (data: any) => {
+            if (data.machine_name === machineName) {
+                const todayStr = new Date().toISOString().split("T")[0];
+                if (date === todayStr) {
+                    fetchAllData();
+                }
+            }
+        };
+
+        // ✅ Event-driven MC Status refresh (mc_status_updated)
+        // Backend broadcasts เมื่อ MQTT status_tb หรือ alarm_tb มาถึง
+        const handleMcStatusUpdated = (data: any) => {
+            if (data.machine_name === machineName && activeView === "status") {
+                const todayStr = new Date().toISOString().split("T")[0];
+                if (date === todayStr) {
+                    fetchMcStatus();
+                }
+            }
+        };
+
+        socket.on("machine_updated", handleMachineUpdate);
+        socket.on("mc_status_updated", handleMcStatusUpdated);
+        return () => {
+            socket.off("machine_updated", handleMachineUpdate);
+            socket.off("mc_status_updated", handleMcStatusUpdated);
+        };
+    }, [machineName, date, activeView, fetchMcStatus, fetchAllData]);
 
     // Fetch on view switch & when parent triggers refresh
     useEffect(() => {
@@ -967,31 +988,34 @@ export default function OverallMachineCard({
     // Dynamic header styling based on liveStatus
     const isToday = typeof window !== "undefined" && date === new Date().toISOString().split("T")[0];
     let headerBgClass = "bg-primary";
-    let headerStyle: React.CSSProperties = { flexShrink: 0, height: "32px", border: "none" };
+    let headerStyle: React.CSSProperties = { flexShrink: 0, height: "32px", border: "none", position: "relative" };
 
     if (isToday) {
         if (tableData.liveAlarm) {
             headerBgClass = "bg-danger";
             headerStyle.animation = "blink 1s linear infinite"; // Will blink red if CSS is set
-        } else {
-            const statusColor = statusColors[tableData.liveStatus]?.color;
-            if (statusColor) {
-                headerBgClass = "";
-                headerStyle.backgroundColor = statusColor;
-            } else {
-                headerBgClass = "bg-secondary"; // Fallback for offline/unknown
-            }
         }
+        // ไม่มีการเปลี่ยนสีพื้นหลังเป็น statusColor แล้ว เพื่อให้เป็นสีฟ้า (bg-primary) เสมอ
     }
 
     return (
         <div className="card shadow-sm h-100 d-flex flex-column position-relative" style={{ minHeight: 0, overflow: "hidden" }}>
-            <div className={`card-header d-flex justify-content-between align-items-center text-white p-2 ${headerBgClass}`} style={headerStyle}>
-                <span className="fw-bold" style={{ fontSize: fontSize.header, letterSpacing: "0.5px", lineHeight: "1", padding: 0, margin: 0 }}>
+            <div className={`card-header d-flex justify-content-center align-items-center text-white p-2 ${headerBgClass}`} style={headerStyle}>
+                <span className="fw-bold text-center" style={{ fontSize: fontSize.header, letterSpacing: "0.5px", lineHeight: "1", padding: 0, margin: 0 }}>
                     {machineName}
                 </span>
-                <div className="d-flex flex-column align-items-end" style={{ fontSize: fontSize.tiny, lineHeight: "1" }}>
-                    <span className="fw-bold">{isToday ? (statusColors[tableData.liveStatus]?.label || tableData.liveStatus) : "Historical"}</span>
+                <div className="position-absolute end-0 me-2 d-flex flex-column align-items-end" style={{ fontSize: fontSize.tiny, lineHeight: "1" }}>
+                    <span 
+                        className="badge rounded-pill shadow-sm" 
+                        style={{ 
+                            backgroundColor: isToday && statusColors[tableData.liveStatus]?.color ? statusColors[tableData.liveStatus].color : '#6c757d',
+                            color: '#fff',
+                            fontSize: fontSize.tiny, // ขนาด badge 
+                            padding: '3px 8px'
+                        }}
+                    >
+                        {isToday ? (statusColors[tableData.liveStatus]?.label || tableData.liveStatus) : "Historical"}
+                    </span>
                     {tableData.liveAlarm && <span className="fw-bold text-white mt-1"><i className="fas fa-exclamation-triangle"></i> {tableData.liveAlarm}</span>}
                 </div>
             </div>
@@ -1017,20 +1041,10 @@ export default function OverallMachineCard({
                                 </td>
                                 <td className="p-1 fw-bold text-primary align-middle">{machineName}</td>
                                 <td className="p-1 align-middle">
-                                    {modelsList.length > 1 ? (
-                                        <select
-                                            className="form-select form-select-sm d-inline-block w-auto"
-                                            style={{ fontSize: "0.6rem", padding: "1px 4px", height: "auto" }}
-                                            value={selectedModel}
-                                            onChange={(e) => {
-                                                setSelectedModel(e.target.value);
-                                                fetchAllData();
-                                            }}
-                                        >
-                                            {modelsList.map(model => (
-                                                <option key={model} value={model}>{model}</option>
-                                            ))}
-                                        </select>
+                                    {modelsList.length > 0 ? (
+                                        <div style={{ wordBreak: "break-word", lineHeight: "1.2", fontSize: "0.65rem" }}>
+                                            {modelsList.join(" | ")}
+                                        </div>
                                     ) : (
                                         <span>{tableData.model}</span>
                                     )}
@@ -1307,14 +1321,14 @@ export default function OverallMachineCard({
                                                     formatter: (val: number) => val > 0 ? (isSingleView ? `${val.toFixed(1)}%` : `${val}%`) : null,
                                                 },
                                             },
-                                            layout: { padding: { top: isSingleView ? 24 : 20, bottom: isSingleView ? 80 : 0 } },
+                                            layout: { padding: { top: isSingleView ? 24 : 20, bottom: isSingleView ? 80 : 35 } },
                                             scales: {
                                                 x: {
                                                     grid: { display: false }, 
                                                     ticks: { 
-                                                        display: !isSingleView, 
+                                                        display: true, 
                                                         font: { size: isSingleView ? 11 : Math.max(6, Math.round(8 * scaleFactor)) }, 
-                                                        maxRotation: 45, minRotation: 0 
+                                                        maxRotation: 45, minRotation: 45 
                                                     } 
                                                 },
                                                 y: { 

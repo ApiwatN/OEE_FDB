@@ -99,8 +99,9 @@ export default function Sidebar() {
                         {/* 🔹 OEE Dashboard */}
                         <li className="nav-item">
                             <Link
-                                href="/oee_production/machine_area/"
-                                className={`nav-link ${isActive("/oee_production/machine_area/") ? "active" : ""
+                                href="/oee_production/machine_area"
+                                prefetch={false}
+                                className={`nav-link ${isActive("/oee_production/machine_area") || isActive("/oee_production/machine_area/") ? "active" : ""
                                     }`}
                                 style={{
                                     backgroundColor: isActive("/oee_production/machine_area/")
@@ -122,8 +123,9 @@ export default function Sidebar() {
 
                         <li className="nav-item">
                             <Link
-                                href="/oee_production/production_planing/"
-                                className={`nav-link ${isActive("/oee_production/production_planing/") ? "active" : ""
+                                href="/oee_production/production_planing"
+                                prefetch={false}
+                                className={`nav-link ${isActive("/oee_production/production_planing") || isActive("/oee_production/production_planing/") ? "active" : ""
                                     }`}
                                 style={{
                                     backgroundColor: isActive("/oee_production/production_planing/")
@@ -145,8 +147,9 @@ export default function Sidebar() {
 
                         <li className="nav-item">
                             <Link
-                                href="/oee_production/machine_report/"
-                                className={`nav-link ${isActive("/oee_production/machine_report/") ? "active" : ""
+                                href="/oee_production/machine_report"
+                                prefetch={false}
+                                className={`nav-link ${isActive("/oee_production/machine_report") || isActive("/oee_production/machine_report/") ? "active" : ""
                                     }`}
                                 style={{
                                     backgroundColor: isActive("/oee_production/machine_report/")
@@ -162,15 +165,40 @@ export default function Sidebar() {
                                     className="nav-icon fas fa-chart-bar"
                                     style={{ color: "#60A5FA" }}
                                 ></i>
-                                <p style={{ marginLeft: "5px" }}>Machine Report</p>
+                                <p style={{ marginLeft: "5px" }}>Machine Output Report</p>
+                            </Link>
+                        </li>
+
+                        <li className="nav-item">
+                            <Link
+                                href="/oee_production/machine_ng"
+                                prefetch={false}
+                                className={`nav-link ${isActive("/oee_production/machine_ng") || isActive("/oee_production/machine_ng/") ? "active" : ""
+                                    }`}
+                                style={{
+                                    backgroundColor: isActive("/oee_production/machine_ng/")
+                                        ? "#3B82F6"
+                                        : "#334155",
+                                    color: "#E2E8F0",
+                                    marginBottom: "4px",
+                                    borderRadius: "6px",
+                                    transition: "all 0.2s ease",
+                                }}
+                            >
+                                <i
+                                    className="nav-icon fas fa-exclamation-triangle"
+                                    style={{ color: "#60A5FA" }}
+                                ></i>
+                                <p style={{ marginLeft: "5px" }}>Machine NG Report</p>
                             </Link>
                         </li>
 
                         {/* 🔹 Update OEE */}
                         <li className="nav-item">
                             <Link
-                                href="/oee_production/update_oee/"
-                                className={`nav-link ${isActive("/oee_production/update_oee/") ? "active" : ""
+                                href="/oee_production/update_oee"
+                                prefetch={false}
+                                className={`nav-link ${isActive("/oee_production/update_oee") || isActive("/oee_production/update_oee/") ? "active" : ""
                                     }`}
                                 style={{
                                     backgroundColor: isActive("/oee_production/update_oee/")
@@ -193,7 +221,8 @@ export default function Sidebar() {
                         {/* 🔹 Layout Dashboard */}
                         <li className="nav-item">
                             <Link
-                                href="/oee_production/layout_dashboard/"
+                                href="/oee_production/layout_dashboard"
+                                prefetch={false}
                                 className={`nav-link ${pathname?.startsWith("/oee_production/layout_dashboard") ? "active" : ""
                                     }`}
                                 style={{

@@ -408,6 +408,20 @@ function MachineWorkingInner() {
         };
     }, [socketRef, machineName, currentDateStr, searchParams]);
 
+    // ================= Machine Status Fetch (declared early — used by Socket.IO effects below) =================
+
+    const fetchMcStatus = useCallback(async () => {
+        if (!machineName || !currentDateStr) return;
+        try {
+            const res = await axios.get(`${config.apiServer}/api/mcstatus/timeline`, {
+                params: { machine_name: machineName, date: currentDateStr }
+            });
+            setMcStatusData(res.data.results || []);
+        } catch (e) {
+            console.error("MC Status fetch error:", e);
+        }
+    }, [machineName, currentDateStr]);
+
     // ✅ Socket.IO: Slow status update ทุก 5 นาที (เฉพาะ OEE จาก MCStatus)
     useEffect(() => {
         if (!socketRef || !machineName || !currentDateStr) return;
@@ -419,19 +433,46 @@ function MachineWorkingInner() {
             const machineData = data?.machines?.[machineName];
             if (!machineData?.daily) return;
 
-            // อัปเดตเฉพาะค่า OEE (คำนวณจาก Availability × Performance × Quality)
-            // ✅ Guard: ไม่ทับค่า OEE Last ถ้า Socket ส่ง 0 มา (Cron ยังไม่คำนวณ)
-            if (machineData.daily.oee !== undefined && machineData.daily.oee > 0) {
-                setTableData((prev) => ({
-                    ...prev,
-                    oee: machineData.daily.oee,
-                }));
-            }
+            setTableData((prev) => {
+                const updates: any = {};
+
+                // ✅ Guard: ไม่ทับค่า OEE Last ถ้า Socket ส่ง 0 มา (Cron ยังไม่คำนวณ)
+                if (machineData.daily.oee !== undefined && machineData.daily.oee > 0) {
+                    updates.oee = machineData.daily.oee;
+                }
+
+                // 🆕 Update liveStatus จาก MSSQL slow poll (ทุก 5 นาที)
+                // Guard: ไม่ทับถ้า currentHour ไม่มีใน payload
+                if (machineData.currentHour?.live_status !== undefined) {
+                    updates.liveStatus = machineData.currentHour.live_status || "Offline";
+                }
+
+                return Object.keys(updates).length > 0 ? { ...prev, ...updates } : prev;
+            });
         };
 
         socketRef.on("realtime_update", statusHandler);
         return () => { socketRef.off("realtime_update", statusHandler); };
     }, [socketRef, machineName, currentDateStr]);
+
+    // ✅ Socket.IO: Event-driven MC Status refresh (mc_status_updated)
+    // เรียก fetchMcStatus() ทันทีเมื่อ Backend แจ้งว่ามี status/alarm ใหม่จาก MQTT
+    // ไม่ต้อง Throttle เพราะ event นี้ trigger เฉพาะเมื่อสถานะเปลี่ยนจริงๆ
+    useEffect(() => {
+        if (!socketRef || !machineName || !currentDateStr) return;
+
+        const todayStr = serverTimeRef.toISOString().split("T")[0];
+        if (currentDateStr !== todayStr) return; // ดูย้อนหลัง → ไม่ต้อง real-time
+
+        const mcStatusHandler = () => {
+            if (activeTab === "status") {
+                fetchMcStatus();
+            }
+        };
+
+        socketRef.on("mc_status_updated", mcStatusHandler);
+        return () => { socketRef.off("mc_status_updated", mcStatusHandler); };
+    }, [socketRef, machineName, currentDateStr, activeTab, fetchMcStatus]);
 
     // ================= Data Fetching =================
 
@@ -457,15 +498,20 @@ function MachineWorkingInner() {
             // ✅ 2. Prepare model parameter
             const modelParam = targetModel ? `&model_name=${targetModel}` : '';
 
-            // เรียก API พร้อมกัน 5 ตัว (เพิ่ม &t=${timestamp} ต่อท้าย)
-            const [resOEE, resTable, resGraph1, resGraph2, resOperator] = await Promise.all([
+            // เรียก API พร้อมกัน (เพิ่ม &t=${timestamp} ต่อท้าย)
+            // 🆕 เพิ่ม latest-all เพื่อดึง liveStatus จาก MSSQL ทันที (ไม่รอ MQTT)
+            const [resOEE, resTable, resGraph1, resGraph2, resOperator, resLatestStatus] = await Promise.all([
                 axios.get(`${config.apiServer}/api/oee/getLastOEE?machine_name=${machine}&date=${date}${modelParam}&t=${timestamp}`),
                 axios.get(`${config.apiServer}/api/oee/getDataTable?machine_name=${machine}&date=${date}${modelParam}&t=${timestamp}`),
                 axios.get(`${config.apiServer}/api/oee/getGraph1?machine_name=${machine}&date=${date}${modelParam}&t=${timestamp}`),
                 axios.get(`${config.apiServer}/api/oee/getGraph2?machine_name=${machine}&date=${date}${modelParam}&t=${timestamp}`),
                 // ✅ เปลี่ยนเป็นดึงประวัติทั้งหมดของวันนั้น
-                axios.get(`${config.apiServer}/api/historyWorking/getHistoryByDate?machine_name=${machine}&date=${date}&t=${timestamp}`)
+                axios.get(`${config.apiServer}/api/historyWorking/getHistoryByDate?machine_name=${machine}&date=${date}&t=${timestamp}`),
+                // 🆕 ดึง latest MCStatus จาก MSSQL โดยตรง (สำหรับ liveStatus ตอนโหลดหน้า)
+                axios.get(`${config.apiServer}/api/mcstatus/latest-all`).catch(() => ({ data: { results: {} } }))
             ]);
+            // 🆕 Extract liveStatus จาก MSSQL (ใช้เฉพาะวันนี้)
+            const latestAllStatus: Record<string, string> = resLatestStatus.data?.results || {};
 
             // ✅ Check if viewing "Today" (UTC date comparison)
             const todayStr = new Date().toISOString().split("T")[0];
@@ -565,7 +611,7 @@ function MachineWorkingInner() {
                 ctTarget: tableDataRaw.cycleTimeTarget || 0,
                 effActual: tableDataRaw.efficiencyActual || 0,
                 effTarget: tableDataRaw.efficiencyTarget || 0,
-                liveStatus: "Offline", // fallback until socket updates
+                liveStatus: isToday ? (latestAllStatus[machine] || "Offline") : "Offline", // 🆕 อ่านจาก MSSQL ทันที
                 liveAlarm: null, // fallback until socket updates
             });
             const now = new Date();
@@ -772,18 +818,7 @@ function MachineWorkingInner() {
     };
 
     // ================= Machine Status =================
-
-    const fetchMcStatus = useCallback(async () => {
-        if (!machineName || !currentDateStr) return;
-        try {
-            const res = await axios.get(`${config.apiServer}/api/mcstatus/timeline`, {
-                params: { machine_name: machineName, date: currentDateStr }
-            });
-            setMcStatusData(res.data.results || []);
-        } catch (e) {
-            console.error("MC Status fetch error:", e);
-        }
-    }, [machineName, currentDateStr]);
+    // (fetchMcStatus is declared above near Socket.IO effects to avoid "used before declaration" error)
 
     // Fetch on tab switch & poll every 5 minutes + countdown
     useEffect(() => {
@@ -893,7 +928,7 @@ function MachineWorkingInner() {
                 } else {
                     const now = new Date();
                     const currentMin = now.getUTCHours() * 60 + now.getUTCMinutes();
-                    const todayStr = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD เวลาไทย
+                    const todayStr = new Date().toISOString().split("T")[0]; // ✅ Use Shift Date (00:00 UTC rollover)
                     if (currentDateStr === todayStr) {
                         endMin = Math.min(currentMin, 1440);
                         endTimeLabel = "Now";
@@ -1252,20 +1287,10 @@ function MachineWorkingInner() {
                                                 </div>
                                             </td>
                                             <td>
-                                                {modelsList.length > 1 ? (
-                                                    <select
-                                                        className="form-select form-select-sm d-inline-block w-auto mx-auto"
-                                                        style={{ fontSize: "1rem" }}
-                                                        value={selectedModel}
-                                                        onChange={(e) => {
-                                                            setSelectedModel(e.target.value);
-                                                            fetchAllData(machineName, currentDateStr);
-                                                        }}
-                                                    >
-                                                        {modelsList.map(model => (
-                                                            <option key={model} value={model}>{model}</option>
-                                                        ))}
-                                                    </select>
+                                                {modelsList.length > 0 ? (
+                                                    <div className="fw-bold text-dark mx-auto" style={{ wordBreak: "break-word", lineHeight: "1.2" }}>
+                                                        {modelsList.join(" | ")}
+                                                    </div>
                                                 ) : (
                                                     <span>{tableData.model}</span>
                                                 )}

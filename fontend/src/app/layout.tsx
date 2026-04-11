@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Script from "next/script";
+import AutoRefresh from "./components/AutoRefresh";
 
 export const metadata: Metadata = {
   title: "Production Dashboard",
@@ -27,9 +28,21 @@ export default function RootLayout({
 
         {/* ✅ AdminLTE core CSS */}
         <link href="/dist/css/adminlte.min.css" rel="stylesheet" />
+
+        {/* ✅ Global Variables & Animations */}
+        <style>
+            {`
+              @keyframes blink {
+                0% { opacity: 1; }
+                50% { opacity: 0; }
+                100% { opacity: 1; }
+              }
+            `}
+        </style>
       </head>
 
       <body className="hold-transition sidebar-mini layout-fixed layout-navbar-fixed">
+        <AutoRefresh />
         {children}
       </body>
     </html>

@@ -268,6 +268,32 @@ module.exports = {
                 }
             }
 
+            // ✅ Emit realtime_update ทันทีสำหรับวันปัจจุบัน (ไม่ต้องรอ Slow Loop 5 นาที)
+            const todayStr = getShiftDateUTC();
+            const todayResults = results.filter(r => r.date === todayStr);
+            if (todayResults.length > 0 && req.app.get("io")) {
+                const io = req.app.get("io");
+                const r = todayResults[0]; // manualNgBatch = 1 เครื่อง หลายวัน → วันนี้มีแค่ 1 record
+                const payload = {
+                    serverTimeUTC: new Date().toISOString(),
+                    shiftDate: todayStr,
+                    machines: {
+                        [machine_name]: {
+                            daily: {
+                                availability: r.availability,
+                                performance: r.performance,
+                                quality: r.quality,
+                                oee: r.oee_value,
+                                ngQty: r.ng_qty,
+                                oeeMode: "manual",
+                            },
+                        },
+                    },
+                };
+                io.to("dashboard").emit("realtime_update", payload);
+                io.to(`machine:${machine_name}`).emit("realtime_update", payload);
+            }
+
             res.json({ success: true, saved: results.length, errors: errors.length, errorDetails: errors, results });
         } catch (err) {
             console.error("Manual NG batch error:", err);
@@ -394,11 +420,45 @@ module.exports = {
                     results.push({
                         machine_name, total_output: totalOutput, ng_qty: ngVal,
                         quality: parseFloat(quality.toFixed(2)),
+                        availability, performance,
                         oee_value: parseFloat(oeeValue.toFixed(2)),
                     });
                 } catch (itemErr) {
                     console.error(`Multi-machine NG error for ${item.machine_name}:`, itemErr.message);
                     errors.push({ machine_name: item.machine_name, error: itemErr.message });
+                }
+            }
+
+            // ✅ Emit realtime_update ทันทีสำหรับวันปัจจุบัน (ไม่ต้องรอ Slow Loop 5 นาที)
+            const todayStr = getShiftDateUTC();
+            if (date === todayStr && results.length > 0 && req.app.get("io")) {
+                const io = req.app.get("io");
+                const machines = {};
+                for (const r of results) {
+                    machines[r.machine_name] = {
+                        daily: {
+                            availability: r.availability,
+                            performance: r.performance,
+                            quality: r.quality,
+                            oee: r.oee_value,
+                            ngQty: r.ng_qty,
+                            oeeMode: "manual",
+                        },
+                    };
+                }
+                const payload = {
+                    serverTimeUTC: new Date().toISOString(),
+                    shiftDate: todayStr,
+                    machines,
+                };
+                io.to("dashboard").emit("realtime_update", payload);
+                // Emit ไปที่ room เฉพาะเครื่องด้วย
+                for (const r of results) {
+                    io.to(`machine:${r.machine_name}`).emit("realtime_update", {
+                        serverTimeUTC: payload.serverTimeUTC,
+                        shiftDate: todayStr,
+                        machines: { [r.machine_name]: machines[r.machine_name] },
+                    });
                 }
             }
 

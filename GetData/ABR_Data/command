@@ -1,0 +1,7 @@
+source myenv/Scripts/activate
+
+// {"device": "L5", "comment": "Curtain Sensor Active"}
+D1
+C1
+M0 M1
+W1

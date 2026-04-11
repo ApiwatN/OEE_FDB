@@ -118,7 +118,28 @@ function UpdateOeePage() {
         await fetchTypes(area);
     };
 
+    const CORRECT_PASSWORD = "minebeaIoT12";
+
     const handleSetMode = async (machineName: string, mode: string) => {
+        const { value: password, isConfirmed } = await Swal.fire({
+            title: "Authentication Required",
+            text: `Enter password to switch to ${mode.toUpperCase()} mode`,
+            input: "password",
+            inputPlaceholder: "Enter password",
+            inputAttributes: { autocomplete: "current-password" },
+            showCancelButton: true,
+            confirmButtonText: "Confirm",
+            cancelButtonText: "Cancel",
+            confirmButtonColor: "#0d6efd",
+        });
+
+        if (!isConfirmed) return; // User cancelled
+
+        if (password !== CORRECT_PASSWORD) {
+            Swal.fire({ icon: "error", title: "Incorrect Password", text: "Access denied. Please try again.", confirmButtonColor: "#d33" });
+            return;
+        }
+
         try {
             await axios.post(`${config.apiServer}/api/oee-update/set-mode`, {
                 machine_name: machineName,
@@ -205,7 +226,24 @@ function UpdateOeePage() {
 
     // ── Batch Multi-Machine ──
     const handleOpenBatchMulti = async () => {
-        const dt = dayjs().subtract(1, "day").format("YYYY-MM-DD");
+        // หาวันเมื่อวานล่าสุดที่ไม่ใช่วันหยุด
+        let dt = dayjs().subtract(1, "day").format("YYYY-MM-DD");
+        try {
+            // ใช้ holiday ของเครื่องแรกที่เป็น manual เป็นตัวอ้างอิง
+            const firstManual = machines.find(m => m.oee_mode === "manual");
+            if (firstManual) {
+                const r = await axios.get(`${config.apiServer}/api/holiday/list/${firstManual.machine_name}`);
+                const holidaySet = new Set((r.data.results || []).map((h: any) => h.date));
+                // ย้อนจากเมื่อวานไปสูงสุด 14 วัน หาวันที่ไม่ใช่วันหยุด
+                for (let i = 1; i <= 14; i++) {
+                    const candidate = dayjs().subtract(i, "day").format("YYYY-MM-DD");
+                    if (!holidaySet.has(candidate)) {
+                        dt = candidate;
+                        break;
+                    }
+                }
+            }
+        } catch (e) { console.error(e); }
         setBatchDate(dt);
         await loadBatchMachines(dt);
         showModal("modalBatchMulti");
@@ -259,28 +297,24 @@ function UpdateOeePage() {
     const handleSaveBatchMulti = async () => {
         setBatchSaving(true);
         try {
-            const changedItems = batchMachines
-                .filter(m => {
-                    const editVal = parseInt(batchNgEdits[m.machine_name] || "0", 10);
-                    return editVal !== (m.ng_qty || 0);
-                })
-                .map(m => ({
-                    machine_name: m.machine_name,
-                    ng_qty: parseInt(batchNgEdits[m.machine_name] || "0", 10),
-                }));
+            // ส่งทุกเครื่องเพื่อบังคับคำนวณ OEE ทุกเครื่อง (แม้ NG = 0)
+            const allItems = batchMachines.map(m => ({
+                machine_name: m.machine_name,
+                ng_qty: parseInt(batchNgEdits[m.machine_name] || "0", 10),
+            }));
 
-            if (changedItems.length === 0) {
-                Swal.fire({ icon: "info", title: "No Changes", text: "No changes detected", timer: 1500, showConfirmButton: false });
+            if (allItems.length === 0) {
+                Swal.fire({ icon: "info", title: "No Machines", text: "No machines to save", timer: 1500, showConfirmButton: false });
                 setBatchSaving(false);
                 return;
             }
 
             await axios.post(`${config.apiServer}/api/oee-update/manual-ng-multi-machine`, {
                 date: batchDate,
-                items: changedItems,
+                items: allItems,
             });
 
-            Swal.fire({ icon: "success", title: `Saved ${changedItems.length} machine(s)!`, timer: 1500, showConfirmButton: false });
+            Swal.fire({ icon: "success", title: `Saved ${allItems.length} machine(s)!`, timer: 1500, showConfirmButton: false });
             await loadBatchMachines(batchDate);
             fetchData();
         } catch (e) {

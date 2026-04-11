@@ -95,8 +95,14 @@ async function fastPollAndEmit() {
         // its memory still has old hour data → treat as 0
         const currentHourData = {};
         for (const [machineName, state] of machineStateMem.entries()) {
+            const baseData = {
+                live_status: state.live_status || null,
+                live_alarm: state.live_alarm || null,
+            };
+
             if (state.current_hour_label === thColumn) {
                 currentHourData[machineName] = {
+                    ...baseData,
                     output_count: state.current_hour_actual || 0,
                     avg_cycle_time: state.last_cycle_time || 0,
                     station_ng: state.current_hour_station_ng || {} // 🆕 Include station NG
@@ -104,6 +110,7 @@ async function fastPollAndEmit() {
             } else {
                 // MQTT memory still has old hour data — don't use it
                 currentHourData[machineName] = {
+                    ...baseData,
                     output_count: 0,
                     avg_cycle_time: 0,
                     station_ng: {} // 🆕
@@ -229,6 +236,8 @@ async function fastPollAndEmit() {
                     cycleTime: parseFloat(currentData.avg_cycle_time.toFixed(2)),
                     efficiency: parseFloat(currentEfficiency.toFixed(2)),
                     stationNg: currentData.station_ng || {}, // 🆕 Pass to frontend
+                    live_status: currentData.live_status, // 🆕 Real-Time Status
+                    live_alarm: currentData.live_alarm,   // 🆕 Real-Time Alarm
                 },
                 daily: {
                     totalOutput,
@@ -267,6 +276,8 @@ async function fastPollAndEmit() {
             const currentTarget = machinePayload.daily.accumTarget;
             const currentAchieve = machinePayload.daily.achieve;
             const currentStationNgStr = JSON.stringify(machinePayload.currentHour.stationNg); // 🆕 Convert to string for deep compare
+            const currentStatus = machinePayload.currentHour.live_status;
+            const currentAlarm = machinePayload.currentHour.live_alarm;
 
             const hasChanged = !lastData ||
                 lastData.output !== currentOutput ||
@@ -274,7 +285,9 @@ async function fastPollAndEmit() {
                 lastData.accumTarget !== currentTarget ||
                 lastData.achieve !== currentAchieve ||
                 lastData.shiftIndex !== currentShiftIndex ||
-                lastData.stationNgStr !== currentStationNgStr; // 🆕 Check if station NG changed
+                lastData.stationNgStr !== currentStationNgStr ||
+                lastData.status !== currentStatus ||
+                lastData.alarm !== currentAlarm;
 
             if (hasChanged) {
                 dashboardMachines[machineName] = machinePayload;
@@ -284,7 +297,9 @@ async function fastPollAndEmit() {
                     accumTarget: currentTarget,
                     achieve: currentAchieve,
                     shiftIndex: currentShiftIndex,
-                    stationNgStr: currentStationNgStr // 🆕 Store stringified state
+                    stationNgStr: currentStationNgStr, // 🆕 Store stringified state
+                    status: currentStatus,
+                    alarm: currentAlarm,
                 });
             }
         }
@@ -460,6 +475,9 @@ async function _slowPollAndEmitInner() {
             // Availability & Performance from MCStatus
             const mcRecords = mcStatusByMachine[machineName] || [];
             let { runTimeSeconds, excludedSeconds, totalSeconds } = calcMcStatusDurations(mcRecords, shiftStart, nowTH);
+
+            // 🆕 ดึง MCStatus ล่าสุดจาก DB records ที่มีอยู่แล้ว (ไม่ต้อง query เพิ่ม)
+            const latestMcStatus = mcRecords.length > 0 ? mcRecords[mcRecords.length - 1].MCStatus : null;
             const modeRunTime = getMachineRunTimeMode(machineName);
 
             // ✅ ดึง CT_target จาก pre-fetched map (ไม่ query DB)
@@ -537,8 +555,19 @@ async function _slowPollAndEmitInner() {
                 dailyPayload.oee = parseFloat(oeeValue.toFixed(2));
             }
 
+            // 🆕 ซิงค์ MQTT Memory กลับจาก DB ถ้า live_status ยังเป็น null
+            // (กรณี backend เพิ่งรีสตาร์ท ยังไม่ได้รับ MQTT status_tb ครั้งแรก)
+            const currentMemState = getMachineStateMem().get(machineName);
+            if (currentMemState && currentMemState.live_status === null && latestMcStatus) {
+                currentMemState.live_status = latestMcStatus;
+                getMachineStateMem().set(machineName, currentMemState);
+            }
+
             machines[machineName] = {
                 daily: dailyPayload,
+                currentHour: {
+                    live_status: latestMcStatus, // 🆕 ส่งสถานะล่าสุดจาก MSSQL (ทุก 5 นาที)
+                },
             };
 
             // ✅ Queue upsert (ไม่ await ทีละตัว)

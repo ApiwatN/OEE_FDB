@@ -1,7 +1,8 @@
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const cacheService = require("../services/cacheService");
-const { getShiftDateUTC, SHIFT_HOURS } = require("../utils/timeUtils");
+const influxService = require("../services/influxService");
+const { getShiftDateUTC, SHIFT_HOURS, getCurrentHourBoundaries } = require("../utils/timeUtils");
 
 module.exports = {
   // =============================================================
@@ -346,16 +347,24 @@ module.exports = {
       let effMap = {};
       let cycleMap = {};
 
+      // ✅ Fix: Cache อยู่ใน Worker Thread เท่านั้น (Worker Threads ไม่ share memory)
+      // Main Thread ที่รัน API จะมี cache ว่างเสมอ → ต้อง fallback MSSQL
+      let useCache = false;
       if (isToday) {
-        // ใช้ cache — 0 MSSQL queries
         const allCache = cacheService.getAllMachinesCache();
-        for (const [mn, data] of Object.entries(allCache)) {
-          outputMap[mn] = data.overall.totalOutput || 0;
-          effMap[mn] = data.overall.totalEfficiency || 0;
-          cycleMap[mn] = data.overall.avgCycleTime || 0;
+        if (Object.keys(allCache).length > 0) {
+          // Cache มีข้อมูล → ใช้ cache (0 MSSQL queries)
+          useCache = true;
+          for (const [mn, data] of Object.entries(allCache)) {
+            outputMap[mn] = data.overall.totalOutput || 0;
+            effMap[mn] = data.overall.totalEfficiency || 0;
+            cycleMap[mn] = data.overall.avgCycleTime || 0;
+          }
         }
-      } else {
-        // Fallback MSSQL สำหรับวันอดีต
+      }
+
+      if (!useCache) {
+        // Cache ว่าง (Main Thread) หรือดูวันอดีต → query MSSQL
         const [outputs, efficiencies, cycleTimes] = await Promise.all([
           prisma.tb_output_actual.findMany({
             where: { date: { gte: targetDate, lt: new Date(targetDate.getTime() + 86400000) } }
@@ -379,6 +388,24 @@ module.exports = {
         }
         for (const e of efficiencies) { effMap[e.machine_name] = e.eff_actual; }
         for (const c of cycleTimes) { cycleMap[c.machine_name] = c.cycle_time; }
+
+        // ✅ Fix: เสริม current hour จาก InfluxDB (กรณีเครื่องหยุดกลางชั่วโมง)
+        // MSSQL มีแค่ชั่วโมงที่จบแล้ว → current hour อยู่ใน InfluxDB
+        if (isToday) {
+          try {
+            const now = new Date();
+            const { start } = getCurrentHourBoundaries(now);
+            const influxData = await influxService.queryAllMachinesForHour(start, now);
+            for (const [mn, data] of Object.entries(influxData)) {
+              const currentHourOutput = data.output_count || 0;
+              if (currentHourOutput > 0) {
+                outputMap[mn] = (outputMap[mn] || 0) + currentHourOutput;
+              }
+            }
+          } catch (influxErr) {
+            console.error("⚠️ InfluxDB current hour query failed (non-critical):", influxErr.message);
+          }
+        }
       }
 
       // 4. สร้าง result

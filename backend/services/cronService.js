@@ -8,6 +8,7 @@ const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const influxService = require("./influxService");
 const cacheService = require("./cacheService");
+const { getMachineStateMem } = require("./mqttService");
 const {
     SHIFT_HOURS,
     utcHourToThColumn,
@@ -21,6 +22,48 @@ const { calcMcStatusDurations, calcAvailability, calcPerformance } = require("./
 const dayjs = require("dayjs");
 const { generatePlanForMachine } = require("../controllers/PlanConfigController");
 
+// ✅ Fix #2 (v3): True Queue-based lock — resolves thundering herd concurrency issue
+const lockQueue = [];
+let isLocked = false;
+const LOCK_TIMEOUT_MS = 120000; // 120s max wait (handleLateData can take >60s)
+
+const acquireLock = async (jobName) => {
+    if (!isLocked) {
+        isLocked = true;
+        return true; 
+    }
+    
+    console.log(`⏳ [Cron] ${jobName} waiting for lock...`);
+    let timeoutId;
+    
+    try {
+        await new Promise((resolve, reject) => {
+            lockQueue.push(resolve);
+            timeoutId = setTimeout(() => {
+                const index = lockQueue.indexOf(resolve);
+                if (index > -1) lockQueue.splice(index, 1);
+                reject(new Error("Lock timeout"));
+            }, LOCK_TIMEOUT_MS);
+        });
+        clearTimeout(timeoutId);
+        return true;
+    } catch (e) {
+        console.log(`⚠️ [Cron] ${jobName} skipped — lock timeout (${LOCK_TIMEOUT_MS}ms)`);
+        return false;
+    }
+};
+
+const releaseLock = () => {
+    if (lockQueue.length > 0) {
+        // Pass the lock to the next job in the queue
+        const next = lockQueue.shift();
+        next(); 
+    } else {
+        // Queue empty, release the global lock
+        isLocked = false; 
+    }
+};
+
 // Track last processed time per machine for late data detection
 const lastProcessedTime = {};
 
@@ -32,16 +75,27 @@ function startCronJobs() {
     const lateExpr = process.env.CRON_LATE_DATA || "*/15 * * * *";
     const rolloverExpr = process.env.CRON_DAILY_ROLLOVER || "5 0 * * *";
 
-    // Job 1: Hourly summary — ทุกต้นชั่วโมง
+    // Job 1: Hourly summary — ทุกต้นชั่วโมง (ดึงจาก InfluxDB สำรองไว้)
+    // ✅ Fix #2: Protected by heavyCronLock
     cron.schedule(hourlyExpr, async () => {
-        console.log(`⏰ [Cron] Hourly summary starting at ${new Date().toISOString()}`);
-        await summarizeLastHour();
+        if (!(await acquireLock("summarizeLastHour"))) return;
+        try {
+            console.log(`⏰ [Cron] Hourly summary starting at ${new Date().toISOString()}`);
+            await summarizeLastHour();
+        } finally { releaseLock(); }
     });
 
+    // ❌ Removed: 5-Min MQTT Bulk Upsert — InfluxDB เป็น source of truth
+    // MSSQL เขียนทุก 1 ชม. ผ่าน summarizeLastHour + backfillStartup ตอน restart
+
     // Job 2: Late data check — ทุก 15 นาที
+    // ✅ Fix #2: Protected by heavyCronLock
     cron.schedule(lateExpr, async () => {
-        console.log(`🔍 [Cron] Late data check at ${new Date().toISOString()}`);
-        await handleLateData();
+        if (!(await acquireLock("handleLateData"))) return;
+        try {
+            console.log(`🔍 [Cron] Late data check at ${new Date().toISOString()}`);
+            await handleLateData();
+        } finally { releaseLock(); }
     });
 
     // Job 3: Daily rollover — 00:05 UTC (07:05 TH)
@@ -50,11 +104,39 @@ function startCronJobs() {
         await cacheService.clearAndRollover();
     });
 
+    // Job 3.5: Machine NG per station hourly
+    const ngExpr = process.env.CRON_NG_HOURLY || "10 * * * *";
+    cron.schedule(ngExpr, async () => {
+        if (!(await acquireLock("summarizeNgHourly"))) return;
+        try {
+            console.log(`🎯 [Cron] Machine NG hourly saving at ${new Date().toISOString()}`);
+            await summarizeNgHourly();
+        } finally { releaseLock(); }
+    });
+
     // Job 4: OEE hourly — upsert availability + performance to tb_oee
+    // ✅ Fix #2: Protected by heavyCronLock
     const oeeExpr = process.env.CRON_OEE_HOURLY || "5 * * * *";
     cron.schedule(oeeExpr, async () => {
-        console.log(`📈 [Cron] OEE hourly upsert at ${new Date().toISOString()}`);
-        await upsertOeeHourly();
+        if (!(await acquireLock("upsertOeeHourly"))) return;
+        try {
+            console.log(`📈 [Cron] OEE hourly upsert at ${new Date().toISOString()}`);
+            await upsertOeeHourly();
+        } finally { releaseLock(); }
+    });
+
+    // Job 4.5: Daily InfluxDB to MSSQL Sync — 00:15 UTC (07:15 TH)
+    const dailySyncExpr = process.env.CRON_DAILY_SYNC || "15 0 * * *";
+    cron.schedule(dailySyncExpr, async () => {
+        if (!(await acquireLock("dailySyncInfluxToMssql"))) return;
+        try {
+            console.log(`🔄 [Cron] Daily Influx to MSSQL Sync starting at ${new Date().toISOString()}`);
+            await backfillStartup(3);
+            await backfillNgStartup(3);
+            await backfillOeeStartup(3);
+            await backfillEventsStartup(3); // 🆕 Sync Status and Alarms
+            console.log(`✅ [Cron] Daily Influx to MSSQL Sync completed.`);
+        } finally { releaseLock(); }
     });
 
     // Job 5: Auto Plan Daily — 00:10 UTC (07:10 TH)
@@ -69,7 +151,86 @@ function startCronJobs() {
     console.log(`   Late data: "${lateExpr}"`);
     console.log(`   Rollover: "${rolloverExpr}"`);
     console.log(`   OEE hourly: "${oeeExpr}"`);
+    console.log(`   Daily Sync: "${dailySyncExpr}"`);
     console.log(`   Auto plan: "${autoPlanExpr}"`);
+}
+
+/**
+ * 🆕 Flush MQTT Memory to MSSQL (Every 5 minutes)
+ * ✅ Fix #2: Bulk query (1 query) instead of findFirst per machine (N queries)
+ * ✅ Batch processing + event loop yield to prevent Frontend blocking
+ */
+async function flushMqttMemoryToDb() {
+    const BATCH_SIZE = 10;
+    try {
+        const mem = getMachineStateMem();
+        if (mem.size === 0) return;
+
+        const now = new Date();
+        const dateStr = now.toISOString().split("T")[0];
+        const targetDate = new Date(`${dateStr}T00:00:00.000Z`);
+        const { thColumn } = getCurrentHourBoundaries(now);
+        const actualField = `actual_${thColumn}`;
+
+        console.log(`💾 Flushing ${mem.size} machines to MSSQL for ${actualField}...`);
+
+        // Filter machines that have data AND whose MQTT memory matches the current hour
+        // ✅ Fix: ถ้า current_hour_label ไม่ตรงกับ thColumn → ข้อมูลเป็นของ ชม.ก่อนหน้า ห้ามเขียน
+        const entries = [...mem.entries()].filter(
+            ([_, s]) => (s.current_hour_actual > 0 || s.current_hour_ng > 0) && s.current_hour_label === thColumn
+        );
+
+        if (entries.length === 0) return;
+
+        // ✅ Fix #2: Bulk query — 1 query instead of N findFirst calls
+        const existingRows = await prisma.tb_output_actual.findMany({
+            where: { date: targetDate },
+            select: { machine_name: true, [actualField]: true }
+        });
+        const existingMap = {};
+        for (const row of existingRows) {
+            existingMap[row.machine_name] = row[actualField] || 0;
+        }
+
+        let updatedCount = 0;
+
+        // ✅ Batch processing with event loop yield
+        for (let i = 0; i < entries.length; i += BATCH_SIZE) {
+            const batch = entries.slice(i, i + BATCH_SIZE);
+
+            const results = await Promise.all(batch.map(async ([machineName, state]) => {
+                try {
+                    const mqttOutput = state.current_hour_actual;
+                    const existingValue = existingMap[machineName] || 0;
+                    if (existingValue >= mqttOutput) return false;
+
+                    await upsertHourlyField("tb_output_actual", machineName, targetDate, actualField, mqttOutput, "Overall", null);
+                    cacheService.updateHour(machineName, thColumn, mqttOutput, state.last_cycle_time, 0);
+                    return true;
+                } catch (err) {
+                    console.error(`   ⚠️ Failed to flush ${machineName}:`, err.message);
+                    return false;
+                }
+            }));
+
+            updatedCount += results.filter(Boolean).length;
+
+            // ✅ Yield event loop — ให้ API request อื่นแทรกได้
+            if (i + BATCH_SIZE < entries.length) {
+                await new Promise(resolve => setImmediate(resolve));
+            }
+        }
+
+        // Recalculate overall ONLY for updated machines
+        if (updatedCount > 0) {
+            const updatedMachines = entries.map(([name]) => name);
+            await recalcOverallInMSSQL(targetDate, updatedMachines);
+            console.log(`💾 Flush complete. Updated ${updatedCount} machines.`);
+        }
+
+    } catch (err) {
+        console.error("❌ Flush MQTT Memory failed:", err.message);
+    }
 }
 
 /**
@@ -169,9 +330,11 @@ async function upsertHourlyField(tableName, machineName, date, fieldName, value,
 
 /**
  * Recalculate Overall columns in MSSQL for given machines
+ * ✅ Yield event loop ทุก 10 เครื่อง เพื่อไม่ให้ block Frontend
  */
 async function recalcOverallInMSSQL(targetDate, machineNames) {
-    for (const machineName of machineNames) {
+    for (let idx = 0; idx < machineNames.length; idx++) {
+        const machineName = machineNames[idx];
         try {
             // Read current row
             const outputRow = await prisma.tb_output_actual.findFirst({
@@ -199,13 +362,11 @@ async function recalcOverallInMSSQL(targetDate, machineNames) {
                         sumCtWeighted += ct * out;
                         totalOutputForCt += out;
                     }
-                    // Count valid hours for theoretical max (heuristic)
                     countWithData++;
                 }
             }
 
             const avgCt = totalOutputForCt > 0 ? sumCtWeighted / totalOutputForCt : 0;
-            // วันนี้: ใช้ shift index ปัจจุบัน / วันเก่า: กะจบแล้ว = 24 ชม.
             const todayStr = getShiftDateUTC();
             const isToday = targetDate.toISOString().split('T')[0] === todayStr;
             let totalHoursPassed;
@@ -213,10 +374,9 @@ async function recalcOverallInMSSQL(targetDate, machineNames) {
                 const currentShiftIdx = getShiftIndex(utcHourToThColumn(new Date().getUTCHours()));
                 totalHoursPassed = Math.min(currentShiftIdx + 1, SHIFT_HOURS.length);
             } else {
-                totalHoursPassed = SHIFT_HOURS.length; // 24 — กะจบแล้ว
+                totalHoursPassed = SHIFT_HOURS.length;
             }
 
-            // Query target row to only count hours with target > 0
             const targetRow = await prisma.tb_output_target.findFirst({
                 where: { machine_name: machineName, date: targetDate },
             });
@@ -257,6 +417,11 @@ async function recalcOverallInMSSQL(targetDate, machineNames) {
         } catch (err) {
             console.error(`❌ Recalc overall for ${machineName} failed:`, err.message);
         }
+
+        // ✅ Yield event loop ทุก 10 เครื่อง
+        if ((idx + 1) % 10 === 0) {
+            await new Promise(resolve => setImmediate(resolve));
+        }
     }
 }
 
@@ -273,41 +438,47 @@ async function handleLateData() {
         const lookbackMs = 48 * 60 * 60 * 1000; // 48 hours
         const startTime = new Date(now.getTime() - lookbackMs);
 
-        // Query all data in 48h window grouped by machine+hour
+        // ── Step 1: Query InfluxDB once for 48h window ──
         const allData = await influxService.queryHoursRange(startTime, now);
+        if (Object.keys(allData).length === 0) return;
 
-        // ── Step 1: Collect all pending operations (no DB calls yet) ──
-        const pendingOps = [];
+        // Skip current hour (still in progress)
+        const currentHourStart = new Date(now);
+        currentHourStart.setUTCMinutes(0, 0, 0);
+
+        // ── Step 2: Group InfluxDB data by date → machine → { field: value } ──
+        // Structure: { "2026-03-05": { "AHV-001": { output: {actual_14: 100}, ct: {cycle_14: 4.2}, eff: {eff_14: 85.3} } } }
+        const dateGroups = {};
 
         for (const [machineName, hourData] of Object.entries(allData)) {
             for (const [hourKey, data] of Object.entries(hourData)) {
                 const hourDate = new Date(hourKey + ":00:00.000Z");
-                const utcHour = hourDate.getUTCHours();
-                const dateStr = hourDate.toISOString().split("T")[0];
-                const thColumn = utcHourToThColumn(utcHour);
-
-                // Skip current hour (still in progress)
-                const currentHourStart = new Date(now);
-                currentHourStart.setUTCMinutes(0, 0, 0);
                 if (hourDate.getTime() >= currentHourStart.getTime()) continue;
 
-                // Check if already processed
+                // Check lastProcessedTime — skip if no change
                 const cacheKey = `${machineName}_${hourKey}`;
-                if (lastProcessedTime[cacheKey] && data.output_count <= lastProcessedTime[cacheKey]) {
+                // ✅ Fix: Track both count AND timestamp — re-process if data arrived in last 30min
+                const cached = lastProcessedTime[cacheKey];
+                const isRecent = !cached?.lastSeenAt || (Date.now() - cached.lastSeenAt < 30 * 60 * 1000);
+                if (cached?.count && data.output_count <= cached.count && !isRecent) {
                     continue;
                 }
 
+                const utcHour = hourDate.getUTCHours();
+                const dateStr = hourDate.toISOString().split("T")[0];
+                const thColumn = utcHourToThColumn(utcHour);
                 const { output_count, avg_cycle_time } = data;
                 const theoreticalMax = avg_cycle_time > 0 ? 3600 / avg_cycle_time : 0;
                 const efficiency = theoreticalMax > 0 ? (output_count / theoreticalMax) * 100 : 0;
-                const targetDate = new Date(dateStr);
 
-                // Queue 3 upsert operations per hour
-                pendingOps.push({ table: "tb_output_actual", machineName, date: targetDate, field: `actual_${thColumn}`, value: output_count });
-                pendingOps.push({ table: "tb_cycle_time_actual", machineName, date: targetDate, field: `cycle_${thColumn}`, value: parseFloat(avg_cycle_time.toFixed(2)) });
-                pendingOps.push({ table: "tb_efficiency_actual", machineName, date: targetDate, field: `eff_${thColumn}`, value: parseFloat(efficiency.toFixed(2)) });
+                if (!dateGroups[dateStr]) dateGroups[dateStr] = {};
+                if (!dateGroups[dateStr][machineName]) dateGroups[dateStr][machineName] = { output: {}, ct: {}, eff: {} };
 
-                lastProcessedTime[cacheKey] = output_count;
+                dateGroups[dateStr][machineName].output[`actual_${thColumn}`] = output_count;
+                dateGroups[dateStr][machineName].ct[`cycle_${thColumn}`] = parseFloat(avg_cycle_time.toFixed(2));
+                dateGroups[dateStr][machineName].eff[`eff_${thColumn}`] = parseFloat(efficiency.toFixed(2));
+
+                lastProcessedTime[cacheKey] = { count: output_count, lastSeenAt: Date.now() };
 
                 // Update cache for today
                 if (dateStr === todayStr) {
@@ -316,34 +487,100 @@ async function handleLateData() {
             }
         }
 
-        // ── Step 2: Batch execute with event loop yielding ──
-        if (pendingOps.length > 0) {
-            const updatedHours = pendingOps.length / 3;
+        const dateKeys = Object.keys(dateGroups);
+        if (dateKeys.length === 0) return;
+
+        // ── Step 3: Per date — findMany + compare + batch update ──
+        let totalUpdated = 0;
+        let totalCreated = 0;
+
+        for (const dateStr of dateKeys) {
+            const targetDate = new Date(dateStr);
+            const machineChanges = dateGroups[dateStr];
+
+            // Load existing rows (3 queries per date — instead of N per machine)
+            const [dbOutputRows, dbCtRows, dbEffRows] = await Promise.all([
+                prisma.tb_output_actual.findMany({ where: { date: targetDate } }),
+                prisma.tb_cycle_time_actual.findMany({ where: { date: targetDate } }),
+                prisma.tb_efficiency_actual.findMany({ where: { date: targetDate } }),
+            ]);
+
+            // Build lookup maps: machine_name → row
+            const outputMap = {};
+            for (const row of dbOutputRows) outputMap[row.machine_name] = row;
+            const ctMap = {};
+            for (const row of dbCtRows) ctMap[row.machine_name] = row;
+            const effMap = {};
+            for (const row of dbEffRows) effMap[row.machine_name] = row;
+
+            // Collect pending DB operations (1 per machine per table)
+            const pendingOps = [];
+
+            for (const [machineName, changes] of Object.entries(machineChanges)) {
+                // Output
+                if (Object.keys(changes.output).length > 0) {
+                    if (outputMap[machineName]) {
+                        pendingOps.push(prisma.tb_output_actual.update({
+                            where: { id: outputMap[machineName].id },
+                            data: changes.output,
+                        }));
+                        totalUpdated++;
+                    } else {
+                        pendingOps.push(prisma.tb_output_actual.create({
+                            data: { machine_name: machineName, date: targetDate, ...changes.output },
+                        }));
+                        totalCreated++;
+                    }
+                }
+                // Cycle Time
+                if (Object.keys(changes.ct).length > 0) {
+                    if (ctMap[machineName]) {
+                        pendingOps.push(prisma.tb_cycle_time_actual.update({
+                            where: { id: ctMap[machineName].id },
+                            data: changes.ct,
+                        }));
+                        totalUpdated++;
+                    } else {
+                        pendingOps.push(prisma.tb_cycle_time_actual.create({
+                            data: { machine_name: machineName, date: targetDate, ...changes.ct },
+                        }));
+                        totalCreated++;
+                    }
+                }
+                // Efficiency
+                if (Object.keys(changes.eff).length > 0) {
+                    if (effMap[machineName]) {
+                        pendingOps.push(prisma.tb_efficiency_actual.update({
+                            where: { id: effMap[machineName].id },
+                            data: changes.eff,
+                        }));
+                        totalUpdated++;
+                    } else {
+                        pendingOps.push(prisma.tb_efficiency_actual.create({
+                            data: { machine_name: machineName, date: targetDate, ...changes.eff },
+                        }));
+                        totalCreated++;
+                    }
+                }
+            }
+
+            // Batch execute with event loop yielding
             for (let i = 0; i < pendingOps.length; i += BATCH_SIZE) {
                 const batch = pendingOps.slice(i, i + BATCH_SIZE);
-                await Promise.all(batch.map(op =>
-                    upsertHourlyField(op.table, op.machineName, op.date, op.field, op.value, null, null)
-                ));
-                // ✅ Yield event loop — ให้ API request อื่นแทรกได้
+                await Promise.all(batch);
                 if (i + BATCH_SIZE < pendingOps.length) {
                     await new Promise(resolve => setImmediate(resolve));
                 }
             }
 
-            console.log(`🔍 Late data: updated ${updatedHours} hours (${pendingOps.length} ops batched)`);
+            // Recalculate Overall
+            const machinesForDate = Object.keys(machineChanges);
+            await recalcOverallInMSSQL(targetDate, machinesForDate);
+            await new Promise(resolve => setImmediate(resolve));
+        }
 
-            // Recalculate Overall for affected dates
-            const affectedDates = [...new Set(
-                Object.values(allData)
-                    .flatMap(hd => Object.keys(hd))
-                    .map(hk => hk.slice(0, 10))
-            )].map(d => new Date(d));
-
-            for (const date of affectedDates) {
-                const machinesForDate = Object.keys(allData);
-                await recalcOverallInMSSQL(date, machinesForDate);
-                await new Promise(resolve => setImmediate(resolve));
-            }
+        if (totalUpdated > 0 || totalCreated > 0) {
+            console.log(`🔍 Late data: ${totalUpdated} updated, ${totalCreated} created across ${dateKeys.length} dates (bulk)`);
         }
     } catch (err) {
         console.error("❌ Late data check failed:", err.message);
@@ -351,12 +588,12 @@ async function handleLateData() {
 }
 
 /**
- * Startup: Backfill last 5 days + today from InfluxDB → MSSQL
+ * Startup / Sync: Backfill last N days + today from InfluxDB → MSSQL
  * ✅ Best Practice: findMany → compare in memory → batch update only changed records
- * ตรวจสอบและซ่อมข้อมูลย้อนหลัง 5 วัน ทุกครั้งที่รัน Node ใหม่
+ * ตรวจสอบและซ่อมข้อมูลย้อนหลัง N วัน (default 5 วัน ตอนรัน Node ใหม่)
  */
-async function backfillStartup() {
-    const BACKFILL_DAYS = 5;
+async function backfillStartup(days = 5) {
+    const BACKFILL_DAYS = days;
     const BATCH_SIZE = 50; // records per transaction batch
     const BATCH_DELAY_MS = 100; // ms delay between batches to let DB breathe
 
@@ -379,12 +616,9 @@ async function backfillStartup() {
             let endOfShift;
 
             if (dateStr === todayStr) {
+                // ✅ Include current hour: query up to NOW (not truncated to hour start)
+                // This ensures corrupted current-hour data gets overwritten from InfluxDB
                 endOfShift = new Date(now);
-                endOfShift.setUTCMinutes(0, 0, 0);
-                if (startOfShift >= endOfShift) {
-                    console.log(`   📅 ${dateStr}: No previous hours to backfill yet.`);
-                    continue;
-                }
             } else {
                 endOfShift = new Date(startOfShift);
                 endOfShift.setUTCDate(endOfShift.getUTCDate() + 1);
@@ -439,25 +673,11 @@ async function backfillStartup() {
                     const ctRounded = parseFloat(avg_cycle_time.toFixed(2));
                     const effRounded = parseFloat(efficiency.toFixed(2));
 
-                    // Compare with existing DB values
-                    const existingOutput = outputMap[machineName];
-                    const existingCt = ctMap[machineName];
-                    const existingEff = effMap[machineName];
-
-                    const dbOutputVal = existingOutput ? (existingOutput[`actual_${thColumn}`] || 0) : null;
-                    const dbCtVal = existingCt ? (existingCt[`cycle_${thColumn}`] || 0) : null;
-                    const dbEffVal = existingEff ? (existingEff[`eff_${thColumn}`] || 0) : null;
-
-                    // Only add to changes if value is different
-                    if (dbOutputVal === null || dbOutputVal !== output_count) {
-                        outputChanges[`actual_${thColumn}`] = output_count;
-                    }
-                    if (dbCtVal === null || dbCtVal !== ctRounded) {
-                        ctChanges[`cycle_${thColumn}`] = ctRounded;
-                    }
-                    if (dbEffVal === null || dbEffVal !== effRounded) {
-                        effChanges[`eff_${thColumn}`] = effRounded;
-                    }
+                    // ✅ ALWAYS overwrite MSSQL with InfluxDB values (source of truth)
+                    // Previous logic skipped if values matched — but corrupted data can persist
+                    outputChanges[`actual_${thColumn}`] = output_count;
+                    ctChanges[`cycle_${thColumn}`] = ctRounded;
+                    effChanges[`eff_${thColumn}`] = effRounded;
 
                     // Update cache for today
                     if (isToday) {
@@ -485,6 +705,43 @@ async function backfillStartup() {
                         pendingOps.push({ type: "update", table: "tb_efficiency_actual", id: effMap[machineName].id, data: effChanges, machineName });
                     } else {
                         pendingOps.push({ type: "create", table: "tb_efficiency_actual", data: { machine_name: machineName, date: targetDate, ...effChanges }, machineName });
+                    }
+                }
+            }
+            // ── Step 3.5: Zero out stale current hour data (today only) ──
+            // flushMqttMemoryToDb bug may have written prev hour data to current hour column
+            if (isToday) {
+                const { thColumn: curThCol } = getCurrentHourBoundaries(now);
+                const actualField = `actual_${curThCol}`;
+                const cycleField = `cycle_${curThCol}`;
+                const effField = `eff_${curThCol}`;
+
+                for (const [machineName, dbRow] of Object.entries(outputMap)) {
+                    if ((dbRow[actualField] || 0) <= 0) continue;
+
+                    // Check if InfluxDB has data for this machine in current hour
+                    const machineInflux = influxData[machineName];
+                    let hasCurrentHourInflux = false;
+                    if (machineInflux) {
+                        for (const hourKey of Object.keys(machineInflux)) {
+                            const utcHour = new Date(hourKey + ":00:00.000Z").getUTCHours();
+                            if (utcHourToThColumn(utcHour) === curThCol) {
+                                hasCurrentHourInflux = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!hasCurrentHourInflux) {
+                        pendingOps.push({ type: "update", table: "tb_output_actual", id: dbRow.id, data: { [actualField]: 0 }, machineName });
+                        if (ctMap[machineName]) {
+                            pendingOps.push({ type: "update", table: "tb_cycle_time_actual", id: ctMap[machineName].id, data: { [cycleField]: 0 }, machineName });
+                        }
+                        if (effMap[machineName]) {
+                            pendingOps.push({ type: "update", table: "tb_efficiency_actual", id: effMap[machineName].id, data: { [effField]: 0 }, machineName });
+                        }
+                        cacheService.updateHour(machineName, curThCol, 0, 0, 0);
+                        console.log(`   🧹 ${machineName}: zeroed stale ${actualField} (was ${dbRow[actualField]})`);
                     }
                 }
             }
@@ -640,30 +897,81 @@ async function upsertOeeHourly() {
 
         for (const machineName of machineNames) {
             try {
-                // Calc Availability
+                // Calc Availability and Performance dynamically
                 const mcRecords = mcStatusByMachine[machineName] || [];
-                const { runTimeSeconds, excludedSeconds, totalSeconds } = calcMcStatusDurations(mcRecords, shiftStart, nowTH);
-                const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalSeconds);
-
-                // Calc Performance: totalOutput + idealCT
                 const outputRow = outputMap[machineName];
+                const targetRow = targetMap[machineName];
+                
+                let runTimeSeconds = 0;
+                let excludedSeconds = 0;
+                let totalActiveSeconds = 0;
                 let totalOutput = 0;
-                if (outputRow) {
-                    for (const h of SHIFT_HOURS) {
-                        totalOutput += (outputRow[`actual_${h}`] || 0);
+                
+                // For current hour output checking
+                const currentData = currentHourData[machineName];
+                // Determine current hour string (e.g. "09" or "14")
+                const currentHourStr = nowTH.toISOString().substring(11, 13);
+
+                for (let j = 0; j < SHIFT_HOURS.length; j++) {
+                    const h = SHIFT_HOURS[j];
+                    const isActive = !targetRow || (targetRow[`target_${h}`] > 0);
+                    
+                    const hStart = new Date(shiftStart.getTime() + j * 3600000);
+                    const hEnd = new Date(hStart.getTime() + 3600000);
+
+                    // Stop evaluating completely future hours
+                    if (hStart >= nowTH) break;
+                    
+                    const blockEnd = new Date(Math.min(hEnd.getTime(), nowTH.getTime()));
+
+                    if (isActive) {
+                        // Sum actual output
+                        totalOutput += (outputRow ? (outputRow[`actual_${h}`] || 0) : 0);
+                        
+                        // Add live influx data if this is the active current hour
+                        if (h === currentHourStr && currentData && currentData.output_count > 0) {
+                            totalOutput += currentData.output_count;
+                        }
+
+                        // Add runtime
+                        const { runTimeSeconds: rTime, excludedSeconds: eTime } = calcMcStatusDurations(mcRecords, hStart, blockEnd);
+                        runTimeSeconds += rTime;
+                        excludedSeconds += eTime;
+                        totalActiveSeconds += Math.max(0, (blockEnd.getTime() - hStart.getTime()) / 1000);
                     }
                 }
-                const currentData = currentHourData[machineName];
-                if (currentData && currentData.output_count > 0) {
-                    totalOutput += currentData.output_count;
-                }
-                const targetRow = targetMap[machineName];
+
+                const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalActiveSeconds);
                 const idealCT = targetRow?.cycle_time_target || 0;
                 const performance = calcPerformance(totalOutput, idealCT, runTimeSeconds);
+
+                // 🆕 Fetch existing OEE to get the saved ng_qty
+                const existingOee = await prisma.tb_oee.findFirst({
+                    where: { machine_name: machineName, date: targetDate }
+                });
+                const savedNgQty = existingOee?.ng_qty || 0;
+
+                // 🆕 Recalculate Quality & OEE Value dynamically because totalOutput grows during the day
+                let quality = 0;
+                let oeeValue = 0;
+                
+                // For manual mode, if the user hasn't updated yet (savedNgQty=0) BUT the quality was actually 0 due to no output previously,
+                // we should recalculate it now that output > 0!
+                if (totalOutput > 0) {
+                    quality = ((totalOutput - savedNgQty) / totalOutput) * 100;
+                    if (quality < 0) quality = 0;
+                }
+                
+                if (availability > 0 && performance > 0 && quality > 0) {
+                    oeeValue = (availability / 100) * (performance / 100) * (quality / 100) * 100;
+                }
 
                 const dataToWrite = {
                     availability: parseFloat(availability.toFixed(2)),
                     performance: parseFloat(performance.toFixed(2)),
+                    // 🆕 Must update quality and oee_value hourly!
+                    quality: parseFloat(quality.toFixed(2)),
+                    oee_value: parseFloat(oeeValue.toFixed(2)),
                 };
 
                 upsertOps.push(
@@ -717,12 +1025,12 @@ async function autoPlanDaily() {
 }
 
 /**
- * Startup: Backfill OEE (Availability + Performance) for past days
+ * Startup / Sync: Backfill OEE (Availability + Performance) for past days
  * ✅ recalc จาก MCStatus ย้อนหลัง → upsert tb_oee
  * ✅ Optimized: bulk-fetch output+target rows per date, batch upserts, yield event loop
  */
-async function backfillOeeStartup() {
-    const BACKFILL_DAYS = 5;
+async function backfillOeeStartup(days = 5) {
+    const BACKFILL_DAYS = days;
     console.log(`🔄 [Startup] Backfilling OEE (Availability/Performance) for last ${BACKFILL_DAYS} days...`);
 
     try {
@@ -791,25 +1099,57 @@ async function backfillOeeStartup() {
             for (const machineName of machineNames) {
                 try {
                     const mcRecords = mcStatusByMachine[machineName] || [];
-                    const { runTimeSeconds, excludedSeconds, totalSeconds } = calcMcStatusDurations(mcRecords, shiftStart, shiftEnd);
-                    const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalSeconds);
-
-                    // Total output from pre-fetched map
                     const outputRow = outputMap[machineName];
+                    const targetRow = targetMap[machineName];
+
+                    let runTimeSeconds = 0;
+                    let excludedSeconds = 0;
+                    let totalActiveSeconds = 0;
                     let totalOutput = 0;
-                    if (outputRow) {
-                        for (const h of SHIFT_HOURS) {
-                            totalOutput += (outputRow[`actual_${h}`] || 0);
+
+                    for (let j = 0; j < SHIFT_HOURS.length; j++) {
+                        const h = SHIFT_HOURS[j];
+                        const isActive = !targetRow || (targetRow[`target_${h}`] > 0);
+                        
+                        if (isActive) {
+                            totalOutput += (outputRow ? (outputRow[`actual_${h}`] || 0) : 0);
+                            const hStart = new Date(shiftStart.getTime() + j * 3600000);
+                            const hEnd = new Date(hStart.getTime() + 3600000);
+                            const { runTimeSeconds: rTime, excludedSeconds: eTime } = calcMcStatusDurations(mcRecords, hStart, hEnd);
+                            
+                            runTimeSeconds += rTime;
+                            excludedSeconds += eTime;
+                            totalActiveSeconds += 3600;
                         }
                     }
 
-                    const targetRow = targetMap[machineName];
+                    const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalActiveSeconds);
                     const idealCT = targetRow?.cycle_time_target || 0;
                     const performance = calcPerformance(totalOutput, idealCT, runTimeSeconds);
+
+                    // 🆕 Fetch existing OEE to get the saved ng_qty for backfilling
+                    const existingOee = await prisma.tb_oee.findFirst({
+                        where: { machine_name: machineName, date: targetDate }
+                    });
+                    const savedNgQty = existingOee?.ng_qty || 0;
+
+                    let quality = 0;
+                    let oeeValue = 0;
+                    
+                    if (totalOutput > 0) {
+                        quality = ((totalOutput - savedNgQty) / totalOutput) * 100;
+                        if (quality < 0) quality = 0;
+                    }
+                    
+                    if (availability > 0 && performance > 0 && quality > 0) {
+                        oeeValue = (availability / 100) * (performance / 100) * (quality / 100) * 100;
+                    }
 
                     const dataToWrite = {
                         availability: parseFloat(availability.toFixed(2)),
                         performance: parseFloat(performance.toFixed(2)),
+                        quality: parseFloat(quality.toFixed(2)),
+                        oee_value: parseFloat(oeeValue.toFixed(2)),
                     };
 
                     upsertOps.push(
@@ -842,12 +1182,324 @@ async function backfillOeeStartup() {
     }
 }
 
+/**
+ * 🆕 Hourly summarized NG by station 
+ * Reads InfluxDB for the past hour and upserts into tb_machine_ng
+ */
+async function summarizeNgHourly() {
+    try {
+        const now = new Date();
+        const prevHourStart = new Date(now);
+        prevHourStart.setUTCMinutes(0, 0, 0);
+        prevHourStart.setUTCHours(prevHourStart.getUTCHours() - 1); // Go back 1 hour
+        const prevHourEnd = new Date(prevHourStart);
+        prevHourEnd.setUTCHours(prevHourEnd.getUTCHours() + 1);
+
+        const dateStr = getShiftDateUTC(prevHourStart);
+        const utcHour = prevHourStart.getUTCHours();
+        const thColumn = utcHourToThColumn(utcHour);
+
+        console.log(`🎯 [Cron] Summarizing NG for hour ${thColumn} (${dateStr})...`);
+
+        // Get station config
+        const stationsGrouped = await getStationConfigGrouped();
+        const activeMachines = Object.keys(stationsGrouped);
+        if (activeMachines.length === 0) return;
+
+        let totalUpserts = 0;
+
+        for (const machineName of activeMachines) {
+             const stations = stationsGrouped[machineName];
+             if (!stations || stations.length === 0) continue;
+
+             const stationNgCounts = await influxService.queryNgByStationForHour(machineName, prevHourStart, prevHourEnd, stations);
+             
+             for (const st of stations) {
+                 const ngVal = stationNgCounts[st.station_name] || 0;
+                 if (ngVal > 0) {
+                     await prisma.tb_machine_ng.upsert({
+                         where: {
+                             machine_name_date_station_id: {
+                                 machine_name: machineName,
+                                 date: new Date(dateStr),
+                                 station_id: st.id      // ✅ Use station_id FK
+                             }
+                         },
+                         update: {
+                             [`ng_${thColumn}`]: ngVal
+                         },
+                         create: {
+                             machine_name: machineName,
+                             date: new Date(dateStr),
+                             station_id: st.id,         // ✅ FK
+                             [`ng_${thColumn}`]: ngVal
+                         }
+                     });
+                     totalUpserts++;
+                 }
+             }
+
+             // 🆕 Save True NG Parts as station_id = 0
+             const trueNgVal = stationNgCounts['True_NG'] || 0;
+             if (trueNgVal > 0) {
+                 await prisma.tb_machine_ng.upsert({
+                     where: {
+                         machine_name_date_station_id: {
+                             machine_name: machineName,
+                             date: new Date(dateStr),
+                             station_id: 0      // 🆕 0 represents True Part NG
+                         }
+                     },
+                     update: { [`ng_${thColumn}`]: trueNgVal },
+                     create: {
+                         machine_name: machineName,
+                         date: new Date(dateStr),
+                         station_id: 0,
+                         [`ng_${thColumn}`]: trueNgVal
+                     }
+                 });
+                 totalUpserts++;
+             }
+        }
+
+        // Recalculate Overall_ng column for rows updated today
+        await recalcOverallNg(new Date(dateStr));
+        console.log(`✅ [Cron] NG summarized for ${dateStr} (upserted ${totalUpserts} station records)`);
+    } catch (err) {
+        console.error("❌ summarizeNgHourly failed:", err.message);
+    }
+}
+
+/**
+ * Helper to get active stations grouped by machine name
+ */
+async function getStationConfigGrouped() {
+    const stations = await prisma.tbm_machine_station.findMany({
+        where: { status: 'active' },
+        orderBy: { station_number: 'asc' }
+    });
+    const grouped = {};
+    for (const st of stations) {
+        if (!grouped[st.machine_name]) grouped[st.machine_name] = [];
+        grouped[st.machine_name].push(st);
+    }
+    return grouped;
+}
+
+/**
+ * Recalculate the sum of ALL hour columns and update Overall_ng
+ */
+async function recalcOverallNg(targetDate) {
+    const rows = await prisma.tb_machine_ng.findMany({
+        where: { date: targetDate }
+    });
+    
+    for (const row of rows) {
+        let total = 0;
+        for (const h of SHIFT_HOURS) {
+            total += (row[`ng_${h}`] || 0);
+        }
+        await prisma.tb_machine_ng.update({
+            where: { id: row.id },
+            data: { Overall_ng: total }
+        });
+    }
+}
+
+/**
+ * 🆕 Backfill NG data for a single day
+ */
+async function backfillNgSingleDay(startOfShift, endOfShift, dateStr) {
+    const targetDate = new Date(dateStr);
+    const stationsGrouped = await getStationConfigGrouped();
+    const activeMachines = Object.keys(stationsGrouped);
+    if (activeMachines.length === 0) return;
+
+    let totalUpserts = 0;
+
+    for (const machineName of activeMachines) {
+        const stations = stationsGrouped[machineName];
+        if (!stations || stations.length === 0) continue;
+
+        // Loop over each hour of the shift
+        let curHour = new Date(startOfShift);
+        while (curHour < endOfShift) {
+            const nextHour = new Date(curHour);
+            nextHour.setUTCHours(nextHour.getUTCHours() + 1);
+
+            // Break if the nextHour > endOfShift ONLY if it's the current hour we're backfilling
+            const queryEnd = nextHour > endOfShift ? endOfShift : nextHour;
+            const thColumn = utcHourToThColumn(curHour.getUTCHours());
+            
+            const stationNgCounts = await influxService.queryNgByStationForHour(machineName, curHour, queryEnd, stations);
+            
+            for (const st of stations) {
+                 const ngVal = stationNgCounts[st.station_name] || 0;
+                 if (ngVal > 0) {
+                     await prisma.tb_machine_ng.upsert({
+                         where: {
+                             machine_name_date_station_id: {
+                                 machine_name: machineName,
+                                 date: targetDate,
+                                 station_id: st.id      // ✅ Use station_id FK
+                             }
+                         },
+                         update: {
+                             [`ng_${thColumn}`]: ngVal
+                         },
+                         create: {
+                             machine_name: machineName,
+                             date: targetDate,
+                             station_id: st.id,         // ✅ FK
+                             [`ng_${thColumn}`]: ngVal
+                         }
+                     });
+                     totalUpserts++;
+                 }
+             }
+
+             // 🆕 Save True NG Parts as station_id = 0
+             const trueNgVal = stationNgCounts['True_NG'] || 0;
+             if (trueNgVal > 0) {
+                 await prisma.tb_machine_ng.upsert({
+                     where: {
+                         machine_name_date_station_id: {
+                             machine_name: machineName,
+                             date: targetDate,
+                             station_id: 0      // 🆕 0 represents True Part NG
+                         }
+                     },
+                     update: { [`ng_${thColumn}`]: trueNgVal },
+                     create: {
+                         machine_name: machineName,
+                         date: targetDate,
+                         station_id: 0,
+                         [`ng_${thColumn}`]: trueNgVal
+                     }
+                 });
+                 totalUpserts++;
+             }
+
+            curHour = nextHour;
+        }
+    }
+    await recalcOverallNg(targetDate);
+    if (totalUpserts > 0) {
+        console.log(`   🎯 NG Backfilled ${totalUpserts} station segments for ${dateStr}`);
+    }
+}
+
+/**
+ * 🆕 Backfill NG data on server startup / daily sync
+ * Mirrors backfillStartup() logic — covers last N days + current moment (NOW)
+ * Prevents NG data gaps when server was offline during a cron window
+ */
+async function backfillNgStartup(days = 5) {
+    const BACKFILL_DAYS = days;
+    console.log(`🔄 [Startup] Backfilling NG station data for last ${BACKFILL_DAYS} days + today...`);
+
+    try {
+        const now = new Date();
+        const todayStr = getShiftDateUTC(now);
+
+        for (let i = BACKFILL_DAYS; i >= 0; i--) {
+            const shiftDate = new Date(now);
+            shiftDate.setUTCDate(shiftDate.getUTCDate() - i);
+            const dateStr = getShiftDateUTC(shiftDate);
+
+            const startOfShift = new Date(dateStr + "T00:00:00.000Z");
+            let endOfShift;
+
+            if (dateStr === todayStr) {
+                // ✅ Today: up to NOW so any hours missed since last crash are backfilled
+                endOfShift = new Date(now);
+            } else {
+                // Past days: full 24h window
+                endOfShift = new Date(startOfShift);
+                endOfShift.setUTCDate(endOfShift.getUTCDate() + 1);
+            }
+
+            await backfillNgSingleDay(startOfShift, endOfShift, dateStr);
+        }
+
+        console.log("✅ [Startup] NG backfill complete");
+    } catch (err) {
+        console.error("❌ backfillNgStartup failed:", err.message);
+    }
+}
+
+/**
+ * Startup / Sync: Backfill historical Status and Alarm data from InfluxDB -> MSSQL
+ * Used on server restart to recover missing real-time events.
+ */
+async function backfillEventsStartup(days = 5) {
+    console.log(`🔄 [Startup] Backfilling last ${days} days for Status & Alarm from InfluxDB → MSSQL...`);
+    try {
+        const now = new Date();
+        const start = new Date(now);
+        start.setUTCDate(start.getUTCDate() - days);
+
+        // Fetch from InfluxDB
+        const statusData = await influxService.queryStatusRange(start, now);
+        const alarmData = await influxService.queryAlarmRange(start, now);
+
+        if (statusData.length > 0) {
+            // Fetch existing from MSSQL to prevent duplicates
+            const existingStatus = await prisma.tb_MCStatus.findMany({
+                where: { Datetime: { gte: start } },
+                select: { MC: true, Datetime: true }
+            });
+            const existingSet = new Set(existingStatus.map(r => `${r.MC}_${r.Datetime.getTime()}`));
+
+            const newStatus = statusData.filter(d => !existingSet.has(`${d.machine_name}_${d.time.getTime()}`));
+            if (newStatus.length > 0) {
+                // Batch insert
+                await prisma.tb_MCStatus.createMany({
+                    data: newStatus.map(d => ({
+                        Datetime: d.time,
+                        MC: d.machine_name,
+                        MCStatus: d.status
+                    }))
+                });
+                console.log(`   ✅ Recovered ${newStatus.length} missing Status records.`);
+            }
+        }
+
+        if (alarmData.length > 0) {
+            // Fetch existing from MSSQL to prevent duplicates
+            const existingAlarm = await prisma.tb_MCAlarm.findMany({
+                where: { Datetime: { gte: start } },
+                select: { MC: true, Datetime: true }
+            });
+            const existingSet = new Set(existingAlarm.map(r => `${r.MC}_${r.Datetime.getTime()}`));
+
+            const newAlarm = alarmData.filter(d => !existingSet.has(`${d.machine_name}_${d.time.getTime()}`));
+            if (newAlarm.length > 0) {
+                // Batch insert
+                await prisma.tb_MCAlarm.createMany({
+                    data: newAlarm.map(d => ({
+                        Datetime: d.time,
+                        MC: d.machine_name,
+                        MCAlarm: d.alarm
+                    }))
+                });
+                console.log(`   ✅ Recovered ${newAlarm.length} missing Alarm records.`);
+            }
+        }
+    } catch (err) {
+        console.error("❌ Events startup backfill failed:", err.message);
+    }
+}
+
 module.exports = {
     startCronJobs,
     summarizeLastHour,
+    summarizeNgHourly,
     handleLateData,
     recalcOverallInMSSQL,
     backfillStartup,
+    backfillNgStartup,
+    backfillEventsStartup,
     upsertOeeHourly,
     backfillOeeStartup,
     autoPlanDaily,

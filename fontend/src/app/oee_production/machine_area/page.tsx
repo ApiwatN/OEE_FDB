@@ -50,7 +50,7 @@ export default function page() {
             }
 
             await fetchDataMachineArea();
-            const savedArea = localStorage.getItem("machineAreaLocal");
+            const savedArea = localStorage.getItem("machineAreaLocal") || "";
             const savedTypeFilter = localStorage.getItem("machineTypeFilterLocal") || "";
             setTypeFilter(savedTypeFilter);
             if (savedArea) {
@@ -143,6 +143,17 @@ export default function page() {
         return () => clearTimeout(timer);
     }, [types]);
 
+    // ✅ CRITICAL FIX: Prevent Ghost Filters from older sessions or other areas
+    useEffect(() => {
+        if (typeFilter && types.length > 0) {
+            const isValid = types.some((t: any) => t.machine_type === typeFilter);
+            if (!isValid) {
+                setTypeFilter("");
+                localStorage.removeItem("machineTypeFilterLocal");
+            }
+        }
+    }, [types, typeFilter]);
+
     const fetchDataMachineTypesWithName = async (area: any) => {
         try {
             if (!area || area === "") {
@@ -178,7 +189,17 @@ export default function page() {
     const handleAreaChange = (e: any) => {
         const selectedArea = e.target.value;
         setAreaSelected(selectedArea);
-        localStorage.setItem("machineAreaLocal", selectedArea)
+        
+        // ✅ CRITICAL FIX: Reset the machine type filter when the area changes
+        setTypeFilter("");
+        localStorage.removeItem("machineTypeFilterLocal");
+        
+        // ✅ Only save to localStorage if a real area is selected (not the placeholder empty value)
+        if (selectedArea) {
+            localStorage.setItem("machineAreaLocal", selectedArea);
+        } else {
+            localStorage.removeItem("machineAreaLocal");
+        }
         fetchDataMachineTypesWithName(selectedArea);
     }
 
@@ -252,7 +273,7 @@ export default function page() {
             }
             const machineDate = historyWorking.date;
             const machineName = historyWorking.machine_name;
-            const operatorId = historyWorking.emp_no
+            const operatorId = historyWorking.emp_no;
             Swal.fire({
                 title: "Entering Production Page...",
                 text: `Machine: ${machine}, Employee ID: ${code}`,
@@ -263,8 +284,13 @@ export default function page() {
                 localStorage.setItem("machineDateLocal", selectedDate);
                 localStorage.setItem("machineNameLocal", machineName);
                 localStorage.setItem("operatorLocal", operatorId);
+                if (historyWorking.id) {
+                    localStorage.setItem(`loginSource_h${historyWorking.id}`, "machine_working");
+                }
                 Swal.close();
                 document.body.classList.remove("modal-open");
+                document.body.style.overflow = "";
+                document.body.style.paddingRight = "";
                 document.querySelectorAll(".modal-backdrop, .swal2-container").forEach(el => el.remove());
 
                 router.push("/machine_working");
@@ -382,6 +408,13 @@ export default function page() {
                     </div>
 
                     <div className="d-flex flex-column gap-3">
+                        {types.filter((itemType: any) => !typeFilter || itemType.machine_type === typeFilter).length === 0 && areaSelected && (
+                            <div className="text-center my-5 text-muted fade-in">
+                                <i className="fas fa-exclamation-circle fs-1 mb-3 text-warning"></i>
+                                <h4>No Active Machines Found</h4>
+                                <p>There are currently no active machines in the selected area.</p>
+                            </div>
+                        )}
                         {types.filter((itemType: any) => !typeFilter || itemType.machine_type === typeFilter).map((itemType: any, index: number) => (
                             <div
                                 key={itemType.machine_type}
@@ -622,8 +655,17 @@ export default function page() {
                                     // Close Modal
                                     const modalEl = document.getElementById("modalMachine");
                                     const modal = (window as any).bootstrap.Modal.getInstance(modalEl);
-                                    if (modal) modal.hide();
-                                    document.querySelectorAll(".modal-backdrop").forEach(el => el.remove());
+                                    if (modal) {
+                                        modal.hide();
+                                    }
+                                    
+                                    // ✅ CRITICAL FIX: Clean up Bootstrap modal leftovers that hide the scrollbar
+                                    setTimeout(() => {
+                                        document.body.classList.remove("modal-open");
+                                        document.body.style.overflow = "";
+                                        document.body.style.paddingRight = "";
+                                        document.querySelectorAll(".modal-backdrop").forEach(el => el.remove());
+                                    }, 100);
 
                                     // ต้อง Clear LocalStorage ที่เกี่ยวข้องกับ Operator ทิ้ง เพื่อให้เป็นโหมดดูอย่างเดียว
                                     localStorage.removeItem("operatorLocal");

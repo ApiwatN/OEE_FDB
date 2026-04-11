@@ -160,6 +160,7 @@ export default function LayoutDashboard() {
     const [popoverPosition, setPopoverPosition] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
     const [serverTimeStr, setServerTimeStr] = useState('');
     const [machineStatuses, setMachineStatuses] = useState<Record<string, string>>({});
+    const [machineAlarms, setMachineAlarms] = useState<Record<string, string>>({});
     const [countdown, setCountdown] = useState<number>(300); // 5 minutes refresh
 
     useEffect(() => {
@@ -196,6 +197,7 @@ export default function LayoutDashboard() {
         });
 
         // Fast production update ทุก 2 วินาที — Output, Eff, CT
+        // ✅ Fix #5: Delta merge — only update machines included in payload
         socket.on('realtime_output', (data: any) => {
             const socketMachines = data?.machines;
             if (!socketMachines) return;
@@ -204,7 +206,7 @@ export default function LayoutDashboard() {
                 if (prev.length === 0) return prev;
                 return prev.map(machine => {
                     const rt = socketMachines[machine.name];
-                    if (!rt || !rt.daily) return machine;
+                    if (!rt || !rt.daily) return machine; // Not in delta → keep as-is
                     return {
                         ...machine,
                         output: rt.daily.totalOutput ?? machine.output,
@@ -212,6 +214,44 @@ export default function LayoutDashboard() {
                         cycleTime: rt.daily.avgCycleTime ?? machine.cycleTime,
                     };
                 });
+            });
+
+            // ✅ Update machine statuses dynamically from fast loop payload
+            setMachineStatuses(prev => {
+                let changed = false;
+                const newStatuses = { ...prev };
+                for (const key in socketMachines) {
+                    const rt = socketMachines[key];
+                    if (rt && rt.currentHour && rt.currentHour.live_status) {
+                        const newStatus = rt.currentHour.live_status;
+                        if (newStatuses[key] !== newStatus) {
+                            newStatuses[key] = newStatus;
+                            changed = true;
+                        }
+                    }
+                }
+                return changed ? newStatuses : prev;
+            });
+
+            // ✅ Update machine alarms dynamically
+            setMachineAlarms(prev => {
+                let changed = false;
+                const newAlarms = { ...prev };
+                for (const key in socketMachines) {
+                    const rt = socketMachines[key];
+                    if (rt && rt.currentHour) {
+                        const newAlarm = rt.currentHour.live_alarm || "";
+                        if ((newAlarms[key] || "") !== newAlarm) {
+                            if (newAlarm) {
+                                newAlarms[key] = newAlarm;
+                            } else {
+                                delete newAlarms[key];
+                            }
+                            changed = true;
+                        }
+                    }
+                }
+                return changed ? newAlarms : prev;
             });
         });
 
@@ -316,6 +356,7 @@ export default function LayoutDashboard() {
                 }}
                 style={{
                     backgroundColor: (() => {
+                        if (machineAlarms[machine.name]) return '#ffebee'; // Fixed to light red if alarm
                         const status = machineStatuses[machine.name];
                         if (status === 'Plan_Stop' || status === 'Break_Time') return '#d5d5d5'; // เทาเข้ม (body)
                         if (status === 'Run_Time') return '#e8f5e9'; // Light Green
@@ -323,6 +364,7 @@ export default function LayoutDashboard() {
                         return '#f5f5f5'; // No Data — เทาอ่อน (body)
                     })(),
                     border: `1px solid ${(() => {
+                        if (machineAlarms[machine.name]) return '#c62828';
                         const status = machineStatuses[machine.name];
                         if (status === 'Plan_Stop' || status === 'Break_Time') return '#424242'; // เทาเข้ม (border)
                         if (status === 'Run_Time') return '#2e7d32'; // Dark Green
@@ -341,6 +383,7 @@ export default function LayoutDashboard() {
                     fontSize: '6px',
                     lineHeight: 1.15,
                     boxSizing: 'border-box',
+                    animation: machineAlarms[machine.name] ? 'blink 2s infinite' : 'none'
                 }}
                 onMouseEnter={(e) => {
                     e.currentTarget.style.transform = 'scale(1.05)';
@@ -357,6 +400,7 @@ export default function LayoutDashboard() {
                 <div style={{
                     fontWeight: 'bold',
                     backgroundColor: (() => {
+                        if (machineAlarms[machine.name]) return '#c62828'; // Red if alarm
                         const status = machineStatuses[machine.name];
                         if (status === 'Plan_Stop' || status === 'Break_Time') return '#424242'; // เทาเข้ม (header)
                         if (status === 'Run_Time') return '#2e7d32';

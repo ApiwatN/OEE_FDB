@@ -291,6 +291,138 @@ async function queryAllMachinesModelsForHour(startUTC, endUTC) {
     }
 }
 
+/**
+ * 🆕 Query and parse NG by station from judg_result string
+ * judg_result is expected to be a comma-separated string, e.g., "OK,NG,OK,OK,NG"
+ * We use ng_id (1-indexed) to find the position in the string.
+ * station_number is used only for UI ordering, not for data parsing.
+ */
+async function queryNgByStationForHour(machineName, startUTC, endUTC, stationConfig) {
+    const client = getClient();
+    const measurement = process.env.INFLUX_MEASUREMENT || "data_tb";
+    const startISO = startUTC instanceof Date ? startUTC.toISOString() : startUTC;
+    const endISO = endUTC instanceof Date ? endUTC.toISOString() : endUTC;
+
+    const query = `
+        SELECT "judg_result"
+        FROM "${measurement}"
+        WHERE "machine_name" = '${machineName}'
+        AND "judg_result" =~ /NG/
+        AND time >= '${startISO}' AND time < '${endISO}'
+    `;
+
+    const stationCounts = {};
+    for (const st of stationConfig) {
+        stationCounts[st.station_name] = 0;
+    }
+    // 🆕 Add a special aggregate counter for "True NG Parts"
+    stationCounts['True_NG'] = 0;
+
+    try {
+        const results = await client.query(query);
+        for (const row of results) {
+            if (!row.judg_result) continue;
+            
+            // "OK,NG,OK" -> ["OK", "NG", "OK"]
+            const resultsArray = row.judg_result.split(",");
+            let isPartNg = false; // 🆕 Track if this specific part is NG
+            
+            for (const st of stationConfig) {
+                // ng_id is 1-indexed: position in judg_result string
+                // station_number is for UI column ordering only
+                const idx = st.ng_id - 1;
+                
+                if (idx >= 0 && idx < resultsArray.length) {
+                    if (resultsArray[idx].trim().toUpperCase() === "NG") {
+                         stationCounts[st.station_name] += 1;
+                         isPartNg = true;
+                    }
+                }
+            }
+
+            // 🆕 If any configured station failed, it counts as exactly 1 NG Part
+            if (isPartNg) {
+                stationCounts['True_NG'] += 1;
+            }
+        }
+        return stationCounts;
+    } catch (err) {
+        console.error(`❌ InfluxDB queryNgByStationForHour error for ${machineName}:`, err.message);
+        return stationCounts;
+    }
+}
+
+/**
+ * Query status_tb for historical sync
+ * Returns: Array of { machine_name, time, status }
+ */
+async function queryStatusRange(startUTC, endUTC) {
+    const client = getClient();
+    const measurement = "status_tb";
+    const startISO = startUTC instanceof Date ? startUTC.toISOString() : startUTC;
+    const endISO = endUTC instanceof Date ? endUTC.toISOString() : endUTC;
+
+    const query = `
+        SELECT "Status"
+        FROM "${measurement}"
+        WHERE time >= '${startISO}' AND time < '${endISO}'
+    `;
+    try {
+        const results = await client.query(query);
+        const data = [];
+        for (const row of results) {
+            const machineName = row.machine_name || row.tags?.machine_name;
+            if (machineName && row.Status) {
+                data.push({
+                    machine_name: machineName,
+                    time: new Date(row.time),
+                    status: row.Status
+                });
+            }
+        }
+        return data;
+    } catch (err) {
+        // Just log and return empty array if the measurement doesn't exist yet
+        console.error("❌ InfluxDB queryStatusRange error:", err.message);
+        return [];
+    }
+}
+
+/**
+ * Query alarm_tb for historical sync
+ * Returns: Array of { machine_name, time, alarm }
+ */
+async function queryAlarmRange(startUTC, endUTC) {
+    const client = getClient();
+    const measurement = "alarm_tb";
+    const startISO = startUTC instanceof Date ? startUTC.toISOString() : startUTC;
+    const endISO = endUTC instanceof Date ? endUTC.toISOString() : endUTC;
+
+    const query = `
+        SELECT "Alarm"
+        FROM "${measurement}"
+        WHERE time >= '${startISO}' AND time < '${endISO}'
+    `;
+    try {
+        const results = await client.query(query);
+        const data = [];
+        for (const row of results) {
+            const machineName = row.machine_name || row.tags?.machine_name;
+            if (machineName && row.Alarm) {
+                data.push({
+                    machine_name: machineName,
+                    time: new Date(row.time),
+                    alarm: row.Alarm
+                });
+            }
+        }
+        return data;
+    } catch (err) {
+        console.error("❌ InfluxDB queryAlarmRange error:", err.message);
+        return [];
+    }
+}
+
 module.exports = {
     initClient,
     getClient,
@@ -300,6 +432,9 @@ module.exports = {
     queryHoursRange,
     queryNgCount,
     queryAllMachinesNgCount,
+    queryNgByStationForHour,
     queryActualModels,
     queryAllMachinesModelsForHour,
+    queryStatusRange,
+    queryAlarmRange,
 };

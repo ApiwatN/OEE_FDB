@@ -1,5 +1,6 @@
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
+const { recalculateAPQForDay } = require("../services/oeeBackfillService");
 
 // Default 24 hours all active
 const DEFAULT_ACTIVE_HOURS = JSON.stringify({
@@ -18,9 +19,11 @@ const HOURS_ORDER = [
 const SHIFT_A = ["07", "08", "09", "10", "11", "12", "13", "14"];
 const SHIFT_B = ["15", "16", "17", "18", "19", "20", "21", "22"];
 const SHIFT_C = ["23", "00", "01", "02", "03", "04", "05", "06"];
+const SHIFT_M = ["07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18"];
+const SHIFT_N = ["19", "20", "21", "22", "23", "00", "01", "02", "03", "04", "05", "06"];
 
 /**
- * แปลง shift pattern ("ABC", "AB", "A") เป็น active_hours object
+ * แปลง shift pattern ("ABC", "AB", "A", "M", "N") เป็น active_hours object
  */
 function shiftPatternToActiveHours(pattern) {
     const hours = {};
@@ -29,6 +32,8 @@ function shiftPatternToActiveHours(pattern) {
     if (p.includes("A")) SHIFT_A.forEach(h => hours[h] = true);
     if (p.includes("B")) SHIFT_B.forEach(h => hours[h] = true);
     if (p.includes("C")) SHIFT_C.forEach(h => hours[h] = true);
+    if (p.includes("M")) SHIFT_M.forEach(h => hours[h] = true);
+    if (p.includes("N")) SHIFT_N.forEach(h => hours[h] = true);
     return hours;
 }
 
@@ -153,7 +158,7 @@ module.exports = {
             const diffMs = latestDate.getTime() - updateStart.getTime();
             const advanceDays = Math.max(7, Math.ceil(diffMs / (1000 * 60 * 60 * 24)) + 1);
 
-            const generated = await generatePlanForMachine(config, advanceDays, updateStart.toISOString().split("T")[0]);
+            const generated = await generatePlanForMachine(config, advanceDays, updateStart.toISOString().split("T")[0], true);
 
             res.json({
                 success: true,
@@ -243,6 +248,13 @@ module.exports = {
                 });
             }
 
+            // ✅ Recalculate OEE (A, P, Q) for this date after target update
+            await recalculateAPQForDay(machine_name, planDate);
+            
+            // ✅ Recalculate Efficiency actual
+            const { recalcOverallInMSSQL } = require("../services/cronService");
+            await recalcOverallInMSSQL(planDate, [machine_name]);
+
             res.json({ success: true, shift_pattern, work_hours: activeCount, pc_target });
         } catch (err) {
             console.error(err);
@@ -290,6 +302,13 @@ module.exports = {
                     },
                 });
             }
+
+            // ✅ Recalculate OEE (A, P, Q) for this date after target update
+            await recalculateAPQForDay(machine_name, planDate);
+            
+            // ✅ Recalculate Efficiency actual
+            const { recalcOverallInMSSQL } = require("../services/cronService");
+            await recalcOverallInMSSQL(planDate, [machine_name]);
 
             const activeCount = Object.values(active_hours).filter(Boolean).length;
             res.json({ success: true, work_hours: activeCount, pc_target });
@@ -358,44 +377,12 @@ module.exports = {
                 },
             });
 
-            // 6. Recalculate tb_oee.performance + oee_value if record exists
-            const oeeRecord = await prisma.tb_oee.findFirst({
-                where: { machine_name, date: planDate },
-            });
+            // 6. ✅ Recalculate full OEE (A, P, Q) using the unified backfill service
+            await recalculateAPQForDay(machine_name, planDate);
 
-            if (oeeRecord) {
-                // Performance = (actual_output × new_ct) / (working_seconds) × 100
-                // If CT changed, performance changes
-                const availability = oeeRecord.availability || 0;
-                const quality = oeeRecord.quality || 0;
-
-                // Recalc performance: actual_output / target_output * 100
-                // (target_output is now pc_target)
-                const actualOutput = await prisma.tb_output_actual.findFirst({
-                    where: { machine_name, date: planDate },
-                });
-
-                let totalActual = 0;
-                if (actualOutput) {
-                    totalActual = HOURS_ORDER.reduce((sum, h) => sum + (actualOutput[`actual_${h}`] || 0), 0);
-                }
-
-                // Performance = (totalActual / pc_target) * 100 (capped at 100)
-                let performance = 0;
-                if (pc_target > 0) {
-                    performance = Math.min(100, Number(((totalActual / pc_target) * 100).toFixed(2)));
-                }
-
-                // OEE = A × P × Q / 10000
-                const oee_value = Number(((availability * performance * quality) / 10000).toFixed(2));
-
-                await prisma.tb_oee.update({
-                    where: { id: oeeRecord.id },
-                    data: { performance, oee_value },
-                });
-
-                console.log(`   ✅ Recalc OEE for ${machine_name} on ${date}: P=${performance}%, OEE=${oee_value}%`);
-            }
+            // ✅ Recalculate Efficiency actual
+            const { recalcOverallInMSSQL } = require("../services/cronService");
+            await recalcOverallInMSSQL(planDate, [machine_name]);
 
             const activeCount = Object.values(activeHours).filter(Boolean).length;
             res.json({
@@ -421,9 +408,10 @@ module.exports = {
 
 /**
  * สร้าง/อัปเดตแผนอัตโนมัติสำหรับเครื่องจักร
- * ถ้ามีแผนอยู่แล้ว → update / ถ้ายังไม่มี → create (ข้ามวันหยุด)
+ * forceUpdate = true  → update plan ที่มีอยู่ (ใช้ตอน Save Config)
+ * forceUpdate = false → ข้ามวันที่มี plan อยู่แล้ว (ใช้ตอน Cron)
  */
-async function generatePlanForMachine(config, advanceDays = 7, startDate = null) {
+async function generatePlanForMachine(config, advanceDays = 7, startDate = null, forceUpdate = false) {
     // ใช้ startDate ที่ส่งมา หรือพรุ่งนี้ถ้าไม่ระบุ
     const start = startDate ? new Date(startDate) : new Date();
     if (!startDate) start.setDate(start.getDate() + 1);
@@ -471,11 +459,15 @@ async function generatePlanForMachine(config, advanceDays = 7, startDate = null)
             });
 
             if (existing) {
-                // มีอยู่แล้ว → update
-                await prisma.tb_output_target.update({
-                    where: { id: existing.id },
-                    data: planData,
-                });
+                if (forceUpdate) {
+                    // Save Config → update plan ที่มีอยู่
+                    await prisma.tb_output_target.update({
+                        where: { id: existing.id },
+                        data: planData,
+                    });
+                    generated++;
+                }
+                // Cron (forceUpdate=false) → ข้ามวันที่มี plan อยู่แล้ว
             } else {
                 // ยังไม่มี → create
                 await prisma.tb_output_target.create({
@@ -485,8 +477,8 @@ async function generatePlanForMachine(config, advanceDays = 7, startDate = null)
                         ...planData,
                     },
                 });
+                generated++;
             }
-            generated++;
         }
         d.setDate(d.getDate() + 1);
     }

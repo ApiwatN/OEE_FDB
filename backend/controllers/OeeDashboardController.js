@@ -5,7 +5,7 @@ const fs = require("fs");
 const sharp = require("sharp");
 const cacheService = require("../services/cacheService");
 const influxService = require("../services/influxService");
-const { getShiftDateUTC } = require("../utils/timeUtils");
+const { getShiftDateUTC, getCurrentHourBoundaries, utcHourToThColumn } = require("../utils/timeUtils");
 
 // Helper: สร้าง shift boundaries สำหรับ InfluxDB query (UTC)
 function getShiftBoundariesForDate(dateStr) {
@@ -78,9 +78,26 @@ module.exports = {
             // ✅ Logic: หา OEE ของ "วันที่เลือก" (Selected Date)
             // ถ้าเลือกวันที่ 16 -> ให้หาของวันที่ 16
             let targetDate = date ? new Date(date) : new Date();
+            let endOfTargetDay = new Date(targetDate);
 
-            // กำหนดเวลาเป็นสิ้นวันของวันที่เลือก (23:59:59.999)
-            const endOfTargetDay = new Date(targetDate);
+            // ✅ Check if machine is manual
+            const config = await prisma.tb_machine_plan_config.findUnique({
+                where: { machine_name },
+                select: { oee_mode: true }
+            });
+            const isManual = config && config.oee_mode === "manual";
+            
+            const serverTodayStr = getShiftDateUTC();
+            const serverToday = new Date(serverTodayStr);
+
+            // สำหรับเครื่อง manual, วันนี้ยังไม่มียอด NG ดังนั้นให้ดึงค่า OEE ของเมื่อวานแทน
+            if (isManual && targetDate >= serverToday) {
+                let yesterday = new Date(serverToday);
+                yesterday.setDate(yesterday.getDate() - 1);
+                endOfTargetDay = yesterday;
+            }
+
+            // กำหนดเวลาเป็นสิ้นวัน
             endOfTargetDay.setHours(23, 59, 59, 999);
 
             whereCondition.date = {
@@ -140,6 +157,17 @@ module.exports = {
                 outputActualDB = await prisma.tb_output_actual.findFirst({
                     where: { machine_name, date: targetDate },
                 });
+            }
+
+            // ✅ Fix: current hour → InfluxDB เป็น source of truth (ต้องอยู่นอก else เพื่อให้ทำงานทั้งกรณี cache และ MSSQL)
+            if (isToday && outputActualDB) {
+                try {
+                    const now2 = new Date();
+                    const { start, thColumn } = getCurrentHourBoundaries(now2);
+                    const field = `actual_${thColumn}`;
+                    const influxData = await influxService.queryMachineForHour(machine_name, start, now2);
+                    outputActualDB[field] = (influxData && influxData.output_count > 0) ? influxData.output_count : 0;
+                } catch (e) { /* non-critical — keep cache/MSSQL value */ }
             }
 
             if (!outputTargetDB) return res.json({ message: "No Target Data" });
@@ -232,18 +260,36 @@ module.exports = {
             }
             // get oee data
             // ✅ Logic: หา OEE ของ "วันที่เลือก" (Selected Date)
-            const endOfTargetDay = new Date(targetDate);
+            let endOfTargetDay = new Date(targetDate);
+
+            // ✅ Check if machine is manual
+            const machineConfig = await prisma.tb_machine_plan_config.findUnique({
+                where: { machine_name },
+                select: { oee_mode: true }
+            });
+            const isManual = machineConfig && machineConfig.oee_mode === "manual";
+            
+            const serverTodayStrTable = getShiftDateUTC();
+            const serverTodayTable = new Date(serverTodayStrTable);
+
+            // สำหรับเครื่อง manual, วันนี้ยังไม่มียอด NG ดังนั้นให้ดึงค่า OEE ของเมื่อวานแทน
+            if (isManual && targetDate >= serverTodayTable) {
+                let yesterday = new Date(serverTodayTable);
+                yesterday.setDate(yesterday.getDate() - 1);
+                endOfTargetDay = yesterday;
+            }
+
             endOfTargetDay.setHours(23, 59, 59, 999);
 
             const dataOee = await prisma.tb_oee.findFirst({
                 where: {
                     machine_name,
                     oee_value: { gt: 0 },
-                    date: { lte: endOfTargetDay } // ✅ Filter by selected date
+                    date: { lte: endOfTargetDay } // ✅ Filter by selected date (or yesterday for manual)
                 },
                 orderBy: { date: "desc" },
             });
-            console.log("dataOee: " + dataOee) // Removed: too noisy
+
             // }
             // ดึง CT และ Eff — ใช้ cache ถ้าดูวันนี้
             let cycleTimeActual = 0;
@@ -341,6 +387,17 @@ module.exports = {
                 });
             }
 
+            // ✅ Fix: current hour → InfluxDB เป็น source of truth (ต้องอยู่นอก else เพื่อให้ทำงานทั้งกรณี cache และ MSSQL)
+            if (isToday && outputActualDB) {
+                try {
+                    const now = new Date();
+                    const { start, thColumn } = getCurrentHourBoundaries(now);
+                    const field = `actual_${thColumn}`;
+                    const influxData = await influxService.queryMachineForHour(machine_name, start, now);
+                    outputActualDB[field] = (influxData && influxData.output_count > 0) ? influxData.output_count : 0;
+                } catch (e) { /* non-critical — keep cache/MSSQL value */ }
+            }
+
             let outputActual = [];
             let outputActualAccum = [];
             let outputTarget = [];
@@ -412,6 +469,16 @@ module.exports = {
                 effActualDB = await prisma.tb_efficiency_actual.findFirst({
                     where: { machine_name, date: targetDate },
                 });
+            }
+
+            // ✅ Fix: current hour CT → InfluxDB เป็น source of truth (ต้องอยู่นอก else เพื่อให้ทำงานทั้งกรณี cache และ MSSQL)
+            if (isToday && ctActualDB) {
+                try {
+                    const now = new Date();
+                    const { start, thColumn } = getCurrentHourBoundaries(now);
+                    const influxData = await influxService.queryMachineForHour(machine_name, start, now);
+                    ctActualDB[`cycle_${thColumn}`] = (influxData && influxData.avg_cycle_time > 0) ? parseFloat(influxData.avg_cycle_time.toFixed(2)) : 0;
+                } catch (e) { /* non-critical — keep cache/MSSQL value */ }
             }
 
             let cycleTimeActual = [];

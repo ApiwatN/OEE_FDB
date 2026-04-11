@@ -24,6 +24,8 @@ const HOURS_ORDER = [
 const SHIFT_A = ["07", "08", "09", "10", "11", "12", "13", "14"];
 const SHIFT_B = ["15", "16", "17", "18", "19", "20", "21", "22"];
 const SHIFT_C = ["23", "00", "01", "02", "03", "04", "05", "06"];
+const SHIFT_M = ["07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18"];
+const SHIFT_N = ["19", "20", "21", "22", "23", "00", "01", "02", "03", "04", "05", "06"];
 
 const DEFAULT_HOURS: Record<string, boolean> = {};
 HOURS_ORDER.forEach(h => DEFAULT_HOURS[h] = true);
@@ -181,7 +183,14 @@ function ProductionPlanningPage() {
         const aOn = SHIFT_A.every(h => hours[h] === true);
         const bOn = SHIFT_B.every(h => hours[h] === true);
         const cOn = SHIFT_C.every(h => hours[h] === true);
+        const mOn = SHIFT_M.every(h => hours[h] === true);
+        const nOn = SHIFT_N.every(h => hours[h] === true);
+        const totalActive = Object.values(hours).filter(Boolean).length;
+        
         if (aOn && bOn && cOn) return "ABC";
+        if (mOn && nOn) return "MN";
+        if (mOn && totalActive === 12) return "M";
+        if (nOn && totalActive === 12) return "N";
         if (aOn && bOn && !cOn) return "AB";
         if (bOn && cOn && !aOn) return "BC";
         if (aOn && cOn && !bOn) return "AC";
@@ -198,6 +207,8 @@ function ProductionPlanningPage() {
         if (pattern.includes("A")) SHIFT_A.forEach(h => hours[h] = true);
         if (pattern.includes("B")) SHIFT_B.forEach(h => hours[h] = true);
         if (pattern.includes("C")) SHIFT_C.forEach(h => hours[h] = true);
+        if (pattern.includes("M")) SHIFT_M.forEach(h => hours[h] = true);
+        if (pattern.includes("N")) SHIFT_N.forEach(h => hours[h] = true);
         return hours;
     };
 
@@ -206,7 +217,14 @@ function ProductionPlanningPage() {
         const aOn = SHIFT_A.every(h => (ht[`target_${h}`] || 0) > 0);
         const bOn = SHIFT_B.every(h => (ht[`target_${h}`] || 0) > 0);
         const cOn = SHIFT_C.every(h => (ht[`target_${h}`] || 0) > 0);
+        const mOn = SHIFT_M.every(h => (ht[`target_${h}`] || 0) > 0);
+        const nOn = SHIFT_N.every(h => (ht[`target_${h}`] || 0) > 0);
+        const totalActive = Object.values(ht).filter(v => typeof v === 'number' && v > 0).length;
+
         if (aOn && bOn && cOn) return "ABC";
+        if (mOn && nOn) return "MN";
+        if (mOn && totalActive === 12) return "M";
+        if (nOn && totalActive === 12) return "N";
         if (aOn && bOn && !cOn) return "AB";
         if (bOn && cOn && !aOn) return "BC";
         if (aOn && cOn && !bOn) return "AC";
@@ -635,19 +653,19 @@ function ProductionPlanningPage() {
                     <div className="mb-3">
                         <label className="form-label fw-bold mb-2">Shift Pattern (Default)</label>
                         <div className="d-flex gap-2 mb-2 flex-wrap">
-                            {["ABC", "AB", "BC", "AC", "A", "B", "C"].map(p => (
+                            {["ABC", "AB", "BC", "AC", "A", "B", "C", "MN", "M", "N"].map(p => (
                                 <button key={p}
                                     className={`btn btn-sm ${detectShiftPattern(formData.active_hours) === p ? "btn-primary" : "btn-outline-secondary"} px-3`}
                                     onClick={() => setFormData(prev => ({ ...prev, active_hours: applyShiftPattern(p) }))}
                                 >
-                                    {p} ({p.length * 8}h)
+                                    {p} ({(p.includes('M') || p.includes('N') ? p.length * 12 : p.length * 8)}h)
                                 </button>
                             ))}
                         </div>
                     </div>
                     <div className="mb-3">
                         <label className="form-label fw-bold mb-2">Working hours (Advanced)</label>
-                        {[{ name: "Shift A (07:00-15:00)", hours: SHIFT_A, border: "#bbdefb", color: "#1565c0" }, { name: "Shift B (15:00-23:00)", hours: SHIFT_B, border: "#ffe0b2", color: "#e65100" }, { name: "Shift C (23:00-07:00)", hours: SHIFT_C, border: "#cfd8dc", color: "#37474f" }].map(shift => (
+                        {[{ name: "Shift A (07:00-15:00)", hours: SHIFT_A, border: "#bbdefb", color: "#1565c0" }, { name: "Shift B (15:00-23:00)", hours: SHIFT_B, border: "#ffe0b2", color: "#e65100" }, { name: "Shift C (23:00-07:00)", hours: SHIFT_C, border: "#cfd8dc", color: "#37474f" }, { name: "Shift M (07:00-19:00)", hours: SHIFT_M, border: "#fff59d", color: "#fbc02d" }, { name: "Shift N (19:00-07:00)", hours: SHIFT_N, border: "#e1bee7", color: "#6a1b9a" }].map(shift => (
                             <div key={shift.name} className="mb-2 p-2 rounded-3" style={{ border: `1px solid ${shift.border}` }}>
                                 <div className="d-flex align-items-center justify-content-between mb-1">
                                     <span className="fw-bold" style={{ fontSize: "0.85rem", color: shift.color }}>{shift.name}</span>
@@ -902,6 +920,9 @@ function ProductionPlanningPage() {
                                                                 onChange={e => { e.stopPropagation(); handleUpdateDayShift(r.machine_name, r.date, e.target.value); }}
                                                             >
                                                                 <option value="ABC">ABC</option>
+                                                                <option value="MN">MN</option>
+                                                                <option value="M">M</option>
+                                                                <option value="N">N</option>
                                                                 <option value="AB">AB</option>
                                                                 <option value="BC">BC</option>
                                                                 <option value="AC">AC</option>

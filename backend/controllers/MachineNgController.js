@@ -1,0 +1,209 @@
+const { PrismaClient } = require("@prisma/client");
+const prisma = new PrismaClient();
+const dayjs = require("dayjs");
+
+module.exports = {
+    getMachineNgReport: async (req, res) => {
+        try {
+            const { month, area, type } = req.query; // month format: YYYY-MM
+
+            if (!month) {
+                return res.status(400).json({ message: "Month is required (YYYY-MM)" });
+            }
+
+            const startDate = dayjs(month).startOf("month").toDate();
+            const endDate = dayjs(month).endOf("month").toDate();
+
+            // 1. Find Active Machines based on filters
+            const machineFilter = { status: "active" };
+            if (area && area !== "all") machineFilter.machine_area = area;
+            if (type && type !== "all") machineFilter.machine_type = type;
+
+            const machines = await prisma.tbm_machine.findMany({
+                where: machineFilter,
+                select: { machine_name: true, machine_type: true },
+                orderBy: { machine_name: "asc" },
+            });
+
+            const machineNames = machines.map((m) => m.machine_name);
+
+            if (machineNames.length === 0) {
+                return res.json({ results: [] });
+            }
+
+            // 2. Fetch Data from all related tables
+            const whereClause = {
+                machine_name: { in: machineNames },
+                date: {
+                    gte: startDate,
+                    lte: endDate,
+                },
+            };
+
+            const [targets, actuals, oees, ngs, stations, configs, holidays] = await Promise.all([
+                prisma.tb_output_target.findMany({ where: whereClause }),
+                prisma.tb_output_actual.findMany({ where: whereClause, select: { machine_name: true, model_name: true, date: true, Overall: true } }),
+                prisma.tb_oee.findMany({ where: whereClause, select: { machine_name: true, date: true, ng_qty: true, quality: true, oee_value: true } }),
+                prisma.tb_machine_ng.findMany({ where: whereClause }),
+                prisma.tbm_machine_station.findMany({ where: { machine_name: { in: machineNames }, status: 'active' }, orderBy: { station_number: 'asc' } }),
+                prisma.tb_machine_plan_config.findMany({
+                    where: { machine_name: { in: machineNames } },
+                    select: { machine_name: true, oee_mode: true },
+                }),
+                // ✅ Bug 4 Fix: Query holidays so frontend can highlight them correctly
+                prisma.tb_machine_holiday.findMany({
+                    where: {
+                        machine_name: { in: machineNames },
+                        holiday_date: { gte: startDate, lte: endDate },
+                    },
+                    select: { machine_name: true, holiday_date: true },
+                }),
+            ]);
+            
+            const modeMap = new Map(configs.map(c => [c.machine_name, c.oee_mode || "manual"]));
+
+            // Organize stations by machine — key by station_id for FK lookups
+            const stationMap = {};
+            stations.forEach(st => {
+                if (!stationMap[st.machine_name]) stationMap[st.machine_name] = [];
+                stationMap[st.machine_name].push(st); // full station object (id + station_name)
+            });
+
+            // Build a quick id→station_name lookup for display
+            const stationIdToName = {};
+            stations.forEach(st => { stationIdToName[st.id] = st.station_name; });
+
+            // 3. Aggregate Data
+            const reportData = machines.map((machine) => {
+                const mName = machine.machine_name;
+                const oeeMode = modeMap.get(mName);
+                const dailyData = {};
+                const mStations = stationMap[mName] || [];     // array of station objects
+                const mStationNames = mStations.map(s => s.station_name); // names for UI
+
+                const getDateKey = (date) => dayjs(date).format("YYYY-MM-DD");
+
+                // --- Model Info logic (Same as Machine Report) ---
+                const mTargets = targets.filter((t) => t.machine_name === mName);
+                const latestTarget = mTargets.sort((a, b) => b.date - a.date)[0];
+
+                const modelNamesSet = new Set();
+                mTargets.forEach(t => { if (t.model_name) modelNamesSet.add(t.model_name); });
+                actuals.filter(a => a.machine_name === mName).forEach(a => { if (a.model_name) modelNamesSet.add(a.model_name); });
+
+                const allModelNames = [...modelNamesSet];
+
+                const modelInfo = {
+                    model_type: latestTarget?.model_type || "-",
+                    model_name: allModelNames.length > 0 ? allModelNames.join(", ") : "-",
+                    process_name: latestTarget?.process_name || "-",
+                };
+
+                // Initialize daily objects
+                const daysInMonth = dayjs(startDate).daysInMonth();
+                for (let i = 1; i <= daysInMonth; i++) {
+                     const key = dayjs(startDate).date(i).format("YYYY-MM-DD");
+                     dailyData[key] = {
+                         has_production: false,
+                         stations: {},
+                         Total_Output: "-",
+                         All: 0,
+                         Visual_NG: "-",
+                         Over_Reject: "-",
+                         Over_Reject_Percent: "-"
+                     };
+                     // Pre-fill stations with 0
+                     mStationNames.forEach(name => dailyData[key].stations[name] = 0);
+                }
+
+                // --- Total Output Data ---
+                actuals.filter(a => a.machine_name === mName).forEach(a => {
+                    const key = getDateKey(a.date);
+                    if (dailyData[key] && a.Overall !== undefined && a.Overall !== null) {
+                        dailyData[key].Total_Output = a.Overall;
+                        if (a.Overall > 0) dailyData[key].has_production = true;
+                    }
+                });
+
+                // --- Station NG Data --- group by station_id FK, display by station_name
+                ngs.filter(ng => ng.machine_name === mName).forEach(ng => {
+                    const key = getDateKey(ng.date);
+                    if (!dailyData[key]) return;
+
+                    const totalStationNg = [
+                        ng.ng_07, ng.ng_08, ng.ng_09, ng.ng_10, ng.ng_11, ng.ng_12,
+                        ng.ng_13, ng.ng_14, ng.ng_15, ng.ng_16, ng.ng_17, ng.ng_18,
+                        ng.ng_19, ng.ng_20, ng.ng_21, ng.ng_22, ng.ng_23, ng.ng_00,
+                        ng.ng_01, ng.ng_02, ng.ng_03, ng.ng_04, ng.ng_05, ng.ng_06
+                    ].reduce((sum, val) => sum + (val || 0), 0);
+
+                    if (ng.station_id === 0) {
+                        // ✅ This is the special record holding "True NG Parts"
+                        dailyData[key].All += totalStationNg;
+                        dailyData[key].has_production = true;
+                    } else {
+                        // Use station_id to lookup display name for standard stations
+                        const displayName = ng.station_id
+                            ? (stationIdToName[ng.station_id] || ng.station_name)
+                            : ng.station_name;
+
+                        if (dailyData[key].stations[displayName] !== undefined) {
+                            dailyData[key].stations[displayName] = totalStationNg;
+                            dailyData[key].has_production = true;
+                        }
+                    }
+                });
+
+                // --- Visual NG (OEE) and Over Reject Calculation ---
+                oees.filter(o => o.machine_name === mName).forEach(o => {
+                    const key = getDateKey(o.date);
+                    if (dailyData[key]) {
+                        const visualNg = o.ng_qty;
+                        
+                        // ✅ Bug 1 Fix: oee row existing = production happened
+                        dailyData[key].has_production = true;
+
+                        if (visualNg !== null && visualNg !== undefined) {
+                            const userHasNotUpdated = oeeMode === 'manual' && visualNg === 0 && o.quality === 0 && o.oee_value === 0;
+
+                            if (userHasNotUpdated) {
+                                // Likely user hasn't input visual NG yet, keep as '-'
+                                dailyData[key].Visual_NG = "-";
+                            } else {
+                                dailyData[key].Visual_NG = visualNg;
+                                // ✅ Bug 2 Fix: clamp Over_Reject to 0 minimum (data mismatch guard)
+                                const overReject = Math.max(0, dailyData[key].All - visualNg);
+                                dailyData[key].Over_Reject = overReject;
+                                
+                                const totalOutput = dailyData[key].Total_Output !== "-" ? dailyData[key].Total_Output : 0;
+                                if (totalOutput > 0) {
+                                    // ✅ Bug 3 Fix: return as Number not string (now uses Total_Output)
+                                    dailyData[key].Over_Reject_Percent = parseFloat(((overReject / totalOutput) * 100).toFixed(2));
+                                } else {
+                                    dailyData[key].Over_Reject_Percent = 0; // was "0.00" string
+                                }
+                            }
+                        }
+                    }
+                });
+
+                return {
+                    machine_name: mName,
+                    oee_mode: oeeMode,
+                    model_info: modelInfo,
+                    dailyData: dailyData,
+                    stations: mStationNames, // station display names for UI columns
+                    // ✅ include holidays so frontend can highlight them
+                    holidays: holidays
+                        .filter(h => h.machine_name === mName)
+                        .map(h => dayjs(h.holiday_date).format("YYYY-MM-DD")),
+                };
+            });
+
+            res.json({ results: reportData });
+        } catch (error) {
+            console.error("Machine NG Report Error:", error);
+            res.status(500).json({ message: "Server error", error: error.message });
+        }
+    },
+};

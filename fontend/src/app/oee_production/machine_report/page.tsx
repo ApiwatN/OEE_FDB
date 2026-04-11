@@ -92,9 +92,9 @@ function MachineReportPage() {
         const countdownId = setInterval(() => {
             setCountdown(prev => {
                 if (prev <= 1) {
-                    // Time to refresh
-                    console.log("[Auto Refresh] Fetching report data...");
-                    fetchReport(selectedMonth, selectedArea, selectedType, false);
+                    // Time to refresh — silent merge to avoid blink
+                    console.log("[Auto Refresh] Silent merge refresh...");
+                    fetchReportSilent(selectedMonth, selectedArea, selectedType);
                     return REFRESH_INTERVAL; // Reset countdown
                 }
                 return prev - 1;
@@ -125,6 +125,7 @@ function MachineReportPage() {
         });
 
         // Fast production update ทุก 2 วินาที — Output, Eff, CT
+        // ✅ Fix #5: Delta merge — only update machines included in payload
         socket.on("realtime_output", (data: any) => {
             const isCurrentMonth = dayjs(selectedMonth).format("YYYY-MM") === dayjs().format("YYYY-MM");
             if (!isCurrentMonth) return;
@@ -137,7 +138,7 @@ function MachineReportPage() {
                 if (prev.length === 0) return prev;
                 return prev.map(machine => {
                     const socketData = socketMachines[machine.machine_name];
-                    if (!socketData?.daily) return machine;
+                    if (!socketData?.daily) return machine; // Not in delta → keep as-is
 
                     const updatedDailyData = { ...machine.daily_data };
                     const existing = updatedDailyData[shiftDate] || {};
@@ -216,6 +217,24 @@ function MachineReportPage() {
             console.error(e);
         } finally {
             if (showLoading) setLoading(false);
+        }
+    };
+
+    // Silent Refresh: Merges only daily_data into existing state — avoids full re-render blink
+    const fetchReportSilent = async (month: string, area: string, type: string) => {
+        try {
+            const res = await axios.get(`${config.apiServer}/api/report/machine-report`, {
+                params: { month, area, type }
+            });
+            const fresh: any[] = res.data.results || [];
+            const freshMap = new Map(fresh.map((m: any) => [m.machine_name, m]));
+            setReportData(prev => prev.map(machine => {
+                const updated = freshMap.get(machine.machine_name);
+                if (!updated) return machine;
+                return { ...machine, daily_data: updated.daily_data };
+            }));
+        } catch (e) {
+            console.error("[Silent Refresh] failed:", e);
         }
     };
 
