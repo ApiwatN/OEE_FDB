@@ -677,17 +677,17 @@ function MachineReportPage() {
                             <tbody>
                                 {groupedReportData.map((group, gIdx) => {
                                     const rows = [
-                                        { label: "Output (Target)", key: "output_target", isPercent: false, showZero: false },
-                                        { label: "Output", key: "output_actual", isPercent: false, showZero: false },
-                                        { label: "Efficiency (Target)", key: "eff_target", isPercent: true, showZero: false },
-                                        { label: "Efficiency", key: "eff_actual", isPercent: true, showZero: false },
-                                        { label: "Cycle time (Target)", key: "cycle_target", isPercent: false, showZero: false },
-                                        { label: "Cycle time", key: "cycle_actual", isPercent: false, showZero: false },
+                                        { label: "Output (Target)", key: "output_target", isPercent: false, showZero: true },
+                                        { label: "Output", key: "output_actual", isPercent: false, showZero: true },
+                                        { label: "Efficiency (Target)", key: "eff_target", isPercent: true, showZero: true },
+                                        { label: "Efficiency", key: "eff_actual", isPercent: true, showZero: true },
+                                        { label: "Cycle time (Target)", key: "cycle_target", isPercent: false, showZero: true },
+                                        { label: "Cycle time", key: "cycle_actual", isPercent: false, showZero: true },
                                         { label: "NG Qty", key: "ng_qty", isPercent: false, showZero: true },
-                                        { label: "Availability", key: "availability", isPercent: true, showZero: false },
-                                        { label: "Performance", key: "performance", isPercent: true, showZero: false },
-                                        { label: "Quality", key: "quality", isPercent: true, showZero: false },
-                                        { label: "OEE", key: "oee", isPercent: true, showZero: false }
+                                        { label: "Availability", key: "availability", isPercent: true, showZero: true },
+                                        { label: "Performance", key: "performance", isPercent: true, showZero: true },
+                                        { label: "Quality", key: "quality", isPercent: true, showZero: true },
+                                        { label: "OEE", key: "oee", isPercent: true, showZero: true }
                                     ];
 
                                     return (
@@ -747,6 +747,8 @@ function MachineReportPage() {
                                                                     }
                                                                 } else if (dayEmpty) {
                                                                     cellContent = "\u00A0";
+                                                                } else if (val === undefined || val === null || val === "") {
+                                                                    cellContent = "-";
                                                                 } else {
                                                                     cellContent = renderCell(val, row.isPercent, row.showZero);
                                                                 }
@@ -786,8 +788,16 @@ function MachineReportPage() {
                                                         {daysArray.map(day => {
                                                             const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
                                                             const val = group.summaryData[dateKey]?.[row.key];
-                                                            let cellContent: string | React.ReactNode = renderCell(val, row.isPercent, row.showZero);
-                                                            if (val === "-") cellContent = "-";
+                                                            const futureDay = isFutureDay(day);
+                                                            let cellContent: string | React.ReactNode;
+                                                            
+                                                            if (futureDay) {
+                                                                cellContent = "\u00A0";
+                                                            } else if (val === "-" || val === undefined || val === null || val === "") {
+                                                                cellContent = "-";
+                                                            } else {
+                                                                cellContent = renderCell(val, row.isPercent, row.showZero);
+                                                            }
 
                                                             const cellStyle: React.CSSProperties = {
                                                                 borderBottom: borderBottomStyle,
