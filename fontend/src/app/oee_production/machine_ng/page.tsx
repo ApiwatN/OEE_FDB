@@ -689,7 +689,7 @@ function MachineNgReportPage() {
                     <div className="text-center p-5"><div className="spinner-border text-primary"></div></div>
                 ) : (
                     // 🆕 Unified Sticky Table Layout
-                    <div className="table-wrapper hide-scrollbar" style={{ overflowX: "auto", overflowY: "auto", height: "calc(100vh - 140px)", border: "1px solid #dee2e6", background: "white" }}>
+                    <div className="table-wrapper" style={{ overflowX: "auto", overflowY: "auto", height: "calc(100vh - 140px)", border: "1px solid #dee2e6", background: "white" }}>
                         <table className="table table-bordered table-sm text-center align-middle mb-0" style={{ fontSize: "0.8rem", width: "max-content", borderCollapse: "separate", borderSpacing: 0, tableLayout: "fixed" }}>
                             <thead className="table-light" style={{ position: "sticky", top: 0, zIndex: 100 }}>
                                 <tr>
