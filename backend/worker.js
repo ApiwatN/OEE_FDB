@@ -32,6 +32,7 @@ const {
     backfillOeeStartup,
     backfillNgStartup,
     backfillEventsStartup,
+    pollMssqlStatusForWeb,
 } = require("./services/cronService");
 const { startRealtimePolling } = require("./services/realtimeService");
 const {
@@ -83,6 +84,9 @@ async function startup() {
 
         // 4.7 Re-sync MQTT memory from InfluxDB after 5s (fix timing gap)
         scheduleResync();
+
+        // 4.8 🆕 Force initial poll from MSSQL to populate live Status/Alarm in memory
+        await pollMssqlStatusForWeb();
 
         log("✅ Worker thread startup completed!");
     } catch (err) {
