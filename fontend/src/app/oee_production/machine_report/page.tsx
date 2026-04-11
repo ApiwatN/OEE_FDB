@@ -54,6 +54,23 @@ function MachineReportPage() {
     const [serverTimeStr, setServerTimeStr] = useState("");
     const [socketConnected, setSocketConnected] = useState(false);
 
+    // 🆕 Scrollbar width sync
+    const [tableScrollWidth, setTableScrollWidth] = useState<number | string>("100%");
+    
+    useEffect(() => {
+        const updateWidth = () => {
+            if (rightTableRef.current) {
+                setTableScrollWidth(rightTableRef.current.scrollWidth);
+            }
+        };
+        const timer = setTimeout(updateWidth, 100);
+        window.addEventListener("resize", updateWidth);
+        return () => {
+            clearTimeout(timer);
+            window.removeEventListener("resize", updateWidth);
+        };
+    }, [reportData, selectedMonth]);
+
     // ==========================
     // 🔸 Init
     // ==========================
@@ -281,7 +298,8 @@ function MachineReportPage() {
 
         const headerRow = [
             "Machine No", "Model Type", "Model Name", "Process", "Data",
-            ...daysArray.map(d => `${d}-${dayjs(selectedMonth).format("MMM")}`)
+            ...daysArray.map(d => `${d}-${dayjs(selectedMonth).format("MMM")}`),
+            "Total"
         ];
         wsData.push(headerRow);
 
@@ -336,6 +354,11 @@ function MachineReportPage() {
                     }
                     rowData.push(cellVal);
                 });
+
+                // Add Total Column to Export
+                const totalVal = getRowTotal(daily_data, r.key);
+                rowData.push(renderCell(totalVal, r.isPercent, r.key === 'ng_qty' ? true : false));
+
                 wsData.push(rowData);
                 currentRowIndex++;
             });
@@ -424,12 +447,54 @@ function MachineReportPage() {
             { wch: 20 }, // Model Name
             { wch: 15 }, // Process
             { wch: 20 }, // Data Label
-            ...daysArray.map(() => ({ wch: 8 })) // Days
+            ...daysArray.map(() => ({ wch: 8 })), // Days
+            { wch: 10 } // Total
         ];
         ws['!cols'] = wscols;
 
         XLSX.utils.book_append_sheet(wb, ws, "Machine Report");
         XLSX.writeFile(wb, `Machine_Report_${selectedMonth}.xlsx`);
+    };
+
+    // ==========================
+    // 🔸 Row Total Calculator
+    // ==========================
+    const getRowTotal = (daily_data: any, key: string) => {
+        let sum = 0;
+        let count = 0;
+        let latestTarget = 0;
+
+        daysArray.forEach(day => {
+            const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
+            const data = daily_data[dateKey];
+            if (!data) return;
+            const val = data[key];
+            
+            if (val !== undefined && val !== null && val !== "" && val !== "-") {
+                const num = Number(val);
+                if (!isNaN(num)) {
+                    if (key.includes("target")) {
+                        if (num > 0) latestTarget = num;
+                    } else {
+                        sum += num;
+                        if (data.has_production || num > 0) {
+                            count++;
+                        }
+                    }
+                }
+            }
+        });
+
+        if (key.includes("target")) {
+            return latestTarget > 0 ? latestTarget : "-";
+        }
+        if (["output_actual", "ng_qty"].includes(key)) {
+            return sum > 0 ? sum : "-";
+        }
+        if (count > 0) {
+            return sum / count;
+        }
+        return "-";
     };
 
     // ==========================
@@ -604,6 +669,7 @@ function MachineReportPage() {
                                             {daysArray.map(d => (
                                                 <th key={d} style={{ minWidth: "60px", height: "40px", background: "#f8f9fa", borderBottom: "3px double #000", position: "sticky", top: 0, zIndex: 10 }}>{d}-{dayjs(selectedMonth).format("MMM")}</th>
                                             ))}
+                                            <th style={{ minWidth: "80px", height: "40px", background: "#fff3cd", borderBottom: "3px double #000", position: "sticky", top: 0, borderLeft: "2px solid #ccc", zIndex: 11, right: 0 }}>Total</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -684,6 +750,10 @@ function MachineReportPage() {
                                                                 </td>
                                                             );
                                                         })}
+                                                        {/* Total Cell */}
+                                                        <td style={{ borderBottom: borderBottomStyle, height: "30px", boxSizing: "border-box", padding: "0 4px", background: "#fff3cd", borderLeft: "2px solid #ccc", fontWeight: "bold", position: "sticky", right: 0, zIndex: 1 }}>
+                                                            {renderCell(getRowTotal(daily_data, row.key), row.isPercent, row.key === 'ng_qty' ? true : false)}
+                                                        </td>
                                                     </tr>
                                                 );
                                             });
@@ -703,7 +773,7 @@ function MachineReportPage() {
                                 }
                             }
                         }}>
-                            <div style={{ width: `${daysArray.length * 60}px`, height: "1px" }}></div>
+                            <div style={{ width: tableScrollWidth, height: "1px" }}></div>
                         </div>
                     </div>
                 )}

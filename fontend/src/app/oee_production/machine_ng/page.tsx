@@ -54,6 +54,23 @@ function MachineNgReportPage() {
     const [serverTimeStr, setServerTimeStr] = useState("");
     const [socketConnected, setSocketConnected] = useState(false);
 
+    // 🆕 Scrollbar width sync
+    const [tableScrollWidth, setTableScrollWidth] = useState<number | string>("100%");
+    
+    useEffect(() => {
+        const updateWidth = () => {
+            if (rightTableRef.current) {
+                setTableScrollWidth(rightTableRef.current.scrollWidth);
+            }
+        };
+        const timer = setTimeout(updateWidth, 100);
+        window.addEventListener("resize", updateWidth);
+        return () => {
+            clearTimeout(timer);
+            window.removeEventListener("resize", updateWidth);
+        };
+    }, [reportData, selectedMonth]);
+
     // ==========================
     // 🔸 Init
     // ==========================
@@ -263,7 +280,8 @@ function MachineNgReportPage() {
 
         const headerRow = [
             "Machine No", "Model Type", "Model Name", "Process", "Data",
-            ...daysArray.map(d => `${d}-${dayjs(selectedMonth).format("MMM")}`)
+            ...daysArray.map(d => `${d}-${dayjs(selectedMonth).format("MMM")}`),
+            "Total"
         ];
         wsData.push(headerRow);
 
@@ -337,6 +355,11 @@ function MachineNgReportPage() {
 
                     rowData.push(cellVal);
                 });
+
+                // Add Total Column to Export
+                const totalVal = getRowTotal(dailyData, r.key, r.isStation);
+                rowData.push(renderCell(totalVal, r.isPercent, r.showZero));
+
                 wsData.push(rowData);
                 currentRowIndex++;
             });
@@ -425,12 +448,47 @@ function MachineNgReportPage() {
             { wch: 20 }, // Model Name
             { wch: 15 }, // Process
             { wch: 40 }, // Data Label
-            ...daysArray.map(() => ({ wch: 8 })) // Days
+            ...daysArray.map(() => ({ wch: 8 })), // Days
+            { wch: 10 } // Total
         ];
         ws['!cols'] = wscols;
 
         XLSX.utils.book_append_sheet(wb, ws, "Machine NG Report");
         XLSX.writeFile(wb, `Machine_NG_Report_${selectedMonth}.xlsx`);
+    };
+
+    // ==========================
+    // 🔸 Row Total Calculator
+    // ==========================
+    const getRowTotal = (dailyData: any, key: string, isStation: boolean) => {
+        let sumOutput = 0;
+        let sumReject = 0;
+        let sum = 0;
+
+        daysArray.forEach(day => {
+            const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
+            const data = dailyData[dateKey];
+            if (!data) return;
+
+            // Calculate overall parts for Over Reject %
+            const outActual = data["Total_Output"];
+            if (outActual && !isNaN(Number(outActual))) sumOutput += Number(outActual);
+            
+            const overReject = data["Over_Reject"];
+            if (overReject && !isNaN(Number(overReject))) sumReject += Number(overReject);
+
+            let val = isStation ? (data.stations ? data.stations[key] : undefined) : data[key];
+            if (val !== undefined && val !== null && val !== "" && val !== "-") {
+                const num = Number(val);
+                if (!isNaN(num)) sum += num;
+            }
+        });
+
+        if (key === "Over_Reject_Percent") {
+            return sumOutput > 0 ? (sumReject / sumOutput) * 100 : 0;
+        }
+
+        return sum > 0 ? sum : "-";
     };
 
     // ==========================
@@ -601,6 +659,7 @@ function MachineNgReportPage() {
                                             {daysArray.map(d => (
                                                 <th key={d} style={{ minWidth: "60px", height: "40px", background: "#f8f9fa", borderBottom: "3px double #000", position: "sticky", top: 0, zIndex: 10 }}>{d}-{dayjs(selectedMonth).format("MMM")}</th>
                                             ))}
+                                            <th style={{ minWidth: "80px", height: "40px", background: "#fff3cd", borderBottom: "3px double #000", position: "sticky", top: 0, borderLeft: "2px solid #ccc", zIndex: 11, right: 0 }}>Total</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -679,6 +738,10 @@ function MachineNgReportPage() {
                                                                 </td>
                                                             );
                                                         })}
+                                                        {/* Total Cell */}
+                                                        <td style={{ borderBottom: borderBottomStyle, height: "30px", boxSizing: "border-box", padding: "0 4px", background: "#fff3cd", borderLeft: "2px solid #ccc", fontWeight: "bold", position: "sticky", right: 0, zIndex: 1 }}>
+                                                            {renderCell(getRowTotal(dailyData, row.key, row.isStation || false), row.isPercent, row.showZero)}
+                                                        </td>
                                                     </tr>
                                                 );
                                             });
@@ -698,7 +761,7 @@ function MachineNgReportPage() {
                                 }
                             }
                         }}>
-                            <div style={{ width: `${daysArray.length * 60}px`, height: "1px" }}></div>
+                            <div style={{ width: tableScrollWidth, height: "1px" }}></div>
                         </div>
                     </div>
                 )}
