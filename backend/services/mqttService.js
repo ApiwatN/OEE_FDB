@@ -14,8 +14,13 @@ const machineStateMem = new Map();
 // Key: machine_name, Value: Array of stations { station_number, station_name }
 let stationConfigMem = new Map();
 
+let localEmitToRoomFn = null;
+let localBroadcastFn = null;
+
 // Optional: Keep track of raw history if needed for other places
 const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
+    localEmitToRoomFn = emitToRoomFn;
+    localBroadcastFn = broadcastFn;
     // ✅ Pre-load station configs for MQTT parsing
     try {
         const { PrismaClient } = require("@prisma/client");
@@ -131,6 +136,16 @@ const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
                             MCStatus: statusStr
                         }
                     }).catch(e => console.error(`[MQTT] tb_MCStatus Insert Error for ${machineName}:`, e.message));
+
+                    // 🆕 2.5 อัดเข้า Cache ของส่วนคำนวณทันทีเพื่อรองรับ Real-Time OEE
+                    try {
+                        const rtService = require("./realtimeService");
+                        if (rtService && typeof rtService.pushRealtimeMcStatus === "function") {
+                            rtService.pushRealtimeMcStatus(machineName, statusStr, dataTime);
+                        }
+                    } catch (err) {
+                        // ignore circular warning or load error
+                    }
 
                     // 3. ✅ Notify Frontend ทันทีว่ามี MC Status ใหม่ (Event-driven refresh)
                     const mcUpdatePayload = { machine_name: machineName, status: statusStr, datetime: dataTime.toISOString() };
@@ -358,9 +373,59 @@ function scheduleResync() {
     }, 5000);
 }
 
+/**
+ * Update state from the 5-Minute MSSQL Poller fallback mechanism.
+ * Forces the memory to match the latest MSSQL database row and emits to Web UI.
+ */
+function updateStateFromMssqlPoller(machineName, liveStatus, liveAlarm) {
+    if (!machineStateMem.has(machineName)) {
+        // We only patch initialized machines, or we could create a dummy state
+        machineStateMem.set(machineName, {
+            machine_name: machineName,
+            current_hour_actual: 0,
+            current_hour_ng: 0,
+            current_hour_station_ng: {},
+            last_cycle_time: 0,
+            sum_cycle_time: 0,
+            last_update: new Date(),
+            current_hour_label: "",
+            live_status: liveStatus,
+            live_alarm: liveAlarm,
+        });
+    }
+
+    const state = machineStateMem.get(machineName);
+    let changed = false;
+
+    if (liveStatus !== undefined && state.live_status !== liveStatus) {
+        state.live_status = liveStatus;
+        if (liveStatus !== null) {
+            const payload = { machine_name: machineName, status: liveStatus, datetime: new Date().toISOString() };
+            if (localEmitToRoomFn) localEmitToRoomFn(`machine:${machineName}`, "mc_status_updated", payload);
+            if (localBroadcastFn) localBroadcastFn("mc_status_updated", payload);
+            changed = true;
+        }
+    }
+
+    if (liveAlarm !== undefined && state.live_alarm !== liveAlarm) {
+        state.live_alarm = liveAlarm;
+        if (liveAlarm !== null) {
+            const payload = { machine_name: machineName, alarm: liveAlarm, datetime: new Date().toISOString() };
+            if (localEmitToRoomFn) localEmitToRoomFn(`machine:${machineName}`, "mc_status_updated", payload);
+            if (localBroadcastFn) localBroadcastFn("mc_status_updated", payload);
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        state.last_update = new Date();
+    }
+}
+
 module.exports = {
     initializeMqtt,
     getMachineStateMem,
     hydrateMqttMemoryFromInflux,
-    scheduleResync
+    scheduleResync,
+    updateStateFromMssqlPoller
 };

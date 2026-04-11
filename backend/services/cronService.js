@@ -139,6 +139,14 @@ function startCronJobs() {
         } finally { releaseLock(); }
     });
 
+    // Job 4.6: 5-Minute MSSQL Status Poller for Web Dashboard (Fallback offline MQTT)
+    cron.schedule("*/5 * * * *", async () => {
+        if (!(await acquireLock("pollMssqlStatusForWeb"))) return;
+        try {
+            await pollMssqlStatusForWeb();
+        } finally { releaseLock(); }
+    });
+
     // Job 5: Auto Plan Daily — 00:10 UTC (07:10 TH)
     const autoPlanExpr = process.env.CRON_AUTO_PLAN || "10 0 * * *";
     cron.schedule(autoPlanExpr, async () => {
@@ -271,6 +279,14 @@ async function summarizeLastHour() {
 
             // ✅ Yield event loop — ให้ API request อื่นแทรกได้
             await new Promise(resolve => setImmediate(resolve));
+        }
+
+        // 2.5 🆕 Sync Status/Alarm Events from InfluxDB for the last hour
+        try {
+            console.log(`   🔄 Syncing InfluxDB events to MSSQL for last hour...`);
+            await syncEventsFromInfluxDb(start, end);
+        } catch (e) {
+            console.error("   ⚠️ Failed to sync InfluxDB events in summarizeLastHour:", e.message);
         }
 
         // 3. Recalculate Overall columns in MSSQL
@@ -577,6 +593,14 @@ async function handleLateData() {
             const machinesForDate = Object.keys(machineChanges);
             await recalcOverallInMSSQL(targetDate, machinesForDate);
             await new Promise(resolve => setImmediate(resolve));
+        }
+
+        // ── Step 4: Late Data Event Sync (Check last 2 hours to avoid heavy querying) ──
+        try {
+            const eventStartCutoff = new Date(now.getTime() - (2 * 60 * 60 * 1000));
+            await syncEventsFromInfluxDb(eventStartCutoff, now);
+        } catch (e) {
+            console.error("❌ Late data event sync failed:", e.message);
         }
 
         if (totalUpdated > 0 || totalCreated > 0) {
@@ -1429,6 +1453,61 @@ async function backfillNgStartup(days = 5) {
 }
 
 /**
+ * Core Logic to Sync Status and Alarm events from InfluxDB to MSSQL
+ */
+async function syncEventsFromInfluxDb(startUTC, endUTC) {
+    const statusData = await influxService.queryStatusRange(startUTC, endUTC);
+    const alarmData = await influxService.queryAlarmRange(startUTC, endUTC);
+
+    let statusRecovered = 0;
+    let alarmRecovered = 0;
+
+    if (statusData.length > 0) {
+        const existingStatus = await prisma.tb_MCStatus.findMany({
+            where: { Datetime: { gte: startUTC, lt: endUTC } },
+            select: { MC: true, Datetime: true }
+        });
+        const existingSet = new Set(existingStatus.map(r => `${r.MC}_${r.Datetime.getTime()}`));
+
+        const newStatus = statusData.filter(d => !existingSet.has(`${d.machine_name}_${d.time.getTime()}`));
+        if (newStatus.length > 0) {
+            await prisma.tb_MCStatus.createMany({
+                data: newStatus.map(d => ({
+                    Datetime: d.time,
+                    MC: d.machine_name,
+                    MCStatus: d.status
+                }))
+            });
+            statusRecovered = newStatus.length;
+        }
+    }
+
+    if (alarmData.length > 0) {
+        const existingAlarm = await prisma.tb_MCAlarm.findMany({
+            where: { Datetime: { gte: startUTC, lt: endUTC } },
+            select: { MC: true, Datetime: true }
+        });
+        const existingSet = new Set(existingAlarm.map(r => `${r.MC}_${r.Datetime.getTime()}`));
+
+        const newAlarm = alarmData.filter(d => !existingSet.has(`${d.machine_name}_${d.time.getTime()}`));
+        if (newAlarm.length > 0) {
+            await prisma.tb_MCAlarm.createMany({
+                data: newAlarm.map(d => ({
+                    Datetime: d.time,
+                    MC: d.machine_name,
+                    MCAlarm: d.alarm
+                }))
+            });
+            alarmRecovered = newAlarm.length;
+        }
+    }
+
+    if (statusRecovered > 0 || alarmRecovered > 0) {
+        console.log(`   ✅ Recovered ${statusRecovered} Status and ${alarmRecovered} Alarm records from InfluxDB.`);
+    }
+}
+
+/**
  * Startup / Sync: Backfill historical Status and Alarm data from InfluxDB -> MSSQL
  * Used on server restart to recover missing real-time events.
  */
@@ -1438,56 +1517,53 @@ async function backfillEventsStartup(days = 5) {
         const now = new Date();
         const start = new Date(now);
         start.setUTCDate(start.getUTCDate() - days);
-
-        // Fetch from InfluxDB
-        const statusData = await influxService.queryStatusRange(start, now);
-        const alarmData = await influxService.queryAlarmRange(start, now);
-
-        if (statusData.length > 0) {
-            // Fetch existing from MSSQL to prevent duplicates
-            const existingStatus = await prisma.tb_MCStatus.findMany({
-                where: { Datetime: { gte: start } },
-                select: { MC: true, Datetime: true }
-            });
-            const existingSet = new Set(existingStatus.map(r => `${r.MC}_${r.Datetime.getTime()}`));
-
-            const newStatus = statusData.filter(d => !existingSet.has(`${d.machine_name}_${d.time.getTime()}`));
-            if (newStatus.length > 0) {
-                // Batch insert
-                await prisma.tb_MCStatus.createMany({
-                    data: newStatus.map(d => ({
-                        Datetime: d.time,
-                        MC: d.machine_name,
-                        MCStatus: d.status
-                    }))
-                });
-                console.log(`   ✅ Recovered ${newStatus.length} missing Status records.`);
-            }
-        }
-
-        if (alarmData.length > 0) {
-            // Fetch existing from MSSQL to prevent duplicates
-            const existingAlarm = await prisma.tb_MCAlarm.findMany({
-                where: { Datetime: { gte: start } },
-                select: { MC: true, Datetime: true }
-            });
-            const existingSet = new Set(existingAlarm.map(r => `${r.MC}_${r.Datetime.getTime()}`));
-
-            const newAlarm = alarmData.filter(d => !existingSet.has(`${d.machine_name}_${d.time.getTime()}`));
-            if (newAlarm.length > 0) {
-                // Batch insert
-                await prisma.tb_MCAlarm.createMany({
-                    data: newAlarm.map(d => ({
-                        Datetime: d.time,
-                        MC: d.machine_name,
-                        MCAlarm: d.alarm
-                    }))
-                });
-                console.log(`   ✅ Recovered ${newAlarm.length} missing Alarm records.`);
-            }
-        }
+        await syncEventsFromInfluxDb(start, now);
     } catch (err) {
         console.error("❌ Events startup backfill failed:", err.message);
+    }
+}
+
+/**
+ * 🆕 5-Minute MSSQL Status Poller for Web Dashboard (Fallback mechanism)
+ * Fetches the ABSOLUTE LATEST status & alarm from MSSQL for each machine
+ * and updates mqttService memory + emits to web if it is newer.
+ */
+async function pollMssqlStatusForWeb() {
+    try {
+        const { updateStateFromMssqlPoller } = require("./mqttService");
+        if (typeof updateStateFromMssqlPoller !== "function") return;
+
+        console.log("🔍 [Cron] Polling latest MSSQL Status/Alarm for Web Sync...");
+
+        // Use PRISMA raw query or grouping to find latest status per machine
+        const machines = await prisma.tbm_machine.findMany({
+            where: { status: 'active' },
+            select: { machine_name: true }
+        });
+
+        for (const m of machines) {
+            const machineName = m.machine_name;
+            const latestStatus = await prisma.tb_MCStatus.findFirst({
+                where: { MC: machineName },
+                orderBy: { Datetime: 'desc' },
+                select: { MCStatus: true, Datetime: true }
+            });
+            
+            const latestAlarm = await prisma.tb_MCAlarm.findFirst({
+                where: { MC: machineName },
+                orderBy: { Datetime: 'desc' },
+                select: { MCAlarm: true, Datetime: true }
+            });
+
+            // Update state (mqttService logic will diff natively and only emit if changed)
+            updateStateFromMssqlPoller(
+                machineName, 
+                latestStatus ? latestStatus.MCStatus : undefined, 
+                latestAlarm ? latestAlarm.MCAlarm : undefined
+            );
+        }
+    } catch (err) {
+        console.error("❌ pollMssqlStatusForWeb failed:", err.message);
     }
 }
 
@@ -1503,4 +1579,6 @@ module.exports = {
     upsertOeeHourly,
     backfillOeeStartup,
     autoPlanDaily,
+    syncEventsFromInfluxDb,
+    pollMssqlStatusForWeb
 };
