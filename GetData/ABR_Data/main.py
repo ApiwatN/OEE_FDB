@@ -72,8 +72,7 @@ def run_plc_thread(plc_config, tags):
     prev_ng = loaded_state.get("prev_ng", None)
     last_logged_status = loaded_state.get("last_logged_status", "")
     last_logged_alarm = loaded_state.get("last_logged_alarm", "")
-    ct_avg = loaded_state.get("ct_avg", None)       # CT เฉลี่ยสะสม (วินาที/ชิ้น)
-    ct_count = loaded_state.get("ct_count", 0)       # จำนวนรอบที่ใช้คำนวณ avg
+    ct_stats = loaded_state.get("ct_stats", {})       # เก็บสถิติแยกตามจำนวนชิ้น เช่น "1": {"avg": 10.0, "count": 5}
 
     prev_status = {}
     prev_alarm = {}
@@ -85,7 +84,7 @@ def run_plc_thread(plc_config, tags):
         "prev_model": prev_model, "prev_total": prev_total,
         "prev_ok": prev_ok, "prev_ng": prev_ng,
         "last_logged_status": last_logged_status, "last_logged_alarm": last_logged_alarm,
-        "ct_avg": ct_avg, "ct_count": ct_count
+        "ct_stats": ct_stats
     }
 
     while True: # ลูปนอกสำหรับจัดการ Reconnect หรือ Auto-Recovery
@@ -184,23 +183,44 @@ def run_plc_thread(plc_config, tags):
                                     base_loc = datetime.now()
 
                                     ct_val = "-"
+                                    diff_key = str(total_diff)
+                                    if diff_key not in ct_stats:
+                                        ct_stats[diff_key] = {"avg": None, "count": 0}
+                                        
+                                    stat = ct_stats[diff_key]
+                                    current_avg = stat.get("avg")
+
                                     if prev_output_time is not None and not is_gap_recovery:
                                         elapsed = (base_utc - prev_output_time).total_seconds()
                                         if elapsed > 0:
                                             ct_per_unit = elapsed / total_diff
-                                            ct_val = f"{ct_per_unit:.2f}"
-                                            # อัปเดต Cumulative Moving Average
-                                            if ct_avg is None:
-                                                ct_avg = ct_per_unit
+                                            
+                                            is_downtime = False
+                                            if current_avg is not None:
+                                                # ถ้า CT ที่ได้ มากกว่า 2 เท่าของค่าเฉลี่ยของกรณีนี้ -> มี Downtime ปน
+                                                if ct_per_unit > (2 * current_avg):
+                                                    is_downtime = True
+                                                    
+                                            if not is_downtime:
+                                                ct_val = f"{ct_per_unit:.2f}"
+                                                # อัปเดต Cumulative Moving Average แยกตามจำนวนชิ้นที่ออก
+                                                if current_avg is None:
+                                                    stat["avg"] = ct_per_unit
+                                                else:
+                                                    stat["avg"] = ((current_avg * stat["count"]) + ct_per_unit) / (stat["count"] + 1)
+                                                stat["count"] += 1
+                                                
+                                                last_saved_state.update({"ct_stats": ct_stats})
+                                                save_state(machine_name, last_saved_state)
                                             else:
-                                                ct_avg = ((ct_avg * ct_count) + ct_per_unit) / (ct_count + 1)
-                                            ct_count += 1
-                                            last_saved_state.update({"ct_avg": ct_avg, "ct_count": ct_count})
-                                            save_state(machine_name, last_saved_state)
+                                                # พบ Downtime, แจ้งเตือนและใช้ค่าเฉลี่ย
+                                                print(f"[{machine_name}] ⚠️ มีแนวโน้ม Downtime (Total+{total_diff}) ช่วง {elapsed:.1f}s | CT เกินลิมิต (ได้ {ct_per_unit:.1f} > Max {current_avg*2:.1f})")
+                                                if current_avg is not None:
+                                                    ct_val = f"{current_avg:.2f}"
                                     else:
-                                        # ไม่มี prev_output_time, gap_recovery, หรือ reconnect → ใช้ CT เฉลี่ย
-                                        if ct_avg is not None:
-                                            ct_val = f"{ct_avg:.2f}"
+                                        # ไม่มี prev_output_time, gap_recovery 
+                                        if current_avg is not None:
+                                            ct_val = f"{current_avg:.2f}"
                                     
                                     # สร้างตัวเลข Timestamp โดยยึดเอา base_utc ของรอบนั้นๆ มาเป็น ID เพื่อให้ของผลิตพร้อมกันได้เลขเดียวกัน
                                     batch_timestamp_id = int(base_utc.timestamp() * 1000)
