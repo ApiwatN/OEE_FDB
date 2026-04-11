@@ -72,16 +72,20 @@ def run_plc_thread(plc_config, tags):
     prev_ng = loaded_state.get("prev_ng", None)
     last_logged_status = loaded_state.get("last_logged_status", "")
     last_logged_alarm = loaded_state.get("last_logged_alarm", "")
+    ct_avg = loaded_state.get("ct_avg", None)       # CT เฉลี่ยสะสม (วินาที/ชิ้น)
+    ct_count = loaded_state.get("ct_count", 0)       # จำนวนรอบที่ใช้คำนวณ avg
 
     prev_status = {}
     prev_alarm = {}
     prev_station_ng = {dev: 0 for dev in tags["station_ng"].values()}
     pending_stations = {dev: False for dev in tags["station_ng"].values()}
+    prev_output_time = None  # ไม่บันทึกลง state (reset ทุก connect ใหม่)
     
     last_saved_state = {
         "prev_model": prev_model, "prev_total": prev_total,
         "prev_ok": prev_ok, "prev_ng": prev_ng,
-        "last_logged_status": last_logged_status, "last_logged_alarm": last_logged_alarm
+        "last_logged_status": last_logged_status, "last_logged_alarm": last_logged_alarm,
+        "ct_avg": ct_avg, "ct_count": ct_count
     }
 
     while True: # ลูปนอกสำหรับจัดการ Reconnect หรือ Auto-Recovery
@@ -175,29 +179,28 @@ def run_plc_thread(plc_config, tags):
                                         
                                     model_val = prev_model if prev_model is not None else "-"
                                     
-                                    # อ่าน Cycle Time
-                                    ct_val = "-"
-                                    if tags.get("cycle_time"):
-                                        val_ct = pymc3e.batchread_wordunits(headdevice=tags["cycle_time"], readsize=1)
-                                        if val_ct is not None and len(val_ct) > 0:
-                                            raw_ct = str(val_ct[0])
-                                            if len(raw_ct) == 1:
-                                                parsed_ct_str = f"{raw_ct}.00"
-                                            elif len(raw_ct) == 2:
-                                                parsed_ct_str = f"{raw_ct[0]}.{raw_ct[1]}"
-                                            else:
-                                                parsed_ct_str = f"{raw_ct[:-2]}.{raw_ct[-2:]}"
-                                                
-                                            try:
-                                                parsed_ct_float = float(parsed_ct_str)
-                                                if total_diff > 1:
-                                                    parsed_ct_float /= total_diff
-                                                ct_val = f"{parsed_ct_float:.2f}"
-                                            except ValueError:
-                                                ct_val = parsed_ct_str
-                                                
+                                    # คำนวณ Cycle Time จาก Timestamp ระหว่าง 2 รอบที่ Total เปลี่ยน
                                     base_utc = datetime.now(timezone.utc)
                                     base_loc = datetime.now()
+
+                                    ct_val = "-"
+                                    if prev_output_time is not None and not is_gap_recovery:
+                                        elapsed = (base_utc - prev_output_time).total_seconds()
+                                        if elapsed > 0:
+                                            ct_per_unit = elapsed / total_diff
+                                            ct_val = f"{ct_per_unit:.2f}"
+                                            # อัปเดต Cumulative Moving Average
+                                            if ct_avg is None:
+                                                ct_avg = ct_per_unit
+                                            else:
+                                                ct_avg = ((ct_avg * ct_count) + ct_per_unit) / (ct_count + 1)
+                                            ct_count += 1
+                                            last_saved_state.update({"ct_avg": ct_avg, "ct_count": ct_count})
+                                            save_state(machine_name, last_saved_state)
+                                    else:
+                                        # ไม่มี prev_output_time, gap_recovery, หรือ reconnect → ใช้ CT เฉลี่ย
+                                        if ct_avg is not None:
+                                            ct_val = f"{ct_avg:.2f}"
                                     
                                     # สร้างตัวเลข Timestamp โดยยึดเอา base_utc ของรอบนั้นๆ มาเป็น ID เพื่อให้ของผลิตพร้อมกันได้เลขเดียวกัน
                                     batch_timestamp_id = int(base_utc.timestamp() * 1000)
@@ -238,6 +241,7 @@ def run_plc_thread(plc_config, tags):
                                 # รีเซ็ต pending หลังเก็บบันทึก
                                 for k in pending_stations:
                                     pending_stations[k] = False
+                                prev_output_time = datetime.now(timezone.utc)  # อัปเดตเวลาสำหรับคำนวณ CT รอบถัดไป
                                     
                             prev_total = curr_t
                             prev_ok = curr_ok
