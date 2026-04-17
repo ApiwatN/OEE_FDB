@@ -14,6 +14,12 @@ const machineCache = {};
 // Target data cache: { machineName: { date, target: { target_07: 100, ... } } }
 const targetCache = {};
 
+// Availability cache: { machineName: { date, availability: { avail_07: 85.2, ... } } }
+const availabilityCache = {};
+
+// Runtime cache: { machineName: { date, runtime: { runtime_07: 3600, ... }, excluded: { excluded_07: 0, ... } } }
+const runtimeCache = {};
+
 // Machine list cache: [{ id, machine_name, machine_area, machine_type }]
 let machineListCache = [];
 
@@ -72,6 +78,25 @@ function initMachineCache(machineName, dateStr) {
     }
 }
 
+function initAvailabilityCache(machineName, dateStr) {
+    if (!availabilityCache[machineName] || availabilityCache[machineName].date !== dateStr) {
+        availabilityCache[machineName] = {
+            date: dateStr,
+            availability: {}, // { avail_07: 85.2, ... }
+        };
+    }
+}
+
+function initRuntimeCache(machineName, dateStr) {
+    if (!runtimeCache[machineName] || runtimeCache[machineName].date !== dateStr) {
+        runtimeCache[machineName] = {
+            date: dateStr,
+            runtime: {},      // { runtime_07: 3600, ... }
+            excluded: {},     // { excluded_07: 0, ... }
+        };
+    }
+}
+
 /**
  * Update a specific hour in cache
  */
@@ -86,6 +111,29 @@ function updateHour(machineName, thColumn, outputCount, avgCycleTime, efficiency
 
     // Recalculate overall
     recalcOverall(machineName);
+}
+
+/**
+ * Update a specific hour's runtime and excluded time
+ */
+function updateHourRuntime(machineName, thColumn, runtimeSec, excludedSec) {
+    const dateStr = getShiftDateUTC();
+    initRuntimeCache(machineName, dateStr);
+
+    const cache = runtimeCache[machineName];
+    cache.runtime[`runtime_${thColumn}`] = parseFloat(runtimeSec.toFixed(2));
+    cache.excluded[`excluded_${thColumn}`] = parseFloat(excludedSec.toFixed(2));
+}
+
+/**
+ * Update a specific hour's availability %
+ */
+function updateHourAvailability(machineName, thColumn, availPct) {
+    const dateStr = getShiftDateUTC();
+    initAvailabilityCache(machineName, dateStr);
+
+    const cache = availabilityCache[machineName];
+    cache.availability[`avail_${thColumn}`] = parseFloat(availPct.toFixed(2));
 }
 
 /**
@@ -202,6 +250,38 @@ function getTarget(machineName) {
     return targetCache[machineName] || null;
 }
 
+/**
+ * Get availability array for real-time payloads
+ */
+function getAvailability(machineName) {
+    const cache = availabilityCache[machineName];
+    if (!cache) {
+        return new Array(24).fill(0);
+    }
+    const availArr = [];
+    for (const h of SHIFT_HOURS) {
+        availArr.push(cache.availability[`avail_${h}`] || 0);
+    }
+    return availArr;
+}
+
+/**
+ * Get runtime array for any calc needs
+ */
+function getRuntime(machineName) {
+     const cache = runtimeCache[machineName];
+    if (!cache) {
+        return { runtime: new Array(24).fill(0), excluded: new Array(24).fill(0) };
+    }
+    const runArr = [];
+    const excArr = [];
+    for (const h of SHIFT_HOURS) {
+        runArr.push(cache.runtime[`runtime_${h}`] || 0);
+        excArr.push(cache.excluded[`excluded_${h}`] || 0);
+    }
+    return { runtime: runArr, excluded: excArr };
+}
+
 // ==================== Hydration from MSSQL ====================
 
 /**
@@ -276,10 +356,61 @@ async function hydrateFromMSSQL() {
 
         const count = Object.keys(machineCache).length;
         console.log(`✅ Cache hydrated: ${count} machines loaded for ${dateStr}`);
+        
+        // Hydrate new ones too
+        await hydrateAvailabilityFromMSSQL();
+        await hydrateRuntimeFromMSSQL();
+
         return count;
     } catch (err) {
         console.error("❌ Cache hydration failed:", err.message);
         return 0;
+    }
+}
+
+async function hydrateAvailabilityFromMSSQL() {
+    const dateStr = getShiftDateUTC();
+    const targetDate = new Date(dateStr);
+    try {
+        const availabilities = await prisma.tb_availability_actual.findMany({ where: { date: targetDate } });
+        for (const row of availabilities) {
+            const mn = row.machine_name;
+            initAvailabilityCache(mn, dateStr);
+            for (const h of SHIFT_HOURS) {
+                const val = row[`avail_${h}`];
+                if (val != null && val > 0) {
+                    availabilityCache[mn].availability[`avail_${h}`] = val;
+                }
+            }
+        }
+        console.log(`✅ Availability cache hydrated for ${dateStr}`);
+    } catch (err) {
+        console.error("❌ Hydrating availability failed:", err.message);
+    }
+}
+
+async function hydrateRuntimeFromMSSQL() {
+    const dateStr = getShiftDateUTC();
+    const targetDate = new Date(dateStr);
+    try {
+        const runtimes = await prisma.tb_mc_runtime_hourly.findMany({ where: { date: targetDate } });
+        for (const row of runtimes) {
+            const mn = row.machine_name;
+            initRuntimeCache(mn, dateStr);
+            for (const h of SHIFT_HOURS) {
+                const rVal = row[`runtime_${h}`];
+                if (rVal != null) {
+                    runtimeCache[mn].runtime[`runtime_${h}`] = rVal;
+                }
+                const eVal = row[`excluded_${h}`];
+                if (eVal != null) {
+                    runtimeCache[mn].excluded[`excluded_${h}`] = eVal;
+                }
+            }
+        }
+        console.log(`✅ Runtime cache hydrated for ${dateStr}`);
+    } catch (err) {
+        console.error("❌ Hydrating runtime failed:", err.message);
     }
 }
 
@@ -293,6 +424,12 @@ async function clearAndRollover() {
     }
     for (const key of Object.keys(targetCache)) {
         delete targetCache[key];
+    }
+    for (const key of Object.keys(availabilityCache)) {
+        delete availabilityCache[key];
+    }
+    for (const key of Object.keys(runtimeCache)) {
+        delete runtimeCache[key];
     }
     await hydrateFromMSSQL();
 }
@@ -308,6 +445,12 @@ module.exports = {
     getAllMachinesCache,
     getHourlyArrays,
     getTarget,
+    getAvailability,
+    getRuntime,
+    updateHourRuntime,
+    updateHourAvailability,
     hydrateFromMSSQL,
+    hydrateAvailabilityFromMSSQL,
+    hydrateRuntimeFromMSSQL,
     clearAndRollover,
 };
