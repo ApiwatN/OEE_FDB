@@ -7,5 +7,9 @@
     "ng_modes": {
         "default": "visual_ng",
         "ABR": "over_reject"
+    },
+    "ct_calc_modes": {
+        "default": "runtime_based",
+        "AHV": "influx_avg"
     }
 }

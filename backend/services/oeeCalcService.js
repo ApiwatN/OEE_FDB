@@ -33,7 +33,7 @@ function getMachineRunTimeMode(machineName) {
             machineCalcConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
         } catch (e) {
             console.error("⚠️ [Config] failed to load machine_calc.json:", e.message);
-            machineCalcConfig = { default_mode: "status_based", custom_modes: {} };
+            machineCalcConfig = { default_mode: "status_based", custom_modes: {}, ct_calc_modes: { default: "runtime_based" } };
         }
     }
     
@@ -44,6 +44,24 @@ function getMachineRunTimeMode(machineName) {
         }
     }
     return machineCalcConfig.default_mode || "status_based";
+}
+
+/**
+ * Get CT calculation mode for a machine (runtime_based or influx_avg)
+ */
+function getCTCalcMode(machineName) {
+    if (!machineCalcConfig) {
+        getMachineRunTimeMode(machineName); // Force load config
+    }
+    
+    if (machineCalcConfig.ct_calc_modes) {
+        for (const prefix of Object.keys(machineCalcConfig.ct_calc_modes)) {
+            if (prefix !== 'default' && machineName.startsWith(prefix)) {
+                return machineCalcConfig.ct_calc_modes[prefix];
+            }
+        }
+    }
+    return machineCalcConfig.ct_calc_modes?.default || "runtime_based";
 }
 
 /**
@@ -81,6 +99,26 @@ function calcMcStatusDurations(records, shiftStart, endTime) {
     }
 
     return { runTimeSeconds, excludedSeconds, totalSeconds };
+}
+
+/**
+ * Calculate run time and excluded time from MC Status records split per hour
+ *
+ * @param {Array<{Datetime: Date, MCStatus: string}>} records - sorted by Datetime ASC
+ * @param {Date} shiftStart - shift start time
+ * @param {number} shiftHours - number of hours to calculate (default 24)
+ * @returns {Array<{ runTimeSeconds: number, excludedSeconds: number, totalSeconds: number }>}
+ */
+function calcMcStatusDurationsPerHour(records, shiftStart, shiftHours = 24) {
+    const hourlyDurations = [];
+    
+    for (let i = 0; i < shiftHours; i++) {
+        const hourStart = new Date(shiftStart.getTime() + i * 3600000);
+        const hourEnd = new Date(hourStart.getTime() + 3600000);
+        hourlyDurations.push(calcMcStatusDurations(records, hourStart, hourEnd));
+    }
+    
+    return hourlyDurations;
 }
 
 /**
@@ -223,7 +261,9 @@ module.exports = {
     RUNNING_STATUS,
     isExcludedStatus,
     getMachineRunTimeMode,
+    getCTCalcMode,
     calcMcStatusDurations,
+    calcMcStatusDurationsPerHour,
     calcAvailability,
     calcPerformance,
     recalculateAPQForDay
