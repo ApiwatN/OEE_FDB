@@ -18,7 +18,7 @@ const {
     getShiftIndex,
     getCurrentHourBoundaries,
 } = require("../utils/timeUtils");
-const { calcMcStatusDurations, calcMcStatusDurationsPerHour, calcAvailability, calcPerformance, getCTCalcMode } = require("./oeeCalcService");
+const { calcMcStatusDurations, calcMcStatusDurationsPerHour, calcAvailability, calcPerformance, getCTCalcMode, getNgMode } = require("./oeeCalcService");
 const dayjs = require("dayjs");
 const { generatePlanForMachine } = require("../controllers/PlanConfigController");
 
@@ -1080,6 +1080,16 @@ async function upsertOeeHourly() {
         const targetMap = {};
         for (const row of allTargetRows) targetMap[row.machine_name] = row;
 
+        // ✅ Bulk fetch NG (for over_reject logic)
+        const allNgRows = await prisma.tb_machine_ng.findMany({ where: { date: targetDate } });
+        const ngMap = {};
+        for (const row of allNgRows) {
+            if (!ngMap[row.machine_name]) ngMap[row.machine_name] = 0;
+            for (const h of SHIFT_HOURS) {
+                ngMap[row.machine_name] += (row[`ng_${h}`] || 0);
+            }
+        }
+
         // ✅ ดึง current hour output จาก InfluxDB
         const { start: currentHourStart } = getCurrentHourBoundaries(now);
         let currentHourData = {};
@@ -1095,6 +1105,7 @@ async function upsertOeeHourly() {
         for (const machineName of machineNames) {
             try {
                 // Calc Availability and Performance dynamically
+                const ngMode = getNgMode(machineName);
                 const mcRecords = mcStatusByMachine[machineName] || [];
                 const outputRow = outputMap[machineName];
                 const targetRow = targetMap[machineName];
@@ -1140,7 +1151,14 @@ async function upsertOeeHourly() {
 
                 const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalActiveSeconds);
                 const idealCT = targetRow?.cycle_time_target || 0;
-                const performance = calcPerformance(totalOutput, idealCT, runTimeSeconds);
+                
+                // 🆕 ABR ng logic (over_reject): update effective output for performance
+                let effectiveOutputForPerf = totalOutput;
+                if (ngMode === "over_reject") {
+                    const sumNg = ngMap[machineName] || 0;
+                    effectiveOutputForPerf = Math.max(0, totalOutput - sumNg);
+                }
+                const performance = calcPerformance(effectiveOutputForPerf, idealCT, runTimeSeconds);
 
                 // 🆕 Fetch existing OEE to get the saved ng_qty
                 const existingOee = await prisma.tb_oee.findFirst({
@@ -1152,9 +1170,9 @@ async function upsertOeeHourly() {
                 let quality = 0;
                 let oeeValue = 0;
                 
-                // For manual mode, if the user hasn't updated yet (savedNgQty=0) BUT the quality was actually 0 due to no output previously,
-                // we should recalculate it now that output > 0!
-                if (totalOutput > 0) {
+                if (ngMode === "over_reject") {
+                    quality = 100; // Always 100% for over_reject logic
+                } else if (totalOutput > 0) {
                     quality = ((totalOutput - savedNgQty) / totalOutput) * 100;
                     if (quality < 0) quality = 0;
                 }
@@ -1280,15 +1298,23 @@ async function backfillOeeStartup(days = 5) {
                 continue;
             }
 
-            // ✅ Bulk-fetch output + target rows for this date (2 queries instead of N×2)
-            const [allOutputRows, allTargetRows] = await Promise.all([
+            // ✅ Bulk-fetch output + target + NG rows for this date (3 queries instead of N×3)
+            const [allOutputRows, allTargetRows, allNgRows] = await Promise.all([
                 prisma.tb_output_actual.findMany({ where: { date: targetDate } }),
                 prisma.tb_output_target.findMany({ where: { date: targetDate } }),
+                prisma.tb_machine_ng.findMany({ where: { date: targetDate } })
             ]);
             const outputMap = {};
             for (const row of allOutputRows) outputMap[row.machine_name] = row;
             const targetMap = {};
             for (const row of allTargetRows) targetMap[row.machine_name] = row;
+            const ngMap = {};
+            for (const row of allNgRows) {
+                if (!ngMap[row.machine_name]) ngMap[row.machine_name] = 0;
+                for (const h of SHIFT_HOURS) {
+                    ngMap[row.machine_name] += (row[`ng_${h}`] || 0);
+                }
+            }
 
             // ✅ Collect all upserts (CPU-only calculations, no DB calls in loop)
             const upsertOps = [];
@@ -1304,6 +1330,9 @@ async function backfillOeeStartup(days = 5) {
                     let totalActiveSeconds = 0;
                     let totalOutput = 0;
 
+                    let runtimeHData = {};
+                    let availHData = {};
+
                     for (let j = 0; j < SHIFT_HOURS.length; j++) {
                         const h = SHIFT_HOURS[j];
                         const isActive = !targetRow || (targetRow[`target_${h}`] > 0);
@@ -1317,12 +1346,42 @@ async function backfillOeeStartup(days = 5) {
                             runTimeSeconds += rTime;
                             excludedSeconds += eTime;
                             totalActiveSeconds += 3600;
+
+                            runtimeHData[`runtime_${h}`] = parseFloat(rTime.toFixed(2));
+                            runtimeHData[`excluded_${h}`] = parseFloat(eTime.toFixed(2));
+                            const hourAvail = calcAvailability(rTime, eTime, 3600);
+                            availHData[`avail_${h}`] = parseFloat(hourAvail.toFixed(2));
                         }
                     }
 
+                    // 🆕 [Phase 6] Backfill runtime hourly
+                    upsertOps.push(
+                        prisma.tb_mc_runtime_hourly.upsert({
+                            where: { machine_name_date: { machine_name: machineName, date: targetDate } },
+                            update: runtimeHData,
+                            create: { machine_name: machineName, date: targetDate, ...runtimeHData }
+                        })
+                    );
+
+                    // 🆕 [Phase 6] Backfill availability
+                    upsertOps.push(
+                        prisma.tb_availability_actual.upsert({
+                            where: { machine_name_date: { machine_name: machineName, date: targetDate } },
+                            update: availHData,
+                            create: { machine_name: machineName, date: targetDate, ...availHData }
+                        })
+                    );
+
                     const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalActiveSeconds);
                     const idealCT = targetRow?.cycle_time_target || 0;
-                    const performance = calcPerformance(totalOutput, idealCT, runTimeSeconds);
+                    
+                    const ngMode = getNgMode(machineName);
+                    let effectiveOutputForPerf = totalOutput;
+                    if (ngMode === "over_reject") {
+                        const sumNg = ngMap[machineName] || 0;
+                        effectiveOutputForPerf = Math.max(0, totalOutput - sumNg);
+                    }
+                    const performance = calcPerformance(effectiveOutputForPerf, idealCT, runTimeSeconds);
 
                     // 🆕 Fetch existing OEE to get the saved ng_qty for backfilling
                     const existingOee = await prisma.tb_oee.findFirst({
@@ -1333,7 +1392,10 @@ async function backfillOeeStartup(days = 5) {
                     let quality = 0;
                     let oeeValue = 0;
                     
-                    if (totalOutput > 0) {
+                    // 🆕 ABR logic
+                    if (ngMode === "over_reject") {
+                        quality = 100;
+                    } else if (totalOutput > 0) {
                         quality = ((totalOutput - savedNgQty) / totalOutput) * 100;
                         if (quality < 0) quality = 0;
                     }
@@ -1366,8 +1428,11 @@ async function backfillOeeStartup(days = 5) {
                 await Promise.all(upsertOps);
             }
 
-            console.log(`   📅 ${dateStr}: OEE backfilled for ${upsertOps.length} machines.`);
-            totalUpdated += upsertOps.length;
+            // 🆕 [Phase 6] Recalculate totals for runtime and availability
+            await recalcRuntimeAndAvailTotals(targetDate, machineNames);
+
+            console.log(`   📅 ${dateStr}: OEE/Runtime backfilled for ${machineNames.length} machines.`);
+            totalUpdated += machineNames.length;
 
             // ✅ Yield event loop between days
             await new Promise(resolve => setImmediate(resolve));

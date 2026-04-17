@@ -65,6 +65,24 @@ function getCTCalcMode(machineName) {
 }
 
 /**
+ * Get Quality calculation mode (visual_ng or over_reject)
+ */
+function getNgMode(machineName) {
+    if (!machineCalcConfig) {
+        getMachineRunTimeMode(machineName); // Force load config
+    }
+    
+    if (machineCalcConfig.ng_modes) {
+        for (const prefix of Object.keys(machineCalcConfig.ng_modes)) {
+            if (prefix !== 'default' && machineName.startsWith(prefix)) {
+                return machineCalcConfig.ng_modes[prefix];
+            }
+        }
+    }
+    return machineCalcConfig.ng_modes?.default || "visual_ng";
+}
+
+/**
  * Calculate run time and excluded time from MC Status records for a given shift period.
  *
  * @param {Array<{Datetime: Date, MCStatus: string}>} records - sorted by Datetime ASC
@@ -260,11 +278,12 @@ module.exports = {
     EXCLUDED_STATUSES,
     RUNNING_STATUS,
     isExcludedStatus,
-    getMachineRunTimeMode,
-    getCTCalcMode,
     calcMcStatusDurations,
     calcMcStatusDurationsPerHour,
     calcAvailability,
     calcPerformance,
+    getMachineRunTimeMode,
+    getCTCalcMode,
+    getNgMode,
     recalculateAPQForDay
 };
