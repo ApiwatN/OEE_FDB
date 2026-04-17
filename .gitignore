@@ -36,3 +36,7 @@ Thumbs.db
 # Temp files
 *.tmp
 *.temp
+
+# Large files and excluded directories
+GetData/ABR_Data/telegraf-1.33.0/telegraf.exe
+automated_test/
