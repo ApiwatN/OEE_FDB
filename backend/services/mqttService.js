@@ -495,9 +495,21 @@ function updateStateFromMssqlPoller(machineName, liveStatus, liveAlarm) {
     }
 }
 
+/**
+ * Restore state into MQTT memory (from state snapshot)
+ */
+function restoreMachineStateMem(snapshotObj) {
+    machineStateMem.clear();
+    for (const [key, value] of Object.entries(snapshotObj)) {
+        if (value.last_update) value.last_update = new Date(value.last_update);
+        machineStateMem.set(key, value);
+    }
+}
+
 module.exports = {
     initializeMqtt,
     getMachineStateMem,
+    restoreMachineStateMem,
     hydrateMqttMemoryFromInflux,
     scheduleResync,
     updateStateFromMssqlPoller

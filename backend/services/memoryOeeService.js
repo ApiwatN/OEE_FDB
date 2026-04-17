@@ -250,6 +250,18 @@ function resetShift(machine, newShiftDate) {
 // Internal Helpers
 // ──────────────────────────────────────────────
 
+function getStateMap() {
+    return stateMap;
+}
+
+function restoreStateMap(snapshotObj) {
+    stateMap.clear();
+    for (const [key, value] of Object.entries(snapshotObj)) {
+        if (value.lastStatusTime) value.lastStatusTime = new Date(value.lastStatusTime);
+        stateMap.set(key, value);
+    }
+}
+
 function _addToSegment(state, status, durationSec) {
     if (status === RUNNING_STATUS) {
         state.runTimeSec += durationSec;
@@ -299,6 +311,8 @@ module.exports = {
     getDurationsNow,
     setManualNg,
     getManualNg,
+    getStateMap,
+    restoreStateMap,
     hydrateFromMssql,
     resetShift,
 };
