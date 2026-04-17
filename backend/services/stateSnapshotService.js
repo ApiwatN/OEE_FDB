@@ -6,7 +6,8 @@ const fs = require('fs');
 const path = require('path');
 const mqttService = require('./mqttService');
 const memoryOeeService = require('./memoryOeeService');
-const { InfluxDB } = require('@influxdata/influxdb-client');
+// ใช้ influxService (InfluxDB 1.x) ที่โปรเจกต์นี้ใช้อยู่แล้ว — ไม่ใช้ @influxdata/influxdb-client (v2)
+const { getClient } = require('./influxService');
 require('dotenv').config();
 
 const STORE_DIR = path.join(__dirname, '../store');
@@ -73,7 +74,7 @@ async function loadAndRestore() {
         mqttService.restoreMachineStateMem(snapshot.mqttMem || {});
         memoryOeeService.restoreStateMap(snapshot.oeeState || {});
 
-        // Optional: Query InfluxDB here for the gap between backupTime and now
+        // Fill gap between backup and now from InfluxDB
         await queryInfluxGap(backupTime);
 
         console.log('✅ [Snapshot] Restore complete.');
@@ -87,44 +88,40 @@ async function loadAndRestore() {
 async function queryInfluxGap(fromTime) {
     console.log(`🔍 [Snapshot] Querying InfluxDB for gap since ${fromTime.toISOString()} ...`);
     try {
-        const url = process.env.INFLUX_URL;
-        const token = process.env.INFLUX_TOKEN;
-        const org = process.env.INFLUX_ORG;
-        const bucket = process.env.INFLUX_BUCKET;
+        // ใช้ influxService client ที่ init แล้ว (InfluxDB 1.x)
+        let client;
+        try {
+            client = getClient();
+        } catch (e) {
+            console.log('⚠️ [Snapshot] InfluxDB client not ready yet, skipping gap fill.');
+            return;
+        }
 
-        if (!url || !token) return;
+        const fromISO = fromTime.toISOString();
+        const toISO = new Date().toISOString();
 
-        const influxDB = new InfluxDB({ url, token });
-        const queryApi = influxDB.getQueryApi(org);
-
-        // Query Status for the gap
-        const queryStatus = `
-            from(bucket: "${bucket}")
-              |> range(start: ${fromTime.toISOString()})
-              |> filter(fn: (r) => r["_measurement"] == "status_tb")
-              |> filter(fn: (r) => r["_field"] == "Status")
-              |> sort(columns: ["_time"], desc: false)
+        const query = `
+            SELECT "Status", "machine_name"
+            FROM "status_tb"
+            WHERE time >= '${fromISO}' AND time <= '${toISO}'
+            ORDER BY time ASC
         `;
 
-        await new Promise((resolve, reject) => {
-            queryApi.queryRows(queryStatus, {
-                next(row, tableMeta) {
-                    const data = tableMeta.toObject(row);
-                    memoryOeeService.processStatusChange(data.machine_name, data._value, new Date(data._time));
-                },
-                error(error) {
-                    console.error("Influx Gap Status Error", error);
-                    resolve(); // Ignore error and continue
-                },
-                complete() { resolve(); },
-            });
-        });
-        
-        console.log(`✅ [Snapshot] InfluxDB gap recovery finished.`);
+        const results = await client.query(query);
+        for (const row of results) {
+            const machineName = row.machine_name || row.tags?.machine_name;
+            const status = row.Status;
+            if (machineName && status) {
+                memoryOeeService.processStatusChange(machineName, status, new Date(row.time));
+            }
+        }
+
+        console.log(`✅ [Snapshot] InfluxDB gap recovery finished. (${results.length} status events)`);
     } catch (e) {
-         console.error('⚠️ [Snapshot] Gap recovery failed:', e.message);
+        console.error('⚠️ [Snapshot] Gap recovery failed:', e.message);
     }
 }
+
 
 let checkpointTimer = null;
 

@@ -23,7 +23,6 @@ const path = require('path');
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const { SHIFT_HOURS } = require("../utils/timeUtils");
-const path = require('path');
 let machineCalcConfig = null;
 
 function getMachineRunTimeMode(machineName) {
