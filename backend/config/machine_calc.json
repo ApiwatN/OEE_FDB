@@ -1,12 +1,28 @@
 {
+    "_description": "OEE Calculation Mode Settings — ใช้ Machine Type Prefix Match (เช่น ABR, AHV) กำหนดวิธีคำนวณ. Key ที่ขึ้นต้นด้วย _ ถือเป็น Description เท่านั้น ไม่กระทบ Runtime",
+
+    "_mode_options": {
+        "status_based": "คำนวณ Performance จาก Runtime จริง: ดูจาก MCStatus = Run_Time สะสมวินาทีใน RAM ไม่ต้อง Query DB เพิ่ม",
+        "output_based": "คำนวณ Performance จากยอดผลิต × Standard CT: ใช้เมื่อ Status ของเครื่องส่งมาไม่แม่น หรือไม่มี Run_Time signal"
+    },
     "default_mode": "status_based",
     "custom_modes": {
         "AHV": "output_based",
         "ABR": "status_based"
     },
+
+    "_ng_mode_options": {
+        "visual_ng": "นับ NG ตามจำนวนของเสียที่พนักงานกรอกปกติ",
+        "over_reject": "Quality บังคับ = 100% เสมอ, ยอดผลิตที่เกิน Plan จะถูกย้ายไปเป็น over_reject_qty (ใช้กับ ABR เพราะ Output นับซ้ำ/เบิ้ล)"
+    },
     "ng_modes": {
         "default": "visual_ng",
         "ABR": "over_reject"
+    },
+
+    "_ct_mode_options": {
+        "runtime_based": "CT = รวม Runtime จริงชั่วโมงนั้น (วินาที) ÷ จำนวนชิ้น. ค่า cycle_time จาก MQTT ถูกสะสมใน RAM ทันที ไม่ Query InfluxDB เพิ่มเมื่อถึงรอบ Cron",
+        "influx_avg": "CT = ค่า cycle_time ดิบจาก MQTT Payload ทำ Running Average สะสมใน RAM. ไม่ Query InfluxDB เพิ่มเช่นกัน (ใช้กับ AHV ที่ใช้โหมด output_based)"
     },
     "ct_calc_modes": {
         "default": "runtime_based",
