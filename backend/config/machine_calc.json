@@ -12,8 +12,8 @@
     },
 
     "_ng_mode_options": {
-        "visual_ng": "นับ NG ตามจำนวนของเสียที่พนักงานกรอกปกติ",
-        "over_reject": "Quality บังคับ = 100% เสมอ, ยอดผลิตที่เกิน Plan จะถูกย้ายไปเป็น over_reject_qty (ใช้กับ ABR เพราะ Output นับซ้ำ/เบิ้ล)"
+        "visual_ng": "นับ NG ตามปกติ (พนักงานกรอก ng_qty ที่หน้า Dashboard → Quality = (Output - ng_qty) / Output)",
+        "over_reject": "NG ทุก Station (จาก tb_machine_ng รายชั่วโมง) ถูกตีเป็น Over Reject ทั้งหมด ไม่เกี่ยวกับ Plan. Total_Output (ของดี) = Machine_Output - NG_All_Station. Performance คำนวณจาก Total_Output ที่หักแล้ว. Quality = 100% เสมอ เพราะ NG ได้ถูกหักออกจาก Output ไปแล้ว (ใช้กับ ABR)"
     },
     "ng_modes": {
         "default": "visual_ng",
