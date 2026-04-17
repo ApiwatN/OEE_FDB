@@ -227,12 +227,20 @@ app.get(/(.*)/, (req, res, next) => {
 // ✅ Worker Thread — Background services run in separate thread
 const { Worker } = require("worker_threads");
 
+// Phase 11: Graceful Shutdown — import stateSnapshotService ให้ Main Thread
+// (Worker thread มี snapshot ของตัวเอง แต่ Main Thread ต้อง save ด้วยถ้าถูกสั่ง shutdown)
+// NOTE: stateSnapshotService อ่าน mqttService/memoryOeeService ที่อยู่ใน Worker Thread
+// การ save จาก Main Thread จึงเป็น "best-effort" — ส่วน Worker Thread save ทุก 5 นาทีผ่าน startCheckpoint()
+// Graceful shutdown จึงดัก signal เพื่อ notify Worker ให้ save ก่อน terminate
+let workerRef = null; // เก็บ reference สำหรับ shutdown
+
 // Start Express server FIRST — so frontend can connect immediately
 server.listen(port, () => {
   console.log("🚀 API server running at port", port);
 
   // Spawn worker thread AFTER Express is listening
   const worker = new Worker("./worker.js");
+  workerRef = worker; // Phase 11: เก็บ reference สำหรับ graceful shutdown
 
   // ── IPC: Worker → Main Thread (Socket.IO emit) ──
   const handleWorkerMessage = (msg) => {
@@ -245,6 +253,11 @@ server.listen(port, () => {
         break;
       case "log":
         console.log(`[Worker] ${msg.message}`);
+        break;
+      // Phase 11: Worker แจ้งว่า snapshot saved → safe to exit
+      case "snapshot_saved":
+        console.log("[Shutdown] Worker snapshot saved. Closing server...");
+        server.close(() => process.exit(0));
         break;
     }
   };
@@ -261,6 +274,7 @@ server.listen(port, () => {
       // Auto-restart worker on crash
       setTimeout(() => {
         const newWorker = new Worker("./worker.js");
+        workerRef = newWorker;
         newWorker.on("message", handleWorkerMessage); // ✅ Fixed: properly bind the message handler
         newWorker.on("error", (err) => console.error("❌ Worker error:", err));
       }, 2000);
@@ -269,3 +283,34 @@ server.listen(port, () => {
 
   console.log("🔧 Worker thread spawned for background services");
 });
+
+// ─────────────────────────────────────────────────────────
+// Phase 11: Graceful Shutdown Handler
+// ดัก SIGTERM (systemd/PM2 stop) และ SIGINT (Ctrl+C)
+// ─────────────────────────────────────────────────────────
+function gracefulShutdown(signal) {
+  console.log(`\n🛑 [Shutdown] Received ${signal}. Starting graceful shutdown...`);
+
+  // Force exit ถ้าใช้เวลาเกิน 10 วินาที (ป้องกัน hang)
+  const forceExit = setTimeout(() => {
+    console.error("⚠️ [Shutdown] Timeout exceeded. Force exiting.");
+    process.exit(1);
+  }, 10000);
+  forceExit.unref(); // ไม่ให้ setTimeout นี้ block process ปิดตัวปกติ
+
+  // ส่ง message ให้ Worker Thread save snapshot ก่อน terminate
+  if (workerRef) {
+    console.log("[Shutdown] Requesting worker to save snapshot...");
+    workerRef.postMessage({ type: "save_snapshot" });
+    // Worker จะตอบกลับด้วย snapshot_saved → server.close() → process.exit(0)
+  } else {
+    // ไม่มี Worker → ปิด server ตรง
+    server.close(() => {
+      console.log("[Shutdown] Server closed. Exiting.");
+      process.exit(0);
+    });
+  }
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT",  () => gracefulShutdown("SIGINT"));

@@ -24,7 +24,9 @@ function log(message) {
 
 // ── Load Services ──────────────────────────────────────
 const { initClient } = require("./services/influxService");
-const { hydrateFromMSSQL } = require("./services/cacheService");
+const { hydrateFromMSSQL, hydrateAvailabilityFromMSSQL, hydrateRuntimeFromMSSQL } = require("./services/cacheService");
+// Phase 11: State Snapshot Service — Checkpoint + Boot Recovery + Graceful Shutdown
+const { loadAndRestore, startCheckpoint } = require("./services/stateSnapshotService");
 const {
     startCronJobs,
     backfillStartup,
@@ -49,6 +51,11 @@ async function startup() {
         // 1. Initialize InfluxDB client
         initClient();
 
+        // 1.5. Phase 11: Boot Recovery — restore RAM state from snapshot (InfluxDB gap fill included)
+        // ถ้า backup ไม่เก่าเกิน 2 ชม. จะ restore mqttMem + oeeState กลับมา แล้ว fill gap จาก InfluxDB
+        // ถ้าไม่มี backup หรือ backup เก่าเกินไป → cold boot ตามปกติ
+        await loadAndRestore();
+
         // 2. Hydrate cache from MSSQL (initial load)
         await hydrateFromMSSQL();
 
@@ -61,8 +68,11 @@ async function startup() {
         // 2.16 🆕 Backfill historical Status & Alarm (Recover from InfluxDB)
         await backfillEventsStartup();
 
-        // 2.2 Re-hydrate cache from corrected MSSQL data
+        // 2.2 Re-hydrate cache from corrected MSSQL data (including availability + runtime tables)
         await hydrateFromMSSQL();
+        // Phase 11: Hydrate Availability + Runtime caches from new tables
+        await hydrateAvailabilityFromMSSQL();
+        await hydrateRuntimeFromMSSQL();
 
         // 2.3 OEE: upsert availability + performance to tb_oee immediately
         await upsertOeeHourly();
@@ -96,6 +106,10 @@ async function startup() {
         // 4.8 🆕 Force initial poll from MSSQL to populate live Status/Alarm in memory
         await pollMssqlStatusForWeb();
 
+        // 4.9 Phase 11: Start Checkpoint timer — save state to disk every 5 minutes
+        // ต้องเริ่มหลังจาก services ทั้งหมดพร้อมแล้ว เพื่อให้ snapshot มีข้อมูลครบ
+        startCheckpoint();
+
         log("✅ Worker thread startup completed!");
     } catch (err) {
         console.error("❌ Worker startup failed:", err);
@@ -104,3 +118,19 @@ async function startup() {
 }
 
 startup();
+
+// Phase 11: รับ IPC message จาก Main Thread (Graceful Shutdown)
+// เมื่อ Main Thread ส่ง { type: "save_snapshot" } มา → Worker จะ saveNow() แล้วตอบกลับ
+parentPort.on("message", async (msg) => {
+    if (msg && msg.type === "save_snapshot") {
+        try {
+            const snapshotService = require("./services/stateSnapshotService");
+            snapshotService.saveNow();
+            console.log("[Worker] Snapshot saved on shutdown request.");
+        } catch (e) {
+            console.error("[Worker] Failed to save snapshot on shutdown:", e.message);
+        }
+        // แจ้ง Main Thread ว่า save เสร็จแล้ว → safe to call server.close()
+        parentPort.postMessage({ type: "snapshot_saved" });
+    }
+});
