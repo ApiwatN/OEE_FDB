@@ -329,7 +329,7 @@ function MachineWorkingInner() {
 
                 // ✅ Sync ทุกแท่งที่ผ่านมาแล้ว + ปัจจุบัน
                 const serverCt = daily.hourly?.cycleTime;
-                const serverEff = daily.hourly?.efficiency;
+                const serverEff = daily.hourly?.availability;
                 if (serverCt && serverEff) {
                     for (let i = 0; i <= shiftIndex && i < serverCt.length; i++) {
                         newCtActual[i] = serverCt[i];
@@ -337,7 +337,8 @@ function MachineWorkingInner() {
                     }
                 } else {
                     newCtActual[shiftIndex] = currentHour.cycleTime;
-                    newEffActual[shiftIndex] = currentHour.efficiency;
+                    // หาก serverEff ไม่มี (อัปเดตแบบเก่า) -> ให้ยึดจาก currentHour.availability (ถ้ามี) หรือ efficiency
+                    newEffActual[shiftIndex] = currentHour.availability ?? currentHour.efficiency;
                 }
 
                 // 🛑 Bail out: ถ้ายอดแต่ละแท่งไม่เปลี่ยนเลย ไม่ต้องสร้าง Object ใหม่ให้ Chart.js วาดใหม่
@@ -615,10 +616,10 @@ function MachineWorkingInner() {
                 outputTarget: tableDataRaw.outputTarget || 0,
                 ctActual: tableDataRaw.cycleTimeActual || 0,
                 ctTarget: tableDataRaw.cycleTimeTarget || 0,
-                effActual: tableDataRaw.efficiencyActual || 0,
-                effTarget: tableDataRaw.efficiencyTarget || 0,
-                availabilityActual: oeeData.availability || 0,   // ✅ ค่า Availability จริงจาก API
-                availabilityTarget: tableDataRaw.efficiencyTarget || 0,
+                effActual: tableDataRaw.availabilityActual || 0,
+                effTarget: tableDataRaw.availabilityTarget || 0,
+                availabilityActual: tableDataRaw.availabilityActual || 0,
+                availabilityTarget: tableDataRaw.availabilityTarget || 0,
                 liveStatus: isToday ? (latestAllStatus[machine] || "Offline") : "Offline",
                 liveAlarm: null,
             });
@@ -777,8 +778,8 @@ function MachineWorkingInner() {
                             type: "line",
                             label: "Availability Actual",
                             // ✅ แก้ไขตรงนี้: เรียกใช้ filterFutureData
-                            data: filterFutureData(g2.efficiencyActual, g2.hours),
-                            // data: g2.efficiencyActual,
+                            data: filterFutureData(g2.availabilityActual, g2.hours),
+                            // data: g2.availabilityActual,
                             borderColor: "#02630fff",
                             backgroundColor: "#02630fff",
                             borderWidth: 3,
@@ -789,7 +790,7 @@ function MachineWorkingInner() {
                         {
                             type: "line",
                             label: "Availability Target",
-                            data: g2.efficiencyTarget,
+                            data: g2.availabilityTarget,
                             borderColor: "#ff6600ff", // Dark Orange
                             borderWidth: 5,
                             borderDash: [5, 5], // เส้นประ

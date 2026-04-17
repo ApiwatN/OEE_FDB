@@ -144,9 +144,8 @@ interface MachineData {
     model: string;
     process: string;
     output: number | string;
-    efficiency: number | string;
+    availability: number | string;  // Phase 10: เปลี่ยนจาก efficiency → availability (Backend Phase 9)
     cycleTime: number | string;
-    availability?: number;
     performance?: number;
 }
 
@@ -210,7 +209,9 @@ export default function LayoutDashboard() {
                     return {
                         ...machine,
                         output: rt.daily.totalOutput ?? machine.output,
-                        efficiency: rt.daily.overallEfficiency ?? machine.efficiency,
+                        // Phase 10: ใช้ daily.availability จาก fast loop (realtimeService Phase 7 ส่งมาใน daily payload)
+                        // fallback ไป overallEfficiency ถ้ายังไม่มี availability
+                        availability: rt.daily.availability ?? rt.daily.overallEfficiency ?? machine.availability,
                         cycleTime: rt.daily.avgCycleTime ?? machine.cycleTime,
                     };
                 });
@@ -341,7 +342,8 @@ export default function LayoutDashboard() {
         const getValue = () => {
             switch (activeButton) {
                 case 'OUTPUT': return machine.output !== '--' ? `${machine.output} pcs` : '--';
-                case 'EFFICIENCY': return machine.efficiency !== '--' ? `${(machine.efficiency as number).toFixed(2)} %` : '--';
+                // Phase 10: เปลี่ยนจาก EFFICIENCY → AVAILABILITY และ machine.efficiency → machine.availability
+                case 'AVAILABILITY': return machine.availability !== '--' ? `${(machine.availability as number).toFixed(2)} %` : '--';
                 case 'CYCLE_TIME': return machine.cycleTime !== '--' ? `${(machine.cycleTime as number).toFixed(2)} s` : '--';
                 default: return '--';
             }
@@ -678,12 +680,13 @@ export default function LayoutDashboard() {
                         >
                             Output
                         </button>
+                        {/* Phase 10: เปลี่ยนจาก 'EFFICIENCY'/'Efficiency' → 'AVAILABILITY'/'Availability' */}
                         <button
-                            className={`btn btn-sm ${activeButton === 'EFFICIENCY' ? 'btn-success' : 'btn-outline-secondary'}`}
-                            onClick={() => setActiveButton('EFFICIENCY')}
+                            className={`btn btn-sm ${activeButton === 'AVAILABILITY' ? 'btn-success' : 'btn-outline-secondary'}`}
+                            onClick={() => setActiveButton('AVAILABILITY')}
                             style={{ minWidth: isMobile ? '60px' : '80px', fontSize: isMobile ? '0.7rem' : '0.875rem' }}
                         >
-                            Efficiency
+                            Availability
                         </button>
                         <button
                             className={`btn btn-sm ${activeButton === 'CYCLE_TIME' ? 'btn-warning' : 'btn-outline-secondary'}`}

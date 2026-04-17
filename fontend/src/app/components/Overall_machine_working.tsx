@@ -289,10 +289,11 @@ export default function OverallMachineCard({
             const shiftIndex = currentHour.shiftIndex;
 
             // ✅ Sync ทุกแท่งที่ผ่านมาแล้ว + ปัจจุบัน
-            if (hourly.cycleTime && hourly.efficiency) {
+            // Phase 10: เปลี่ยนจาก hourly.efficiency → hourly.availability (Backend Phase 7)
+            if (hourly.cycleTime && hourly.availability) {
                 for (let i = 0; i <= shiftIndex && i < hourly.cycleTime.length; i++) {
                     newCtActual[i] = hourly.cycleTime[i];
-                    newEffActual[i] = hourly.efficiency[i];
+                    newEffActual[i] = hourly.availability[i];
                 }
             }
 
@@ -411,10 +412,10 @@ export default function OverallMachineCard({
                 outputTarget: tableDataRaw.outputTarget || 0,
                 ctActual: tableDataRaw.cycleTimeActual || 0,
                 ctTarget: tableDataRaw.cycleTimeTarget || 0,
-                effActual: tableDataRaw.efficiencyActual || 0,
-                effTarget: tableDataRaw.efficiencyTarget || 0,
-                availabilityActual: oeeData.availability || 0,   // ✅ ค่า Availability จริงจาก tb_oee
-                availabilityTarget: tableDataRaw.efficiencyTarget || 0, // ✅ ใช้ effTarget เป็นเป้าชั่วคราว
+                effActual: tableDataRaw.availabilityActual || 0,       // Phase 10: Backend เปลี่ยน field เป็น availabilityActual
+                effTarget: tableDataRaw.availabilityTarget || 0,       // Phase 10: Backend เปลี่ยน field เป็น availabilityTarget
+                availabilityActual: tableDataRaw.availabilityActual || 0,   // ✅ รับ Availability จาก getDataTable โดยตรง
+                availabilityTarget: tableDataRaw.availabilityTarget || 0,   // ✅ รับ Target จาก getDataTable โดยตรง
                 liveStatus: isToday ? (latestAllStatus[machineName] || "Offline") : "Offline", // 🆕 อ่านจาก MSSQL ทันที
                 liveAlarm: null,
             });
@@ -556,7 +557,8 @@ export default function OverallMachineCard({
                         {
                             type: "line",
                             label: "Availability Actual",
-                            data: filterFutureData(g2.efficiencyActual, g2.hours),
+                            // Phase 10: เปลี่ยนจาก g2.efficiencyActual → g2.availabilityActual (Backend Phase 8)
+                            data: filterFutureData(g2.availabilityActual, g2.hours),
                             borderColor: "#02630fff",
                             backgroundColor: "#02630fff",
                             borderWidth: 2,
@@ -567,7 +569,8 @@ export default function OverallMachineCard({
                         {
                             type: "line",
                             label: "Availability Target",
-                            data: g2.efficiencyTarget,
+                            // Phase 10: เปลี่ยนจาก g2.efficiencyTarget → g2.availabilityTarget (Backend Phase 8)
+                            data: g2.availabilityTarget,
                             borderColor: "#ff6600ff",
                             borderWidth: 3,
                             borderDash: [5, 5],
