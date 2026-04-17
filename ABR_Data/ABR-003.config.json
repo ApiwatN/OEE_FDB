@@ -23,7 +23,7 @@
         "NG_station_B": "L503"
     },
     "status": [
-        {"device": "M5500", "comment": "Runtime"},
+        {"device": "M5500", "comment": "Run_Time"},
         {"device": "M5501", "comment": "Pick NG"},
         {"device": "M5502", "comment": "Wait MM"},
         {"device": "M5504", "comment": "Preventive"},

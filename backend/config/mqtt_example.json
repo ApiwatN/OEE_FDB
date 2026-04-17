@@ -1,0 +1,121 @@
+{
+  "_description": "ตัวอย่าง MQTT payload และ InfluxDB records สำหรับ reference ในการเขียน code",
+  "_updated": "2026-04-17",
+
+  "mqtt_examples": {
+    "data_tb": {
+      "_note": "Output record — 1 message = 1 part produced",
+      "fields": {
+        "Date_Time_UTC": "2026-04-17 06:33:08",
+        "Drop_Empty_Column": "",
+        "Model": "Dorado 10D",
+        "cycle_time": 3.81,
+        "date_local": "2026-04-17",
+        "emp_no": "WB257",
+        "id": 1776407587580193500,
+        "judg_result": "OK,OK,OK,OK,OK",
+        "lot_no": "FDD64FJ236",
+        "lot_size": 7,
+        "ng_indicator": "",
+        "shift": "M",
+        "time_interval": 4,
+        "time_local": "13:33:08"
+      },
+      "name": "data_tb",
+      "tags": {
+        "machine_name": "AHV-002",
+        "machine_type": "AHV"
+      },
+      "timestamp": 1776407588
+    },
+    "status_tb": {
+      "_note": "Machine status change event — triggers memoryOeeService.processStatusChange()",
+      "fields": {
+        "Date_Time_UTC": "2026-04-17 06:37:37",
+        "Status": "Run_Time",
+        "date_local": "2026-04-17",
+        "shift": "M",
+        "time_local": "13:37:37"
+      },
+      "name": "status_tb",
+      "tags": {
+        "machine_name": "ABR-003",
+        "machine_type": "ABR"
+      },
+      "timestamp": 1776407857
+    }
+  },
+
+  "influxdb_examples": {
+    "status_tb": {
+      "_note": "InfluxDB status record — Date_Time_UTC เป็น UTC จริง (ABR), AHV ส่งเป็น Local Thai +7",
+      "_query": "SELECT * FROM \"status_tb\" WHERE \"machine_name\" = 'ABR-003' ORDER BY time DESC LIMIT 1",
+      "time": "1775881365000000000",
+      "Date_Time_UTC": "2026-04-11 04:22:45",
+      "Status": "Plan_Stop",
+      "date_local": "2026-04-11",
+      "machine_name": "ABR-003",
+      "machine_type": "ABR",
+      "shift": "M",
+      "time_local": "11:22:45"
+    },
+    "data_tb": {
+      "_note": "InfluxDB data record — judg_result เป็น comma-separated NG/OK ต่อ station",
+      "_note2": "ABR: NG=36, OK=4493, Total=4529 ในชั่วโมงเดียว",
+      "_query": "SELECT * FROM \"data_tb\" WHERE \"machine_name\" = 'ABR-003' ORDER BY time DESC LIMIT 1",
+      "time": "1775879879307000000",
+      "Date_Time_UTC": "2026-04-11 03:57:59.307",
+      "Drop_Empty_Column": null,
+      "Model": "V4G",
+      "NG": 36,
+      "OK": 4493,
+      "Total": 4529,
+      "cycle_time": 4.54,
+      "date_local": "2026-04-11",
+      "emp_no": "ABR-003",
+      "id": "1775879879307",
+      "judg_result": "OK,OK,,,",
+      "lot_no": null,
+      "lot_size": 4529,
+      "machine_name": "ABR-003",
+      "machine_type": "ABR",
+      "ng_indicator": "OK,OK,,,",
+      "shift": "M",
+      "time_interval": 4.54,
+      "time_local": "10:57:59.307"
+    },
+    "alarm_tb": {
+      "_note": "InfluxDB alarm record",
+      "_query": "SELECT * FROM \"alarm_tb\" WHERE \"machine_name\" = 'ABR-003' ORDER BY time DESC LIMIT 1",
+      "time": "1775880193000000000",
+      "Alarm": "TrayLDIN Clamp : X10A",
+      "Date_Time_UTC": "2026-04-11 04:03:13",
+      "Device": "TS951",
+      "date_local": "2026-04-11",
+      "machine_name": "ABR-003",
+      "machine_type": "ABR",
+      "shift": "M",
+      "time_local": "11:03:13"
+    }
+  },
+
+  "key_notes": {
+    "time_zone": {
+      "ABR": "Date_Time_UTC เป็น UTC จริง → ต้องบวก +7 ชม. ก่อนเก็บลง MSSQL (Thai Local)",
+      "AHV": "Date_Time_UTC เป็น Local Thai (+7) อยู่แล้ว → ไม่ต้องบวกเพิ่ม"
+    },
+    "judg_result": {
+      "format": "comma-separated string เช่น 'OK,OK,,,NG' หรือ 'OK,OK,OK,OK,OK'",
+      "ng_detection": "isNg = judg_result.includes('NG')",
+      "per_station": "แต่ละ position ตรงกับ ng_id ใน tbm_machine_station (1-indexed)"
+    },
+    "abr_special": {
+      "ng_qty": "ABR ส่ง NG field โดยตรง (NG=36) — แต่ judg_result ยังคงเป็น station-level",
+      "over_reject_mode": "ABR Quality = 100%, Performance ลบ NG ออกจาก Output"
+    },
+    "mqtt_vs_influx_time": {
+      "mqtt": "timestamp เป็น Unix seconds (1776407588)",
+      "influx": "time เป็น nanoseconds (1775881365000000000)"
+    }
+  }
+}

@@ -1,7 +1,7 @@
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const { calculateTargets, HOURS_ORDER } = require("./planConfigController");
-const { recalculateAPQForDay } = require("../services/oeeBackfillService");
+const { recalculateAPQForDay } = require("../services/oeeCalcService");
 module.exports = {
 
     // ─── LIST HOLIDAYS ────────────────────────────────────

@@ -1,6 +1,6 @@
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
-const { recalculateAPQForDay } = require("../services/oeeBackfillService");
+const { recalculateAPQForDay } = require("../services/oeeCalcService");
 
 // Default 24 hours all active
 const DEFAULT_ACTIVE_HOURS = JSON.stringify({
