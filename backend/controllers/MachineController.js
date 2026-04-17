@@ -344,7 +344,7 @@ module.exports = {
 
       // 3. ดึง actual data — ใช้ cache ถ้าดูวันนี้
       let outputMap = {};
-      let effMap = {};
+      let availMap = {};
       let cycleMap = {};
 
       // ✅ Fix: Cache อยู่ใน Worker Thread เท่านั้น (Worker Threads ไม่ share memory)
@@ -357,7 +357,7 @@ module.exports = {
           useCache = true;
           for (const [mn, data] of Object.entries(allCache)) {
             outputMap[mn] = data.overall.totalOutput || 0;
-            effMap[mn] = data.overall.totalEfficiency || 0;
+            // ❌ ไม่เอา efficiency จาก cache แล้ว
             cycleMap[mn] = data.overall.avgCycleTime || 0;
           }
         }
@@ -365,13 +365,9 @@ module.exports = {
 
       if (!useCache) {
         // Cache ว่าง (Main Thread) หรือดูวันอดีต → query MSSQL
-        const [outputs, efficiencies, cycleTimes] = await Promise.all([
+        const [outputs, cycleTimes] = await Promise.all([
           prisma.tb_output_actual.findMany({
             where: { date: { gte: targetDate, lt: new Date(targetDate.getTime() + 86400000) } }
-          }),
-          prisma.tb_efficiency_actual.findMany({
-            where: { date: { gte: targetDate, lt: new Date(targetDate.getTime() + 86400000) } },
-            select: { machine_name: true, eff_actual: true }
           }),
           prisma.tb_cycle_time_actual.findMany({
             where: { date: { gte: targetDate, lt: new Date(targetDate.getTime() + 86400000) } },
@@ -386,7 +382,6 @@ module.exports = {
           }
           outputMap[o.machine_name] = totalOutput;
         }
-        for (const e of efficiencies) { effMap[e.machine_name] = e.eff_actual; }
         for (const c of cycleTimes) { cycleMap[c.machine_name] = c.cycle_time; }
 
         // ✅ Fix: เสริม current hour จาก InfluxDB (กรณีเครื่องหยุดกลางชั่วโมง)
@@ -408,6 +403,13 @@ module.exports = {
         }
       }
 
+      // 🆕 [Phase 9] ดึง Availability จาก tb_oee เสมอ เพราะ cache ไม่ได้เก็บ Availability สรุปรายวัน
+      const dailyOees = await prisma.tb_oee.findMany({
+        where: { date: { gte: targetDate, lt: new Date(targetDate.getTime() + 86400000) } },
+        select: { machine_name: true, availability: true }
+      });
+      for (const e of dailyOees) { availMap[e.machine_name] = e.availability; }
+
       // 4. สร้าง result
       const result = machines.map(m => ({
         id: m.id,
@@ -417,7 +419,7 @@ module.exports = {
         model: targetMap[m.machine_name]?.model_name || "--",
         process: targetMap[m.machine_name]?.process_name || "--",
         output: outputMap[m.machine_name] ?? "--",
-        efficiency: effMap[m.machine_name] ?? "--",
+        availability: availMap[m.machine_name] ?? "--",
         cycleTime: cycleMap[m.machine_name] ?? "--",
       }));
 
