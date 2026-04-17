@@ -121,12 +121,11 @@ const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
                 if (measurementName === "status_tb") {
                     const statusStr = data.fields?.Status;
                     if (statusStr) {
-                                                // 1. เขียนลง MSSQL (ต้องบวก 7 ชั่วโมงเพราะ MSSQL เก็บเวลา Local ไทยตรงๆ แกล้งเป็น UTC)
+                                                // 1. เขียนลง MSSQL 
                         // ตรวจสอบว่า Time เป็น UTC (ABR) หรือ Local (AHV)
-                        // ถ้าระยะเวลาใกล้เคียงกับเวลาปัจจุบัน (True UTC) ให้บวก 7 ชั่วโมง
-                        // แต่ถ้าล่วงหน้าไปแล้วราวๆ 7 ชั่วโมง (เพราะ AHV ส่งเป็นเวลาไทยโดยตรง) ไม่ต้องบวกเพิ่ม
+                        const isABR = machineName.startsWith("ABR");
                         let thaiDataTimeMs = dataTime.getTime();
-                        if (thaiDataTimeMs - Date.now() < 3 * 3600 * 1000) {
+                        if (isABR) {
                             thaiDataTimeMs += 7 * 60 * 60 * 1000; // ABR: Convert UTC to Local Thai Time
                         }
                         const thaiDataTime = new Date(thaiDataTimeMs);
@@ -136,7 +135,8 @@ const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
                                 data: {
                                     Datetime: thaiDataTime,
                                     MC: machineName,
-                                    MCStatus: statusStr
+                                    MCStatus: statusStr,
+                                    UTC_Time: dataTime // 🆕 เก็บเวลา UTC เดิมไว้เพื่อประวัติที่ชัดเจน
                                 }
                             });
                             // ✅ [Phase 2] Feed live status into In-Memory OEE Stopwatch
@@ -183,12 +183,10 @@ const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
                 } else if (measurementName === "alarm_tb") {
                     const alarmStr = data.fields?.Alarm;
                     if (alarmStr) {
-                                                // 1. เขียนลง MSSQL (ต้องบวก 7 ชั่วโมงเพราะ MSSQL เก็บเวลา Local ไทยตรงๆ แกล้งเป็น UTC)
-                        // ตรวจสอบว่า Time เป็น UTC (ABR) หรือ Local (AHV)
-                        // ถ้าระยะเวลาใกล้เคียงกับเวลาปัจจุบัน (True UTC) ให้บวก 7 ชั่วโมง
-                        // แต่ถ้าล่วงหน้าไปแล้วราวๆ 7 ชั่วโมง (เพราะ AHV ส่งเป็นเวลาไทยโดยตรง) ไม่ต้องบวกเพิ่ม
+                                                // 1. เขียนลง MSSQL 
+                        const isABR = machineName.startsWith("ABR");
                         let thaiDataTimeMs = dataTime.getTime();
-                        if (thaiDataTimeMs - Date.now() < 3 * 3600 * 1000) {
+                        if (isABR) {
                             thaiDataTimeMs += 7 * 60 * 60 * 1000; // ABR: Convert UTC to Local Thai Time
                         }
                         const thaiDataTime = new Date(thaiDataTimeMs);
@@ -198,7 +196,8 @@ const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
                                 data: {
                                     Datetime: thaiDataTime,
                                     MC: machineName,
-                                    MCAlarm: alarmStr
+                                    MCAlarm: alarmStr,
+                                    UTC_Time: dataTime // 🆕 เก็บเวลา UTC เดิมไว้
                                 }
                             });
                         } catch (e) {

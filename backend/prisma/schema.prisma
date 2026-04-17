@@ -222,6 +222,7 @@ model tb_MCStatus {
   Datetime DateTime
   MC       String   @db.NVarChar(50)
   MCStatus String   @db.NVarChar(50)
+  UTC_Time DateTime?
 
   @@index([Datetime])
 }
@@ -231,6 +232,7 @@ model tb_MCAlarm {
   Datetime DateTime
   MC       String   @db.NVarChar(50)
   MCAlarm String   @db.NVarChar(50)
+  UTC_Time DateTime?
 
   @@index([Datetime])
 }
