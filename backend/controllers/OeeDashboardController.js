@@ -291,14 +291,28 @@ module.exports = {
             });
 
             // }
-            // ดึง CT และ Eff — ใช้ cache ถ้าดูวันนี้
+            // 🆕 [Phase 8] ดึง Availability Actual
+            let availabilityActual = 0;
             let cycleTimeActual = 0;
-            let efficiencyActual = 0;
 
-            if (cachedData) {
-                cycleTimeActual = cachedData.overall.avgCycleTime || 0;
-                efficiencyActual = cachedData.overall.totalEfficiency || 0;
+            if (isToday) {
+                // วันนี้: CT จาก Cache, Availability จาก MemoryOeeService
+                if (cachedData) {
+                    cycleTimeActual = cachedData.overall.avgCycleTime || 0;
+                }
+                
+                const memoryOeeService = require("../services/memoryOeeService");
+                const { calcAvailability } = require("../services/oeeCalcService");
+                const { runTimeSec, excludedSec, totalSec } = memoryOeeService.getDurationsNow(machine_name, calculationTime);
+                availabilityActual = calcAvailability(runTimeSec, excludedSec, totalSec);
+
+                // ปรับ Target ปัจจุบัน: ชดเชย excluded time ไม่ให้เป้าหมายวิ่งไปในช่วงเบรค
+                if (validSeconds > 0) {
+                    const ratio = Math.max(0, validSeconds - excludedSec) / validSeconds;
+                    outputTargetAccumCurrent = Math.round(outputTargetAccumCurrent * ratio);
+                }
             } else {
+                // วันเก่า: Priority อ่าน Availability -> Fallback Efficiency
                 const cycleTimeActualDB = await prisma.tb_cycle_time_actual.findFirst({
                     where: { machine_name, date: targetDate },
                 });
@@ -306,11 +320,18 @@ module.exports = {
                     cycleTimeActual = cycleTimeActualDB.cycle_time;
                 }
 
-                const effActualDB = await prisma.tb_efficiency_actual.findFirst({
+                const availRow = await prisma.tb_availability_actual.findFirst({
                     where: { machine_name, date: targetDate },
                 });
-                if (effActualDB && effActualDB.eff_actual) {
-                    efficiencyActual = effActualDB.eff_actual;
+                if (availRow && availRow.avail_actual != null) {
+                    availabilityActual = availRow.avail_actual;
+                } else {
+                    const effActualDB = await prisma.tb_efficiency_actual.findFirst({
+                        where: { machine_name, date: targetDate },
+                    });
+                    if (effActualDB && effActualDB.eff_actual != null) {
+                        availabilityActual = effActualDB.eff_actual;
+                    }
                 }
             }
 
@@ -343,8 +364,8 @@ module.exports = {
                 outputActual: outputActualSum,
                 cycleTimeTarget: outputTargetDB.cycle_time_target,
                 cycleTimeActual: parseFloat(cycleTimeActual.toFixed(2)),
-                efficiencyTarget: outputTargetDB.eff_target,
-                efficiencyActual: parseFloat(efficiencyActual.toFixed(2)),
+                availabilityTarget: outputTargetDB.eff_target,
+                availabilityActual: parseFloat(availabilityActual.toFixed(2)),
                 Achieve: parseFloat(achieve.toFixed(2)),
                 oee: dataOee ? dataOee.oee_value : 0,
                 oeeDate: dataOee ? dataOee.date : null
@@ -453,22 +474,35 @@ module.exports = {
             });
 
             // ใช้ cache ถ้าดูวันนี้
-            let ctActualDB, effActualDB;
+            let ctActualDB;
             const cachedData = isToday ? cacheService.getFullDay(machine_name) : null;
             if (cachedData) {
                 ctActualDB = { machine_name, date: targetDate };
-                effActualDB = { machine_name, date: targetDate };
                 for (const h of SHIFT_HOURS) {
                     ctActualDB[`cycle_${h}`] = cachedData.cycleTime[`cycle_${h}`] || 0;
-                    effActualDB[`eff_${h}`] = cachedData.efficiency[`eff_${h}`] || 0;
                 }
             } else {
                 ctActualDB = await prisma.tb_cycle_time_actual.findFirst({
                     where: { machine_name, date: targetDate },
                 });
-                effActualDB = await prisma.tb_efficiency_actual.findFirst({
+            }
+
+            // 🆕 [Phase 8] Priority Read: Availability -> Fallback to Efficiency
+            let availabilityArray = [];
+            if (isToday) {
+                 availabilityArray = cacheService.getAvailability(machine_name);
+            } else {
+                const availRow = await prisma.tb_availability_actual.findFirst({
                     where: { machine_name, date: targetDate },
                 });
+                if (availRow) {
+                    availabilityArray = SHIFT_HOURS.map(h => availRow[`avail_${h}`] || 0);
+                } else {
+                    const effRow = await prisma.tb_efficiency_actual.findFirst({
+                        where: { machine_name, date: targetDate },
+                    });
+                    availabilityArray = SHIFT_HOURS.map(h => effRow ? (effRow[`eff_${h}`] || 0) : 0);
+                }
             }
 
             // ✅ Fix: current hour CT → InfluxDB เป็น source of truth (ต้องอยู่นอก else เพื่อให้ทำงานทั้งกรณี cache และ MSSQL)
@@ -483,11 +517,11 @@ module.exports = {
 
             let cycleTimeActual = [];
             let cycleTimeTarget = [];
-            let efficiencyActual = [];
-            let efficiencyTarget = [];
+            let availabilityActual = availabilityArray;
+            let availabilityTarget = [];
 
             const targetCTValue = outputTargetDB ? outputTargetDB.cycle_time_target : 0;
-            const targetEffValue = outputTargetDB ? outputTargetDB.eff_target : 0;
+            const targetAvailValue = outputTargetDB ? outputTargetDB.eff_target : 0;
 
             for (const h of SHIFT_HOURS) {
                 // CT Actual
@@ -497,20 +531,16 @@ module.exports = {
                 // CT Target (ค่าเดียวกันทุกชม.)
                 cycleTimeTarget.push(targetCTValue);
 
-                // Eff Actual
-                const effAct = effActualDB ? (effActualDB[`eff_${h}`] || 0) : 0;
-                efficiencyActual.push(effAct);
-
-                // Eff Target (ค่าเดียวกันทุกชม.)
-                efficiencyTarget.push(targetEffValue);
+                // Avail Target (ค่าเดียวกันทุกชม.)
+                availabilityTarget.push(targetAvailValue);
             }
 
             res.json({
                 hours: SHIFT_HOURS,
                 cycleTimeActual,
                 cycleTimeTarget,
-                efficiencyActual,
-                efficiencyTarget
+                availabilityActual,
+                availabilityTarget
             });
 
         } catch (err) {
