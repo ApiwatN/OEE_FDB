@@ -259,14 +259,17 @@ async function fastPollAndEmit() {
                     if (i < currentShiftIndex) {
                         overallAccumTarget += targetVal;
                     } else {
-                        const minutesPassed = (now - new Date(start)) / 1000 / 60;
-                        const ratio = Math.min(minutesPassed / 60, 1);
+                        // 🆕 [Phase 7] Target ณ เวลาปัจจุบัน: ใช้ Effective Time แทน Total Elapsed
+                        const ratio = Math.min(adjustedElapsedSeconds / 3600, 1);
                         overallAccumTarget += Math.round(targetVal * ratio);
                     }
                 }
             }
 
             const overallAchieve = overallAccumTarget > 0 ? (totalOutput / overallAccumTarget) * 100 : 0;
+
+            // 🆕 [Phase 7] Get Hourly Availability from Cache array
+            const hourlyAvailability = cacheService.getAvailability(machineName);
 
             // Build full production payload
             const machinePayload = {
@@ -291,6 +294,7 @@ async function fastPollAndEmit() {
                         output: hourlyOutput,
                         cycleTime: hourlyCycleTime,
                         efficiency: hourlyEfficiency,
+                        availability: hourlyAvailability, // 🆕 Add availability array
                         outputAccum: hourlyOutputAccum,
                     },
                 },
@@ -646,6 +650,10 @@ async function _slowPollAndEmitInner() {
                 ngQty: mCacheConfig.ng_mode === "over_reject" ? 0 : ngQty,
                 over_reject_qty: mCacheConfig.ng_mode === "over_reject" ? ngQty : undefined,
                 oeeMode: mode,
+                // 🆕 [Phase 7] ส่ง hourly array กลับไปเพื่ออัปเดต Availability แกนขวา
+                hourly: {
+                    availability: cacheService.getAvailability(machineName)
+                }
             };
 
             // ✅ For manual machines, prevent overwriting yesterday's OEE with today's incomplete OEE
