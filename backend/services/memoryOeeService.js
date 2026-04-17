@@ -189,9 +189,18 @@ async function hydrateFromMssql(shiftDate) {
         await prisma.$disconnect();
 
         // จัดกลุ่มตามเครื่อง
+        const machinesWithTodayRecords = new Set(records.map(r => r.MC));
+        const STALE_CARRYOVER_MS = 24 * 60 * 60 * 1000; // 24 hours
+
         const byMachine = {};
         for (const row of carryoverRows) {
             if (!byMachine[row.MC]) byMachine[row.MC] = [];
+            // Stale Carryover Guard: ถ้า carry-over เก่าเกิน 24h และไม่มี record วันนี้
+            // → ไม่ใส่ carryover เพื่อป้องกัน Plan_Stop เก่า monopolize excluded time
+            const carryoverAgeMs = shiftStartThai - new Date(row.Datetime);
+            if (!machinesWithTodayRecords.has(row.MC) && carryoverAgeMs > STALE_CARRYOVER_MS) {
+                continue;
+            }
             // ใส่ carryover เป็น record แรก โดยเริ่มนับจาก shiftStart
             byMachine[row.MC].push({ Datetime: shiftStartThai, MCStatus: row.MCStatus });
         }

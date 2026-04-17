@@ -182,9 +182,20 @@ async function fastPollAndEmit() {
             }
             const adjustedElapsedSeconds = Math.max(0, elapsedSeconds - currentHourExcluded);
 
+            // CT Fallback: ถ้า MQTT memory ยังไม่มี CT ชั่วโมงปัจจุบัน (ต้นชั่วโมง / server restart)
+            // → ใช้ CT ชั่วโมงก่อนหน้า จาก cache หรือ cycle_time_target แทน
+            const targetEntry = cacheService.getTarget(machineName);
+            const targets = targetEntry?.target || {};
+            const prevHour = currentShiftIndex > 0 ? SHIFT_HOURS[currentShiftIndex - 1] : null;
+            const cachedPrevCt = (prevHour && cached) ? (cached.cycleTime[`cycle_${prevHour}`] || 0) : 0;
+            const targetCt = targetEntry?.target?.cycle_time_target || 0;
+            const effectiveCt = currentData.avg_cycle_time > 0
+                ? currentData.avg_cycle_time
+                : (cachedPrevCt > 0 ? cachedPrevCt : targetCt);
+
             // Current hour efficiency
-            const theoreticalMax = currentData.avg_cycle_time > 0 && adjustedElapsedSeconds > 0
-                ? adjustedElapsedSeconds / currentData.avg_cycle_time : 0;
+            const theoreticalMax = effectiveCt > 0 && adjustedElapsedSeconds > 0
+                ? adjustedElapsedSeconds / effectiveCt : 0;
             const currentEfficiency = theoreticalMax > 0
                 ? (currentData.output_count / theoreticalMax) * 100 : 0;
 
@@ -205,9 +216,9 @@ async function fastPollAndEmit() {
                     ct = cached ? (cached.cycleTime[`cycle_${h}`] || 0) : 0;
                     eff = cached ? (cached.efficiency[`eff_${h}`] || 0) : 0;
                 } else if (i === currentShiftIndex) {
-                    // Current hour → from InfluxDB
+                    // Current hour → from InfluxDB (CT with fallback to prev hour / target)
                     out = currentData.output_count;
-                    ct = parseFloat(currentData.avg_cycle_time.toFixed(2));
+                    ct = parseFloat(effectiveCt.toFixed(2));
                     eff = parseFloat(currentEfficiency.toFixed(2));
                 }
 
@@ -234,8 +245,7 @@ async function fastPollAndEmit() {
             const overallAvgCt = totalOutputForCt > 0 ? sumCtWeighted / totalOutputForCt : 0;
 
             // Target & Achieve (from cache — no MSSQL)
-            const targetEntry = cacheService.getTarget(machineName);
-            const targets = targetEntry?.target || {};
+            // Note: targetEntry and targets are already defined above for CT fallback
 
             // Overall efficiency — only count hours with target > 0
             let totalValidSeconds = 0;
@@ -277,7 +287,7 @@ async function fastPollAndEmit() {
                     hour: thColumn,
                     shiftIndex: currentShiftIndex,
                     output: currentData.output_count,
-                    cycleTime: parseFloat(currentData.avg_cycle_time.toFixed(2)),
+                    cycleTime: parseFloat(effectiveCt.toFixed(2)),
                     efficiency: parseFloat(currentEfficiency.toFixed(2)),
                     stationNg: currentData.station_ng || {}, // 🆕 Pass to frontend
                     live_status: currentData.live_status, // 🆕 Real-Time Status
@@ -505,8 +515,18 @@ async function _slowPollAndEmitInner() {
             ) t WHERE rn = 1
         `;
 
+        // Stale Carryover Guard: ถ้า carry-over เก่าเกิน 24h และไม่มี Status ใหม่วันนี้
+        // → ไม่ใช้ carry-over นั้น (ป้องกัน Plan_Stop เก่าทำให้ excluded = total → A = 0)
+        const STALE_CARRYOVER_MS = 24 * 60 * 60 * 1000; // 24 hours
+        const machinesWithTodayStatus = new Set(todayMcStatus.map(r => r.MC));
+
         const mcStatusByMachine = {};
         for (const row of carryOverRows) {
+            const carryoverAgeMs = shiftStart - new Date(row.Datetime);
+            if (!machinesWithTodayStatus.has(row.MC) && carryoverAgeMs > STALE_CARRYOVER_MS) {
+                // Stale carry-over with no today's records — skip to avoid false exclusion
+                continue;
+            }
             mcStatusByMachine[row.MC] = [{ MC: row.MC, Datetime: shiftStart, MCStatus: row.MCStatus }];
         }
         for (const rec of todayMcStatus) {

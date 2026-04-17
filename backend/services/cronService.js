@@ -18,7 +18,7 @@ const {
     getShiftIndex,
     getCurrentHourBoundaries,
 } = require("../utils/timeUtils");
-const { calcMcStatusDurations, calcMcStatusDurationsPerHour, calcAvailability, calcPerformance, getCTCalcMode, getNgMode } = require("./oeeCalcService");
+const { calcMcStatusDurations, calcMcStatusDurationsPerHour, calcAvailability, calcPerformance, getCTCalcMode, getNgMode, getMachineRunTimeMode } = require("./oeeCalcService");
 const dayjs = require("dayjs");
 const { generatePlanForMachine } = require("../controllers/PlanConfigController");
 
@@ -291,7 +291,7 @@ async function summarizeLastHour() {
 
         // 2.6 🆕 [Phase 6] Runtime + Availability per machine for the last hour
         try {
-            await upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetDate, Object.keys(machineData));
+            await upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetDate, Object.keys(machineData), machineData);
         } catch (e) {
             console.error("   ⚠️ Failed to upsert runtime/availability in summarizeLastHour:", e.message);
         }
@@ -360,8 +360,24 @@ async function upsertHourlyField(tableName, machineName, date, fieldName, value,
  * @param {Date}   targetDate
  * @param {string[]} machineNames - list to process (from machineData keys in summarizeLastHour)
  */
-async function upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetDate, machineNames) {
+async function upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetDate, machineNames, influxHourData = null) {
     if (!machineNames || machineNames.length === 0) return;
+
+    // Auto-fetch InfluxDB data for output_based machines if not provided by caller
+    let resolvedInfluxData = influxHourData;
+    if (!resolvedInfluxData) {
+        const hasOutputBased = machineNames.some(m => getMachineRunTimeMode(m) === "output_based");
+        if (hasOutputBased) {
+            try {
+                resolvedInfluxData = await influxService.queryAllMachinesForHour(start, end);
+            } catch (e) {
+                console.error("   ⚠️ [Phase 6] InfluxDB query for output_based failed:", e.message);
+                resolvedInfluxData = {};
+            }
+        } else {
+            resolvedInfluxData = {};
+        }
+    }
 
     // TH offset: DB stores Thai local time
     const TH_OFFSET_MS = 7 * 60 * 60 * 1000;
@@ -417,7 +433,17 @@ async function upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetD
             const isHourActive = !targetRow || ((targetRow[`target_${thColumn}`] || 0) > 0);
             const totalSeconds = isHourActive ? 3600 : 0;
 
-            const { runTimeSeconds, excludedSeconds } = calcMcStatusDurations(mcRecords, startTH, endTH);
+            let { runTimeSeconds, excludedSeconds } = calcMcStatusDurations(mcRecords, startTH, endTH);
+
+            // 🆕 output_based override: เครื่องที่ไม่ใช้ MCStatus ในการคำนวณ runtime → ใช้ output × avgCT แทน
+            const modeRunTime = getMachineRunTimeMode(machineName);
+            if (modeRunTime === "output_based") {
+                const hourData = resolvedInfluxData[machineName] || {};
+                const hourOutput = hourData.output_count || 0;
+                const hourAvgCt = hourData.avg_cycle_time || 0;
+                runTimeSeconds = hourOutput * hourAvgCt;
+                excludedSeconds = 0; // output-based machines ไม่มี excluded time
+            }
 
             // Availability = runTime / (total - excluded) × 100
             const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalSeconds);
