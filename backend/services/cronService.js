@@ -1459,21 +1459,41 @@ async function syncEventsFromInfluxDb(startUTC, endUTC) {
     const statusData = await influxService.queryStatusRange(startUTC, endUTC);
     const alarmData = await influxService.queryAlarmRange(startUTC, endUTC);
 
+    const TH_OFFSET_MS = 7 * 60 * 60 * 1000;
+
+    // MSSQL expects Thai Local Time physically stored in Datetime column.
+    // So query range must also shift +7
+    const startTH = new Date(startUTC.getTime() + TH_OFFSET_MS);
+    const endTH = new Date(endUTC.getTime() + TH_OFFSET_MS);
+
     let statusRecovered = 0;
     let alarmRecovered = 0;
 
+    const getThaiTime = (utcDate) => {
+        let ms = utcDate.getTime();
+        // If it's true UTC (ABR), it's close to Date.now (or past).
+        // If it's already Thai time (AHV), influx parsed it as future (+7 hours).
+        if (ms - Date.now() < 3 * 3600 * 1000) {
+            ms += TH_OFFSET_MS;
+        }
+        return new Date(ms);
+    };
+
     if (statusData.length > 0) {
         const existingStatus = await prisma.tb_MCStatus.findMany({
-            where: { Datetime: { gte: startUTC, lt: endUTC } },
+            where: { Datetime: { gte: startTH, lt: endTH } },
             select: { MC: true, Datetime: true }
         });
         const existingSet = new Set(existingStatus.map(r => `${r.MC}_${r.Datetime.getTime()}`));
 
-        const newStatus = statusData.filter(d => !existingSet.has(`${d.machine_name}_${d.time.getTime()}`));
+        const newStatus = statusData.filter(d => {
+            return !existingSet.has(`${d.machine_name}_${getThaiTime(d.time).getTime()}`);
+        });
+
         if (newStatus.length > 0) {
             await prisma.tb_MCStatus.createMany({
                 data: newStatus.map(d => ({
-                    Datetime: d.time,
+                    Datetime: getThaiTime(d.time),
                     MC: d.machine_name,
                     MCStatus: d.status
                 }))
@@ -1484,16 +1504,19 @@ async function syncEventsFromInfluxDb(startUTC, endUTC) {
 
     if (alarmData.length > 0) {
         const existingAlarm = await prisma.tb_MCAlarm.findMany({
-            where: { Datetime: { gte: startUTC, lt: endUTC } },
+            where: { Datetime: { gte: startTH, lt: endTH } },
             select: { MC: true, Datetime: true }
         });
         const existingSet = new Set(existingAlarm.map(r => `${r.MC}_${r.Datetime.getTime()}`));
 
-        const newAlarm = alarmData.filter(d => !existingSet.has(`${d.machine_name}_${d.time.getTime()}`));
+        const newAlarm = alarmData.filter(d => {
+            return !existingSet.has(`${d.machine_name}_${getThaiTime(d.time).getTime()}`);
+        });
+
         if (newAlarm.length > 0) {
             await prisma.tb_MCAlarm.createMany({
                 data: newAlarm.map(d => ({
-                    Datetime: d.time,
+                    Datetime: getThaiTime(d.time),
                     MC: d.machine_name,
                     MCAlarm: d.alarm
                 }))

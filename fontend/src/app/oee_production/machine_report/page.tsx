@@ -8,10 +8,11 @@ dayjs.extend(utc);
 import * as XLSX from "xlsx-js-style";
 import { io as socketIO } from "socket.io-client";
 import config from "@/app/config";
+import LoadingSpinner from "@/app/components/LoadingSpinner";
 
 export default function Page() {
     return (
-        <Suspense fallback={<div>Loading Report...</div>}>
+        <Suspense fallback={<LoadingSpinner message="Loading Report..." />}>
             <style>{`
                 .hide-scrollbar::-webkit-scrollbar:horizontal {
                     height: 0px;
@@ -177,6 +178,7 @@ function MachineReportPage() {
                         // Auto mode: อัปเดต NG/Quality/OEE realtime
                         ...(isAuto ? {
                             ng_qty: socketData.daily.ngQty ?? 0,
+                            over_reject_qty: socketData.daily.over_reject_qty,
                             quality: socketData.daily.quality,
                             oee: socketData.daily.oee,
                         } : {}),
@@ -292,12 +294,13 @@ function MachineReportPage() {
         });
 
         groups.forEach(g => {
+            g.ng_mode = g.machines[0]?.ng_mode || "visual_ng";
             const summaryData: any = {};
             for (let d = 1; d <= 31; d++) {
                 const dateKey = `${selectedMonth}-${String(d).padStart(2, '0')}`;
                 const dayData: any = { has_production: false };
                 
-                const rowsKeys = ["output_target", "output_actual", "eff_target", "eff_actual", "cycle_target", "cycle_actual", "ng_qty", "availability", "performance", "quality", "oee"];
+                const rowsKeys = ["output_target", "machine_output_actual", "output_actual", "eff_target", "eff_actual", "cycle_target", "cycle_actual", "over_reject_qty", "ng_qty", "availability", "performance", "quality", "oee"];
                 rowsKeys.forEach(key => {
                     let sum = 0, countForAverage = 0, totalCount = 0;
                     g.machines.forEach((m: any) => {
@@ -317,7 +320,7 @@ function MachineReportPage() {
                         }
                     });
 
-                    if (["output_actual", "output_target", "ng_qty"].includes(key)) {
+                    if (["output_actual", "machine_output_actual", "output_target", "ng_qty", "over_reject_qty"].includes(key)) {
                         dayData[key] = sum > 0 ? sum : "-";
                     } else if (["eff_target", "cycle_target"].includes(key)) {
                         dayData[key] = totalCount > 0 ? (sum / totalCount) : "-";
@@ -362,21 +365,36 @@ function MachineReportPage() {
         // 2. Data Rows
         let currentRowIndex = 5; // Start after summary (4 rows) and header (1 row) -> Index 5
 
-        const rowsTemplate = [
-            { label: "Output (Target)", key: "output_target", isPercent: false },
-            { label: "Output", key: "output_actual", isPercent: false },
-            { label: "Efficiency (Target)", key: "eff_target", isPercent: true },
-            { label: "Efficiency", key: "eff_actual", isPercent: true },
-            { label: "Cycle time (Target)", key: "cycle_target", isPercent: false },
-            { label: "Cycle time", key: "cycle_actual", isPercent: false },
-            { label: "NG Qty", key: "ng_qty", isPercent: false },
-            { label: "Availability", key: "availability", isPercent: true },
-            { label: "Performance", key: "performance", isPercent: true },
-            { label: "Quality", key: "quality", isPercent: true },
-            { label: "OEE", key: "oee", isPercent: true },
-        ];
-
         groupedReportData.forEach((group) => {
+            const mNgMode = group.ng_mode || "visual_ng";
+            const rowsTemplate = mNgMode === "over_reject" ? [
+                { label: "Output (Target)", key: "output_target", isPercent: false },
+                { label: "Machine Output", key: "machine_output_actual", isPercent: false },
+                { label: "Output", key: "output_actual", isPercent: false },
+                { label: "Efficiency (Target)", key: "eff_target", isPercent: true },
+                { label: "Efficiency", key: "eff_actual", isPercent: true },
+                { label: "Cycle time (Target)", key: "cycle_target", isPercent: false },
+                { label: "Cycle time", key: "cycle_actual", isPercent: false },
+                { label: "Over Reject", key: "over_reject_qty", isPercent: false },
+                { label: "NG Qty", key: "ng_qty", isPercent: false },
+                { label: "Availability", key: "availability", isPercent: true },
+                { label: "Performance", key: "performance", isPercent: true },
+                { label: "Quality", key: "quality", isPercent: true },
+                { label: "OEE", key: "oee", isPercent: true },
+            ] : [
+                { label: "Output (Target)", key: "output_target", isPercent: false },
+                { label: "Output", key: "output_actual", isPercent: false },
+                { label: "Efficiency (Target)", key: "eff_target", isPercent: true },
+                { label: "Efficiency", key: "eff_actual", isPercent: true },
+                { label: "Cycle time (Target)", key: "cycle_target", isPercent: false },
+                { label: "Cycle time", key: "cycle_actual", isPercent: false },
+                { label: "NG Qty", key: "ng_qty", isPercent: false },
+                { label: "Availability", key: "availability", isPercent: true },
+                { label: "Performance", key: "performance", isPercent: true },
+                { label: "Quality", key: "quality", isPercent: true },
+                { label: "OEE", key: "oee", isPercent: true },
+            ];
+
             // Render individual machines
             group.machines.forEach((machine: any) => {
                 const { machine_name, model_info, daily_data } = machine;
@@ -565,7 +583,7 @@ function MachineReportPage() {
         if (key.includes("target")) {
             return latestTarget > 0 ? latestTarget : "-";
         }
-        if (["output_actual", "ng_qty"].includes(key)) {
+        if (["output_actual", "machine_output_actual", "ng_qty", "over_reject_qty"].includes(key)) {
             return sum > 0 ? sum : "-";
         }
         if (count > 0) {
@@ -598,9 +616,13 @@ function MachineReportPage() {
 
     const renderCell = (val: any, isPercent: boolean = false, showZero: boolean = false) => {
         if (val === undefined || val === null) return "\u00A0";
+        if (val === "-") return "-";
         if (val === 0 && !showZero) return "\u00A0";
-        if (isPercent) return `${Number(val).toLocaleString("en-US")}%`;
-        return Number(val).toLocaleString("en-US");
+        const num = Number(val);
+        if (isNaN(num)) return "-";
+        if (num === 0 && !showZero) return "\u00A0";
+        if (isPercent) return `${num.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
+        return num.toLocaleString("en-US");
     };
 
     return (
@@ -653,7 +675,7 @@ function MachineReportPage() {
             </div>
             <div className="card-body p-0">
                 {loading ? (
-                    <div className="text-center p-5"><div className="spinner-border text-primary"></div></div>
+                    <LoadingSpinner message="Loading Report..." />
                 ) : (
                     // 🆕 Unified Sticky Table Layout
                     <div className="table-wrapper" style={{ overflowX: "auto", overflowY: "auto", height: "calc(100vh - 140px)", border: "1px solid #dee2e6", background: "white" }}>
@@ -676,7 +698,22 @@ function MachineReportPage() {
                             </thead>
                             <tbody>
                                 {groupedReportData.map((group, gIdx) => {
-                                    const rows = [
+                                    const mNgMode = group.ng_mode || "visual_ng";
+                                    const rows = mNgMode === "over_reject" ? [
+                                        { label: "Output (Target)", key: "output_target", isPercent: false, showZero: true },
+                                        { label: "Machine Output", key: "machine_output_actual", isPercent: false, showZero: true },
+                                        { label: "Output", key: "output_actual", isPercent: false, showZero: true },
+                                        { label: "Efficiency (Target)", key: "eff_target", isPercent: true, showZero: true },
+                                        { label: "Efficiency", key: "eff_actual", isPercent: true, showZero: true },
+                                        { label: "Cycle time (Target)", key: "cycle_target", isPercent: false, showZero: true },
+                                        { label: "Cycle time", key: "cycle_actual", isPercent: false, showZero: true },
+                                        { label: "Over Reject", key: "over_reject_qty", isPercent: false, showZero: true },
+                                        { label: "NG Qty", key: "ng_qty", isPercent: false, showZero: true },
+                                        { label: "Availability", key: "availability", isPercent: true, showZero: true },
+                                        { label: "Performance", key: "performance", isPercent: true, showZero: true },
+                                        { label: "Quality", key: "quality", isPercent: true, showZero: true },
+                                        { label: "OEE", key: "oee", isPercent: true, showZero: true }
+                                    ] : [
                                         { label: "Output (Target)", key: "output_target", isPercent: false, showZero: true },
                                         { label: "Output", key: "output_actual", isPercent: false, showZero: true },
                                         { label: "Efficiency (Target)", key: "eff_target", isPercent: true, showZero: true },
@@ -743,12 +780,13 @@ function MachineReportPage() {
                                                                     if (row.key === "output_actual" && val && val > 0) {
                                                                         cellContent = renderCell(val, row.isPercent);
                                                                     } else {
-                                                                        cellContent = "\u00A0";
+                                                                        cellContent = "-";
                                                                     }
                                                                 } else if (dayEmpty) {
-                                                                    cellContent = "\u00A0";
-                                                                } else if (val === undefined || val === null || val === "") {
                                                                     cellContent = "-";
+                                                                } else if (val === undefined || val === null || val === "") {
+                                                                    // Day has production but this field has no value — show 0 instead of -
+                                                                    cellContent = row.isPercent ? "0%" : "0";
                                                                 } else {
                                                                     cellContent = renderCell(val, row.isPercent, row.showZero);
                                                                 }
@@ -804,7 +842,7 @@ function MachineReportPage() {
                                                                 height: "30px",
                                                                 boxSizing: "border-box",
                                                                 padding: "0 4px",
-                                                                background: "#fff2cc",
+                                                                background: "#fff9e6",
                                                                 color: "#b98300",
                                                                 fontWeight: "bold",
                                                                 whiteSpace: "nowrap"

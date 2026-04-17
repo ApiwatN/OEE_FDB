@@ -7,10 +7,11 @@ import dayjs from "dayjs";
 import config from "@/app/config";
 import MyModal from "../components/MyModal";
 import { getSocket } from "@/app/lib/socketManager";
+import LoadingSpinner from "@/app/components/LoadingSpinner";
 
 export default function Page() {
     return (
-        <Suspense fallback={<div>Loading...</div>}>
+        <Suspense fallback={<LoadingSpinner message="Loading..." />}>
             <UpdateOeePage />
         </Suspense>
     );
@@ -382,7 +383,7 @@ function UpdateOeePage() {
                             <p className="mt-3">Select Area to view OEE settings</p>
                         </div>
                     ) : loading ? (
-                        <div className="text-center py-4"><i className="fa fa-spinner fa-spin me-2"></i>Loading...</div>
+                        <LoadingSpinner />
                     ) : (
                         <div className="rounded-3 shadow-sm" style={{ background: "#fff", border: "1px solid #e0e0e0", overflow: "hidden" }}>
                             <div className="table-responsive">

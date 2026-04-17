@@ -6,10 +6,11 @@ import Swal from "sweetalert2";
 import axios from "axios";
 import dayjs from "dayjs";
 import config from "@/app/config";
+import LoadingSpinner from "@/app/components/LoadingSpinner";
 
 export default function Page() {
     return (
-        <Suspense fallback={<div>Loading...</div>}>
+        <Suspense fallback={<LoadingSpinner message="Loading..." />}>
             <HolidayCalendarPage />
         </Suspense>
     );
@@ -197,7 +198,7 @@ function HolidayCalendarPage() {
 
                             <div className="p-3">
                                 {loading ? (
-                                    <div className="text-center py-5"><i className="fa fa-spinner fa-spin me-2"></i>Loading...</div>
+                                    <LoadingSpinner />
                                 ) : (
                                     <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: "4px" }}>
                                         {/* Day headers */}

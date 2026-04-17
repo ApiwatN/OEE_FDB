@@ -1,6 +1,14 @@
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const dayjs = require("dayjs");
+const fs = require("fs");
+const path = require("path");
+
+// Load config-driven NG mode per machine type
+const machineCalcConfig = JSON.parse(fs.readFileSync(path.join(__dirname, "../config/machine_calc.json"), "utf-8"));
+const ngModes = machineCalcConfig.ng_modes || {};
+const defaultNgMode = ngModes["default"] || "visual_ng";
+const getNgMode = (machineType) => ngModes[machineType] || defaultNgMode;
 
 module.exports = {
     getMachineReport: async (req, res) => {
@@ -40,7 +48,7 @@ module.exports = {
                 },
             };
 
-            const [targets, actuals, effs, cycles, oees, holidays, configs] = await Promise.all([
+            const [targets, actuals, effs, cycles, oees, holidays, configs, ngs] = await Promise.all([
                 prisma.tb_output_target.findMany({ where: whereClause }),
                 prisma.tb_output_actual.findMany({ where: whereClause }),
                 prisma.tb_efficiency_actual.findMany({ where: whereClause }),
@@ -57,12 +65,14 @@ module.exports = {
                     where: { machine_name: { in: machineNames } },
                     select: { machine_name: true, oee_mode: true },
                 }),
+                prisma.tb_machine_ng.findMany({ where: whereClause }),
             ]);
             const modeMap = new Map(configs.map(c => [c.machine_name, c.oee_mode || "manual"]));
 
             // 3. Aggregate Data
             const reportData = machines.map((machine) => {
                 const mName = machine.machine_name;
+                const ngMode = getNgMode(machine.machine_type);
                 const dailyData = {};
 
                 // Initialize daily data structure for the whole month? 
@@ -79,13 +89,9 @@ module.exports = {
                 // For now, let's pick the latest one or distinct.
                 const latestTarget = mTargets.sort((a, b) => b.date - a.date)[0];
 
-                // ✅ Phase 1: Collect ALL distinct model names from both Target and Actual
+                // ✅ model_name = actual model produced (from tb_output_actual / InfluxDB only)
                 const modelNamesSet = new Set();
-                // From targets
-                mTargets.forEach(t => { if (t.model_name) modelNamesSet.add(t.model_name); });
-                // From actuals (Cron writes model_name from InfluxDB)
-                const mActuals = actuals.filter(a => a.machine_name === mName);
-                mActuals.forEach(a => { if (a.model_name) modelNamesSet.add(a.model_name); });
+                actuals.filter(a => a.machine_name === mName).forEach(a => { if (a.model_name) modelNamesSet.add(a.model_name); });
 
                 const allModelNames = [...modelNamesSet];
 
@@ -127,8 +133,26 @@ module.exports = {
                         a.actual_01, a.actual_02, a.actual_03, a.actual_04, a.actual_05, a.actual_06
                     ].reduce((sum, val) => sum + (val || 0), 0);
 
+                    dailyData[key].machine_output_actual = totalActual;
                     dailyData[key].output_actual = totalActual;
                 });
+
+                // --- Station NG Data (for over_reject) ---
+                const dailyNgTotals = {};
+                if (ngMode === "over_reject") {
+                    ngs.filter(ng => ng.machine_name === mName && ng.station_id === 0).forEach(ng => {
+                        const key = getDateKey(ng.date);
+                        const totalNg = [
+                            ng.ng_07, ng.ng_08, ng.ng_09, ng.ng_10, ng.ng_11, ng.ng_12,
+                            ng.ng_13, ng.ng_14, ng.ng_15, ng.ng_16, ng.ng_17, ng.ng_18,
+                            ng.ng_19, ng.ng_20, ng.ng_21, ng.ng_22, ng.ng_23, ng.ng_00,
+                            ng.ng_01, ng.ng_02, ng.ng_03, ng.ng_04, ng.ng_05, ng.ng_06
+                        ].reduce((sum, val) => sum + (val || 0), 0);
+                        
+                        if (!dailyNgTotals[key]) dailyNgTotals[key] = 0;
+                        dailyNgTotals[key] += totalNg;
+                    });
+                }
 
                 // --- Efficiency Actual ---
                 effs.filter(e => e.machine_name === mName).forEach(e => {
@@ -148,18 +172,45 @@ module.exports = {
                 oees.filter(o => o.machine_name === mName).forEach(o => {
                     const key = getDateKey(o.date);
                     if (!dailyData[key]) dailyData[key] = {};
-                    dailyData[key].ng_qty = o.ng_qty || 0;
+                    if (ngMode !== "over_reject") {
+                        dailyData[key].ng_qty = o.ng_qty || 0; // Only use Visual NG for non ABR machines
+                    }
                     dailyData[key].availability = o.availability || 0;
                     dailyData[key].performance = o.performance || 0;
                     dailyData[key].quality = o.quality || 0;
                     dailyData[key].oee = o.oee_value || 0;
                 });
 
+                // --- Calculate Over_Reject & Override Totals ---
+                Object.keys(dailyData).forEach(key => {
+                    if (ngMode === "over_reject") {
+                        const overReject = dailyNgTotals[key] || 0;
+                        dailyData[key].over_reject_qty = overReject;
+                        dailyData[key].ng_qty = 0; // Force NG Qty to 0
+                        const machineOut = dailyData[key].machine_output_actual || 0;
+                        dailyData[key].output_actual = Math.max(0, machineOut - overReject);
+                        
+                        // Force Quality to 100 if there's output
+                        if (machineOut > 0) {
+                            dailyData[key].quality = 100;
+                            dailyData[key].oee = ((dailyData[key].availability || 0) * (dailyData[key].performance || 0) * 100) / 10000;
+                        } else {
+                            dailyData[key].quality = 0;
+                            dailyData[key].oee = 0;
+                        }
+                    } else {
+                        // Ensure machine_output_actual is populated for standard mode
+                        dailyData[key].machine_output_actual = dailyData[key].output_actual;
+                    }
+                });
+
                 return {
                     machine_name: mName,
+                    machine_type: machine.machine_type || "Unknown",
                     model_info: modelInfo,
                     daily_data: dailyData,
                     oee_mode: modeMap.get(mName) || "manual",
+                    ng_mode: ngMode,
                     holidays: holidays
                         .filter(h => h.machine_name === mName)
                         .map(h => dayjs(h.holiday_date).format("YYYY-MM-DD")),

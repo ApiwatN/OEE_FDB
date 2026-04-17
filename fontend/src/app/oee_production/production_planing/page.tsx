@@ -7,10 +7,11 @@ import axios from "axios";
 import dayjs from "dayjs";
 import config from "@/app/config";
 import MyModal from "../components/MyModal";
+import LoadingSpinner from "@/app/components/LoadingSpinner";
 
 export default function Page() {
     return (
-        <Suspense fallback={<div>Loading...</div>}>
+        <Suspense fallback={<LoadingSpinner message="Loading..." />}>
             <ProductionPlanningPage />
         </Suspense>
     );
@@ -50,12 +51,10 @@ function ProductionPlanningPage() {
     const [editingMachine, setEditingMachine] = useState("");
     const [formData, setFormData] = useState({
         eff_target: "90", cycle_time_target: "4.2",
-        process_name: "", model_name: "", model_type: "",
+        process_name: "",
         active_hours: { ...DEFAULT_HOURS },
     });
-    const [modelTypes, setModelTypes] = useState<any[]>([]);
     const [processes, setProcesses] = useState<any[]>([]);
-    const [models, setModels] = useState<any[]>([]);
     const [configStartDate, setConfigStartDate] = useState(dayjs().add(1, "day").format("YYYY-MM-DD"));
 
     // ── Holiday Modal ──
@@ -146,7 +145,6 @@ function ProductionPlanningPage() {
                 hasConfig: !!cfg, eff_target: cfg?.eff_target || "-",
                 cycle_time_target: cfg?.cycle_time_target || "-",
                 pc_target: pcTarget, process_name: cfg?.process_name || "-",
-                model_name: cfg?.model_name || "-", model_type: cfg?.model_type || "-",
                 active_hours_count: activeCount, config: cfg,
             };
         });
@@ -285,24 +283,16 @@ function ProductionPlanningPage() {
         const machineInfo = machines.find(m => m.machine_name === machineName);
         const machineType = machineInfo?.machine_type || selectedType;
         try {
-            const [modelsRes, modelTypesRes] = await Promise.all([
-                axios.get(`${config.apiServer}/api/model/listModel`),
-                axios.get(`${config.apiServer}/api/model/listModelType`),
-            ]);
-            setModels(modelsRes.data.results || []);
-            setModelTypes(modelTypesRes.data.results || []);
-            if (machineType && machineType !== "all") {
-                const procRes = await axios.get(`${config.apiServer}/api/machine/listProcess/${machineType}`);
-                setProcesses(procRes.data.results || []);
-            }
+            const procRes = await axios.get(`${config.apiServer}/api/machine/listProcess/${machineType}`);
+            setProcesses(procRes.data.results || []);
         } catch (e) { console.error(e); }
 
         const cfg = allConfigs.get(machineName);
         if (cfg) {
             const ah = typeof cfg.active_hours === "string" ? JSON.parse(cfg.active_hours) : cfg.active_hours;
-            setFormData({ eff_target: String(cfg.eff_target), cycle_time_target: String(cfg.cycle_time_target), process_name: cfg.process_name || "", model_name: cfg.model_name || "", model_type: cfg.model_type || "", active_hours: ah || { ...DEFAULT_HOURS } });
+            setFormData({ eff_target: String(cfg.eff_target), cycle_time_target: String(cfg.cycle_time_target), process_name: cfg.process_name || "", active_hours: ah || { ...DEFAULT_HOURS } });
         } else {
-            setFormData({ eff_target: "90", cycle_time_target: "4.2", process_name: "", model_name: "", model_type: "", active_hours: { ...DEFAULT_HOURS } });
+            setFormData({ eff_target: "90", cycle_time_target: "4.2", process_name: "", active_hours: { ...DEFAULT_HOURS } });
         }
         setConfigStartDate(dayjs().format("YYYY-MM-DD"));
         showModal("modalConfig");
@@ -314,8 +304,7 @@ function ProductionPlanningPage() {
             await axios.post(`${config.apiServer}/api/planConfig/upsert`, {
                 machine_name: editingMachine, eff_target: Number(formData.eff_target),
                 cycle_time_target: Number(formData.cycle_time_target),
-                process_name: formData.process_name || null, model_name: formData.model_name || null,
-                model_type: formData.model_type || null, active_hours: formData.active_hours,
+                process_name: formData.process_name || null, active_hours: formData.active_hours,
             });
             Swal.fire({ icon: "success", title: "Save Successful", text: `Config saved + All existing plans updated`, showConfirmButton: false, timer: 2000 });
             hideModal("modalConfig");
@@ -569,8 +558,6 @@ function ProductionPlanningPage() {
                                             <th className="text-center">CT (s)</th>
                                             <th className="text-center">Target/Day</th>
                                             <th>Process</th>
-                                            <th>Model</th>
-                                            <th>Model Type</th>
                                             <th className="text-center">Working Hours</th>
                                             <th className="text-center">Status</th>
                                             <th className="text-center" style={{ width: "210px" }}>Actions</th>
@@ -586,8 +573,6 @@ function ProductionPlanningPage() {
                                                 <td className="text-center">{row.hasConfig ? <span className="fw-bold" style={{ color: "#e65100" }}>{row.cycle_time_target}</span> : <span className="text-muted">-</span>}</td>
                                                 <td className="text-center">{row.hasConfig ? <span className="fw-bold" style={{ color: "#1565c0" }}>{row.pc_target.toLocaleString("en-US")}</span> : <span className="text-muted">-</span>}</td>
                                                 <td>{row.process_name}</td>
-                                                <td>{row.model_name}</td>
-                                                <td>{row.model_type}</td>
                                                 <td className="text-center">{row.hasConfig ? <span className="badge bg-info" style={{ fontSize: "0.75rem" }}>{row.active_hours_count}/24 Hrs</span> : <span className="text-muted">-</span>}</td>
                                                 <td className="text-center">{row.hasConfig ? <span className="badge bg-success" style={{ fontSize: "0.72rem" }}>Configured</span> : <span className="badge bg-warning text-dark" style={{ fontSize: "0.72rem" }}>No Config</span>}</td>
                                                 <td className="text-center">
@@ -637,17 +622,9 @@ function ProductionPlanningPage() {
                         </div>
                     </div>
                     <div className="row g-3 mb-3">
-                        <div className="col-md-4">
+                        <div className="col-md-12">
                             <label className="form-label fw-semibold mb-1">Process Name</label>
                             <select className="form-select" value={formData.process_name} onChange={e => setFormData(p => ({ ...p, process_name: e.target.value }))}><option value="">-- Select --</option>{processes.map((p: any) => <option key={p.id} value={p.process_name}>{p.process_name}</option>)}</select>
-                        </div>
-                        <div className="col-md-4">
-                            <label className="form-label fw-semibold mb-1">Model</label>
-                            <select className="form-select" value={formData.model_name} onChange={e => setFormData(p => ({ ...p, model_name: e.target.value }))}><option value="">-- Select --</option>{models.map((m: any) => <option key={m.id} value={m.model_name}>{m.model_name}</option>)}</select>
-                        </div>
-                        <div className="col-md-4">
-                            <label className="form-label fw-semibold mb-1">Model Type</label>
-                            <select className="form-select" value={formData.model_type} onChange={e => setFormData(p => ({ ...p, model_type: e.target.value }))}><option value="">-- Select --</option>{modelTypes.map((mt: any) => <option key={mt.id} value={mt.model_type}>{mt.model_type}</option>)}</select>
                         </div>
                     </div>
                     <div className="mb-3">
@@ -692,7 +669,7 @@ function ProductionPlanningPage() {
             {/* ═══════════════ MODAL: HOLIDAY ═══════════════ */}
             <MyModal id="modalHoliday" title={`Holiday Calendar — ${holidayMachine}`} modalSize="modal-xl">
                 {loadingHolidays ? (
-                    <div className="text-center py-4"><i className="fa fa-spinner fa-spin me-2"></i>Loading...</div>
+                    <LoadingSpinner />
                 ) : (
                     <div className="row g-4">
                         {/* Left: Calendar */}
@@ -840,7 +817,7 @@ function ProductionPlanningPage() {
             {/* ═══════════════ MODAL: PLAN PREVIEW ═══════════════ */}
             <MyModal id="modalPreview" title={`Plan Details — ${previewMachine}`} modalSize="modal-xl modal-fullscreen-lg-down">
                 {loadingPreview ? (
-                    <div className="text-center py-4"><i className="fa fa-spinner fa-spin me-2"></i>Loading...</div>
+                    <LoadingSpinner />
                 ) : previewData.length === 0 ? (
                     <div className="text-center text-muted py-4">No plan available — Please set up Configuration first</div>
                 ) : (
@@ -1007,7 +984,7 @@ function ProductionPlanningPage() {
             {/* ═══════════════ MODAL: HOLIDAY DETAIL ═══════════════ */}
             <MyModal id="modalHolidayDetail" title={`All Holidays — ${hdMachine}`} modalSize="modal-xl">
                 {loadingHd ? (
-                    <div className="text-center py-4"><i className="fa fa-spinner fa-spin me-2"></i>Loading...</div>
+                    <LoadingSpinner />
                 ) : (
                     <>
                         {/* Year selector + summary */}

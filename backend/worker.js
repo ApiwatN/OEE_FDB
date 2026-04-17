@@ -70,6 +70,14 @@ async function startup() {
         // 2.4 OEE Backfill: recalc availability + performance for past 5 days
         await backfillOeeStartup();
 
+        // 2.5 🆕 [Phase 4] Hydrate OEE Memory Stopwatch from MSSQL (cold-boot recovery)
+        // ถ้า server รีสตาร์ทกลางวัน stopwatch จะถูก rebuild จาก MCStatus history ทันที
+        const memOeeService = require('./services/memoryOeeService');
+        const { getShiftDateUTC } = require('./utils/timeUtils');
+        const todayShiftDate = getShiftDateUTC();
+        await memOeeService.hydrateFromMssql(todayShiftDate);
+        log(`✅ OEE memory stopwatch hydrated (shift: ${todayShiftDate})`);
+
         // 3. Start cron jobs
         startCronJobs();
 

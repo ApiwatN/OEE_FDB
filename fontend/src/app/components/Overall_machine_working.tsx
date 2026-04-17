@@ -82,6 +82,8 @@ export default function OverallMachineCard({
         ctTarget: 0,
         effActual: 0,
         effTarget: 0,
+        availabilityActual: 0,   // ✅ ค่า Availability จริงจาก memoryOeeService (realtime_update)
+        availabilityTarget: 0,   // ✅ เป้าหมาย Availability (effTarget ใช้แทนชั่วคราว)
         liveStatus: "Offline", // 🆕
         liveAlarm: null as string | null, // 🆕
     });
@@ -195,6 +197,11 @@ export default function OverallMachineCard({
         // 1. Update Table Data
         setTableData(prev => {
             const newOee = daily.oee > 0 ? daily.oee : prev.oee;
+            // ✅ รับค่า availability จาก realtime_update (ผ่าน daily.availability)
+            // ถ้ายังไม่มี (รอบ fast loop ที่ไม่ส่ง availability) ให้คงค่าเดิม
+            const newAvailability = (daily.availability !== undefined && daily.availability > 0)
+                ? daily.availability
+                : prev.availabilityActual;
 
             if (
                 prev.outputActual === daily.totalOutput &&
@@ -202,7 +209,8 @@ export default function OverallMachineCard({
                 prev.achieve === daily.achieve &&
                 prev.ctActual === daily.avgCycleTime &&
                 prev.effActual === daily.overallEfficiency &&
-                prev.oee === newOee
+                prev.oee === newOee &&
+                prev.availabilityActual === newAvailability
             ) {
                 return prev;
             }
@@ -214,6 +222,7 @@ export default function OverallMachineCard({
                 achieve: daily.achieve,
                 ctActual: daily.avgCycleTime,
                 effActual: daily.overallEfficiency,
+                availabilityActual: newAvailability,   // ✅ อัปเดตค่า Availability จริง
                 oee: newOee,
                 liveStatus: currentHour.live_status || "Offline", // 🆕 Update from real-time
                 liveAlarm: currentHour.live_alarm || null, // 🆕 Update from real-time
@@ -404,6 +413,8 @@ export default function OverallMachineCard({
                 ctTarget: tableDataRaw.cycleTimeTarget || 0,
                 effActual: tableDataRaw.efficiencyActual || 0,
                 effTarget: tableDataRaw.efficiencyTarget || 0,
+                availabilityActual: oeeData.availability || 0,   // ✅ ค่า Availability จริงจาก tb_oee
+                availabilityTarget: tableDataRaw.efficiencyTarget || 0, // ✅ ใช้ effTarget เป็นเป้าชั่วคราว
                 liveStatus: isToday ? (latestAllStatus[machineName] || "Offline") : "Offline", // 🆕 อ่านจาก MSSQL ทันที
                 liveAlarm: null,
             });
@@ -990,13 +1001,7 @@ export default function OverallMachineCard({
     let headerBgClass = "bg-primary";
     let headerStyle: React.CSSProperties = { flexShrink: 0, height: "32px", border: "none", position: "relative" };
 
-    if (isToday) {
-        if (tableData.liveAlarm) {
-            headerBgClass = "bg-danger";
-            headerStyle.animation = "blink 1s linear infinite"; // Will blink red if CSS is set
-        }
-        // ไม่มีการเปลี่ยนสีพื้นหลังเป็น statusColor แล้ว เพื่อให้เป็นสีฟ้า (bg-primary) เสมอ
-    }
+    // ไม่มีการเปลี่ยนสีพื้นหลังเป็น statusColor หรือ Alarm แดงแล้ว เพื่อให้เป็นสีฟ้า (bg-primary) เสมอ
 
     return (
         <div className="card shadow-sm h-100 d-flex flex-column position-relative" style={{ minHeight: 0, overflow: "hidden" }}>
@@ -1016,7 +1021,6 @@ export default function OverallMachineCard({
                     >
                         {isToday ? (statusColors[tableData.liveStatus]?.label || tableData.liveStatus) : "Historical"}
                     </span>
-                    {tableData.liveAlarm && <span className="fw-bold text-white mt-1"><i className="fas fa-exclamation-triangle"></i> {tableData.liveAlarm}</span>}
                 </div>
             </div>
             <div className="card-body p-1 d-flex flex-column" style={{ overflow: "hidden", minHeight: 0, flex: 1 }}>
@@ -1126,8 +1130,8 @@ export default function OverallMachineCard({
                                 <td className={`p-1 fw-bold align-middle ${tableData.ctActual > tableData.ctTarget ? "text-danger" : "text-success"}`}>
                                     {tableData.ctActual.toFixed(2)}
                                 </td>
-                                <td className={`p-1 fw-bold align-middle ${tableData.effActual < tableData.effTarget ? "text-danger" : "text-success"}`}>
-                                    {tableData.effActual.toFixed(2)}%
+                                <td className={`p-1 fw-bold align-middle ${tableData.availabilityActual < tableData.availabilityTarget ? "text-danger" : "text-success"}`}>
+                                    {tableData.availabilityActual.toFixed(2)}%
                                 </td>
                             </tr>
                             <tr>
@@ -1139,7 +1143,7 @@ export default function OverallMachineCard({
                                     {tableData.ctTarget.toFixed(2)}
                                 </td>
                                 <td className="p-1 text-muted align-middle">
-                                    {tableData.effTarget.toFixed(2)}%
+                                    {tableData.availabilityTarget.toFixed(2)}%
                                 </td>
                             </tr>
                         </tbody>

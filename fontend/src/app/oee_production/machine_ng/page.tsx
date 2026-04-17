@@ -8,10 +8,11 @@ dayjs.extend(utc);
 import * as XLSX from "xlsx-js-style";
 import { io as socketIO } from "socket.io-client";
 import config from "@/app/config";
+import LoadingSpinner from "@/app/components/LoadingSpinner";
 
 export default function MachineNgPage() {
     return (
-        <Suspense fallback={<div>Loading Report...</div>}>
+        <Suspense fallback={<LoadingSpinner message="Loading Report..." />}>
             <style>{`
                 .hide-scrollbar::-webkit-scrollbar:horizontal {
                     height: 0px;
@@ -145,24 +146,39 @@ function MachineNgReportPage() {
 
                     const updatedDailyData = { ...machine.dailyData };
                     const existing = updatedDailyData[shiftDate] || {};
-                    
-                    const visualNg = socketData.daily.ngQty ?? 0;
-                    const allQty = existing.All || 0;
-                    
-                    // Update Total Output from realtime socket
-                    const totalOutput = socketData.daily.totalOutput ?? (existing.Total_Output !== "-" ? existing.Total_Output : 0);
-                    
-                    const overReject = Math.max(0, allQty - visualNg);
-                    const overRejectPercent = totalOutput > 0 ? parseFloat(((overReject / totalOutput) * 100).toFixed(2)) : 0;
 
-                    updatedDailyData[shiftDate] = {
-                        ...existing,
-                        has_production: existing.has_production ?? true,
-                        Total_Output: totalOutput,
-                        Visual_NG: visualNg,
-                        Over_Reject: overReject,
-                        Over_Reject_Percent: overRejectPercent
-                    };
+                    const allQty = existing.All || 0;
+                    const machineOutput = socketData.daily.totalOutput ?? (existing.Machine_Output !== "-" ? existing.Machine_Output : 0);
+
+                    if (machine.ng_mode === "over_reject") {
+                        // ABR: NG = All station NG (Over Reject)
+                        const overReject = allQty;
+                        const totalOutput = Math.max(0, machineOutput - overReject);
+                        const overRejectPercent = machineOutput > 0 ? parseFloat(((overReject / machineOutput) * 100).toFixed(2)) : 0;
+                        updatedDailyData[shiftDate] = {
+                            ...existing,
+                            has_production: existing.has_production ?? true,
+                            Machine_Output: machineOutput,
+                            Total_Output: totalOutput,
+                            Over_Reject: overReject,
+                            Over_Reject_Percent: overRejectPercent,
+                            Visual_NG: null,
+                        };
+                    } else {
+                        // AHV / default: Visual NG mode
+                        const visualNg = socketData.daily.ngQty ?? 0;
+                        const overReject = Math.max(0, allQty - visualNg);
+                        const overRejectPercent = machineOutput > 0 ? parseFloat(((overReject / machineOutput) * 100).toFixed(2)) : 0;
+                        updatedDailyData[shiftDate] = {
+                            ...existing,
+                            has_production: existing.has_production ?? true,
+                            Machine_Output: machineOutput,
+                            Total_Output: machineOutput,
+                            Visual_NG: visualNg,
+                            Over_Reject: overReject,
+                            Over_Reject_Percent: overRejectPercent,
+                        };
+                    }
 
                     return { ...machine, dailyData: updatedDailyData };
                 });
@@ -275,13 +291,15 @@ function MachineNgReportPage() {
 
         groups.forEach(g => {
             g.stations = Array.from(g.allStations);
+            // Determine ng_mode from first machine in group (all same type)
+            g.ng_mode = g.machines[0]?.ng_mode || "visual_ng";
             const summaryData: any = {};
 
             for (let d = 1; d <= 31; d++) {
                 const dateKey = `${selectedMonth}-${String(d).padStart(2, '0')}`;
                 const dayData: any = { has_production: false, stations: {} };
 
-                let sumTotalOutput = 0, sumAll = 0, sumVisualNg = 0, sumOverReject = 0;
+                let sumTotalOutput = 0, sumAll = 0, sumVisualNg = 0, sumOverReject = 0, sumMachineOutput = 0;
                 
                 g.stations.forEach((st: string) => dayData.stations[st] = 0);
 
@@ -293,9 +311,10 @@ function MachineNgReportPage() {
                         dayData.has_production = true;
                     }
 
+                    if (data.Machine_Output !== undefined && data.Machine_Output !== "-" && data.Machine_Output !== null) sumMachineOutput += Number(data.Machine_Output);
                     if (data.Total_Output !== undefined && data.Total_Output !== "-") sumTotalOutput += Number(data.Total_Output);
                     if (data.All !== undefined && data.All !== "-") sumAll += Number(data.All);
-                    if (data.Visual_NG !== undefined && data.Visual_NG !== "-") sumVisualNg += Number(data.Visual_NG);
+                    if (data.Visual_NG !== undefined && data.Visual_NG !== "-" && data.Visual_NG !== null) sumVisualNg += Number(data.Visual_NG);
                     if (data.Over_Reject !== undefined && data.Over_Reject !== "-") sumOverReject += Number(data.Over_Reject);
 
                     g.stations.forEach((st: string) => {
@@ -306,12 +325,19 @@ function MachineNgReportPage() {
                 });
 
                 if (dayData.has_production) {
+                    dayData.Machine_Output = sumMachineOutput;
                     dayData.Total_Output = sumTotalOutput;
                     dayData.All = sumAll;
-                    dayData.Visual_NG = sumVisualNg;
+                    dayData.Visual_NG = g.ng_mode === "over_reject" ? null : sumVisualNg;
                     dayData.Over_Reject = sumOverReject;
-                    dayData.Over_Reject_Percent = sumTotalOutput > 0 ? parseFloat(((sumOverReject / sumTotalOutput) * 100).toFixed(2)) : 0;
+                    // For over_reject (ABR): use Machine_Output as denominator
+                    if (g.ng_mode === "over_reject") {
+                        dayData.Over_Reject_Percent = sumMachineOutput > 0 ? parseFloat(((sumOverReject / sumMachineOutput) * 100).toFixed(2)) : 0;
+                    } else {
+                        dayData.Over_Reject_Percent = sumTotalOutput > 0 ? parseFloat(((sumOverReject / sumTotalOutput) * 100).toFixed(2)) : 0;
+                    }
                 } else {
+                    dayData.Machine_Output = "-";
                     dayData.Total_Output = "-";
                     dayData.All = 0;
                     dayData.Visual_NG = "-";
@@ -361,13 +387,22 @@ function MachineNgReportPage() {
             group.machines.forEach((machine: any) => {
                 const { machine_name, model_info, dailyData, stations } = machine;
                 
+                const mNgMode = machine.ng_mode || "visual_ng";
                 const rows: { label: string; key: string; isStation: boolean; isPercent: boolean, showZero: boolean }[] = [];
                 stations.forEach((st: string) => rows.push({ label: st, key: st, isStation: true, isPercent: false, showZero: false }));
-                rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
-                rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
-                rows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
-                rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
-                rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
+                if (mNgMode === "over_reject") {
+                    rows.push({ label: "Machine Output", key: "Machine_Output", isStation: false, isPercent: false, showZero: true });
+                    rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
+                    rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                    rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
+                    rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
+                } else {
+                    rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
+                    rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                    rows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
+                    rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
+                    rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
+                }
 
                 const startRow = currentRowIndex;
                 const endRow = startRow + rows.length - 1;
@@ -425,11 +460,19 @@ function MachineNgReportPage() {
             // Render Group Summary Row
             const rows: { label: string; key: string; isStation: boolean; isPercent: boolean, showZero: boolean }[] = [];
             group.stations.forEach((st: string) => rows.push({ label: st, key: st, isStation: true, isPercent: false, showZero: false }));
-            rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
-            rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
-            rows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
-            rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
-            rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
+            if (group.ng_mode === "over_reject") {
+                rows.push({ label: "Machine Output", key: "Machine_Output", isStation: false, isPercent: false, showZero: true });
+                rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
+                rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
+                rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
+            } else {
+                rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
+                rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                rows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
+                rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
+                rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
+            }
 
             const startRow = currentRowIndex;
             const endRow = startRow + rows.length - 1;
@@ -575,7 +618,7 @@ function MachineNgReportPage() {
     // ==========================
     // 🔸 Row Total Calculator
     // ==========================
-    const getRowTotal = (dailyData: any, key: string, isStation: boolean) => {
+    const getRowTotal = (dailyData: any, key: string, isStation: boolean, ngMode: string = "visual_ng") => {
         let sumOutput = 0;
         let sumReject = 0;
         let sum = 0;
@@ -585,8 +628,9 @@ function MachineNgReportPage() {
             const data = dailyData[dateKey];
             if (!data) return;
 
-            // Calculate overall parts for Over Reject %
-            const outActual = data["Total_Output"];
+            // For Over_Reject_Percent denominator: ABR uses Machine_Output, others use Total_Output
+            const outputField = ngMode === "over_reject" ? "Machine_Output" : "Total_Output";
+            const outActual = data[outputField];
             if (outActual && !isNaN(Number(outActual))) sumOutput += Number(outActual);
             
             const overReject = data["Over_Reject"];
@@ -686,7 +730,7 @@ function MachineNgReportPage() {
             </div>
             <div className="card-body p-0">
                 {loading ? (
-                    <div className="text-center p-5"><div className="spinner-border text-primary"></div></div>
+                    <LoadingSpinner message="Loading NG Report..." />
                 ) : (
                     // 🆕 Unified Sticky Table Layout
                     <div className="table-wrapper" style={{ overflowX: "auto", overflowY: "auto", height: "calc(100vh - 140px)", border: "1px solid #dee2e6", background: "white" }}>
@@ -711,24 +755,41 @@ function MachineNgReportPage() {
                                 {groupedReportData.map((group, gIdx) => {
                                     const rows: { label: string; key: string; isStation: boolean; isPercent: boolean, showZero: boolean }[] = [];
                                     group.stations.forEach((st: string) => rows.push({ label: st, key: st, isStation: true, isPercent: false, showZero: false }));
-                                    rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
-                                    rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
-                                    rows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
-                                    rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
-                                    rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
+                                    if (group.ng_mode === "over_reject") {
+                                        rows.push({ label: "Machine Output", key: "Machine_Output", isStation: false, isPercent: false, showZero: true });
+                                        rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
+                                        rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                                        rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
+                                        rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
+                                    } else {
+                                        rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
+                                        rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                                        rows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
+                                        rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
+                                        rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
+                                    }
 
                                     return (
                                         <React.Fragment key={`group-${group.type}-${gIdx}`}>
                                             {/* Machines in Group */}
                                             {group.machines.map((machine: any, mIdx: number) => {
                                                 const { machine_name, model_info, dailyData, stations } = machine;
+                                                const machineNgMode = machine.ng_mode || "visual_ng";
                                                 const mRows: { label: string; key: string; isStation: boolean; isPercent: boolean, showZero: boolean }[] = [];
                                                 stations.forEach((st: string) => mRows.push({ label: st, key: st, isStation: true, isPercent: false, showZero: false }));
-                                                mRows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
-                                                mRows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
-                                                mRows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
-                                                mRows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
-                                                mRows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
+                                                if (machineNgMode === "over_reject") {
+                                                    mRows.push({ label: "Machine Output", key: "Machine_Output", isStation: false, isPercent: false, showZero: true });
+                                                    mRows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
+                                                    mRows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                                                    mRows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
+                                                    mRows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
+                                                } else {
+                                                    mRows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
+                                                    mRows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                                                    mRows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
+                                                    mRows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
+                                                    mRows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
+                                                }
 
                                                 return mRows.map((row, rIdx) => {
                                                     const isLastRow = rIdx === mRows.length - 1;
@@ -756,7 +817,7 @@ function MachineNgReportPage() {
                                                                 
                                                                 if (dData) {
                                                                     if (row.isStation) val = dData.stations[row.key];
-                                                                    else val = dData[row.key as "Total_Output" | "All" | "Visual_NG" | "Over_Reject" | "Over_Reject_Percent"];
+                                                                    else val = dData[row.key as "Machine_Output" | "Total_Output" | "All" | "Visual_NG" | "Over_Reject" | "Over_Reject_Percent"];
                                                                 }
 
                                                                 const dayEmpty = isDayEmpty(dailyData, day, selectedMonth);
@@ -777,16 +838,18 @@ function MachineNgReportPage() {
                                                                 const hasProduction = dData && dData.has_production;
 
                                                                 let cellContent: string | React.ReactNode;
-                                                                if (futureDay || !hasProduction) {
+                                                                if (futureDay) {
                                                                     cellContent = "\u00A0";
+                                                                } else if (!hasProduction) {
+                                                                    cellContent = "-";
                                                                 } else if (hideNgFields || val === "-") {
                                                                     cellContent = "-";
                                                                 } else if (val === 0 || val === "0.00") {
-                                                                    cellContent = row.showZero ? (row.isPercent ? "0%" : "0") : "\u00A0";
+                                                                    cellContent = row.showZero ? (row.isPercent ? "0%" : "0") : "-";
                                                                 } else if (val !== undefined && val !== null && val !== "") {
                                                                     cellContent = renderCell(val, row.isPercent, row.showZero);
                                                                 } else {
-                                                                    cellContent = "\u00A0";
+                                                                    cellContent = "-";
                                                                 }
 
                                                                 return (
@@ -796,7 +859,7 @@ function MachineNgReportPage() {
                                                                 );
                                                             })}
                                                             <td style={{ borderBottom: borderBottomStyle, height: "30px", boxSizing: "border-box", padding: "0 4px", background: "#fff3cd", fontWeight: "bold", borderLeft: "2px solid #ccc", whiteSpace: "nowrap" }}>
-                                                                {renderCell(getRowTotal(dailyData, row.key, row.isStation), row.isPercent, row.showZero)}
+                                                                {renderCell(getRowTotal(dailyData, row.key, row.isStation, machineNgMode), row.isPercent, row.showZero)}
                                                             </td>
                                                         </tr>
                                                     );
@@ -828,23 +891,25 @@ function MachineNgReportPage() {
                                                             
                                                             if (dData) {
                                                                 if (row.isStation) val = dData.stations[row.key];
-                                                                else val = dData[row.key as "Total_Output" | "All" | "Visual_NG" | "Over_Reject" | "Over_Reject_Percent"];
+                                                                else val = dData[row.key as "Machine_Output" | "Total_Output" | "All" | "Visual_NG" | "Over_Reject" | "Over_Reject_Percent"];
                                                             }
 
                                                             const futureDay = isFutureDay(day);
                                                             const hasProduction = dData && dData.has_production;
 
                                                             let cellContent: string | React.ReactNode;
-                                                            if (futureDay || !hasProduction) {
+                                                            if (futureDay) {
                                                                 cellContent = "\u00A0";
+                                                            } else if (!hasProduction) {
+                                                                cellContent = "-";
                                                             } else if (val === "-") {
                                                                 cellContent = "-";
                                                             } else if (val === 0 || val === "0.00") {
-                                                                cellContent = row.showZero ? (row.isPercent ? "0%" : "0") : "\u00A0";
+                                                                cellContent = row.showZero ? (row.isPercent ? "0%" : "0") : "-";
                                                             } else if (val !== undefined && val !== null && val !== "") {
                                                                 cellContent = renderCell(val, row.isPercent, row.showZero);
                                                             } else {
-                                                                cellContent = "\u00A0";
+                                                                cellContent = "-";
                                                             }
 
                                                             const cellStyle: React.CSSProperties = {
@@ -852,7 +917,7 @@ function MachineNgReportPage() {
                                                                 height: "30px",
                                                                 boxSizing: "border-box",
                                                                 padding: "0 4px",
-                                                                background: "#fff2cc",
+                                                                background: "#fff9e6",
                                                                 color: "#b98300",
                                                                 fontWeight: "bold",
                                                                 whiteSpace: "nowrap"
@@ -864,7 +929,7 @@ function MachineNgReportPage() {
                                                             );
                                                         })}
                                                         <td style={{ borderBottom: borderBottomStyle, height: "30px", boxSizing: "border-box", padding: "0 4px", background: "#ffeeba", color: "#b98300", fontWeight: "bold", borderLeft: "2px solid #ccc", whiteSpace: "nowrap" }}>
-                                                            {renderCell(getRowTotal(group.summaryData, row.key, row.isStation), row.isPercent, row.showZero)}
+                                                            {renderCell(getRowTotal(group.summaryData, row.key, row.isStation, group.ng_mode), row.isPercent, row.showZero)}
                                                         </td>
                                                     </tr>
                                                 );

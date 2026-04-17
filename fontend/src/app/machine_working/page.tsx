@@ -111,6 +111,8 @@ function MachineWorkingInner() {
         ctTarget: 0,
         effActual: 0,
         effTarget: 0,
+        availabilityActual: 0,   // ✅ ค่า Availability จริงจาก memoryOeeService
+        availabilityTarget: 0,   // ✅ เป้าหมาย
         operators: [] as any[], // ✅ Store list of operators
         liveStatus: "Offline", // 🆕
         liveAlarm: null as string | null, // 🆕
@@ -441,8 +443,12 @@ function MachineWorkingInner() {
                     updates.oee = machineData.daily.oee;
                 }
 
+                // ✅ อัปเดต Availability จาก realtime_update (Fast Loop ทุก 2 วิ)
+                if (machineData.daily.availability !== undefined && machineData.daily.availability > 0) {
+                    updates.availabilityActual = machineData.daily.availability;
+                }
+
                 // 🆕 Update liveStatus จาก MSSQL slow poll (ทุก 5 นาที)
-                // Guard: ไม่ทับถ้า currentHour ไม่มีใน payload
                 if (machineData.currentHour?.live_status !== undefined) {
                     updates.liveStatus = machineData.currentHour.live_status || "Offline";
                 }
@@ -603,16 +609,18 @@ function MachineWorkingInner() {
                 oeeDate: oeeData.date ? dayjs(oeeData.date).format("DD/MM/YYYY") : "-",
                 operatorCode: currentOpCode,
                 operatorName: currentOpName,
-                operatorPic: currentOpPic ? `${config.apiServer}/image/${currentOpPic}` : "", // Fix logic to use logic from component if possible, or just path
-                operators: displayOp ? [displayOp] : [], // ✅ Show ONLY the display operator (Active/Last)
+                operatorPic: currentOpPic ? `${config.apiServer}/image/${currentOpPic}` : "",
+                operators: displayOp ? [displayOp] : [],
                 outputActual: tableDataRaw.outputActual || 0,
                 outputTarget: tableDataRaw.outputTarget || 0,
                 ctActual: tableDataRaw.cycleTimeActual || 0,
                 ctTarget: tableDataRaw.cycleTimeTarget || 0,
                 effActual: tableDataRaw.efficiencyActual || 0,
                 effTarget: tableDataRaw.efficiencyTarget || 0,
-                liveStatus: isToday ? (latestAllStatus[machine] || "Offline") : "Offline", // 🆕 อ่านจาก MSSQL ทันที
-                liveAlarm: null, // fallback until socket updates
+                availabilityActual: oeeData.availability || 0,   // ✅ ค่า Availability จริงจาก API
+                availabilityTarget: tableDataRaw.efficiencyTarget || 0,
+                liveStatus: isToday ? (latestAllStatus[machine] || "Offline") : "Offline",
+                liveAlarm: null,
             });
             const now = new Date();
             // เช็คว่าเป็น "วันนี้" หรือไม่ (เทียบวันที่จาก param กับวันที่ปัจจุบัน)
@@ -1274,12 +1282,10 @@ function MachineWorkingInner() {
                                                     {currentDateStr === new Date().toISOString().split("T")[0] ? (
                                                         <>
                                                             <span className="badge rounded-pill" style={{ 
-                                                                backgroundColor: tableData.liveAlarm ? "#dc3545" : (statusColors[tableData.liveStatus]?.color || "#6c757d"),
-                                                                animation: tableData.liveAlarm ? "blink 1s linear infinite" : "none" 
+                                                                backgroundColor: statusColors[tableData.liveStatus]?.color || "#6c757d"
                                                             }}>
                                                                 {statusColors[tableData.liveStatus]?.label || tableData.liveStatus}
                                                             </span>
-                                                            {tableData.liveAlarm && <span className="text-danger mt-1"><i className="fas fa-exclamation-triangle"></i> {tableData.liveAlarm}</span>}
                                                         </>
                                                     ) : (
                                                         <span className="badge rounded-pill bg-secondary">Historical</span>
@@ -1365,8 +1371,8 @@ function MachineWorkingInner() {
                                             </td>
 
                                             {/* ✅ แก้ไข Availability: ถ้าประสิทธิภาพจริง "น้อยกว่า" เป้าหมาย (แย่) = สีแดง, ถ้ามากกว่าหรือเท่ากับ (ดี) = สีเขียว */}
-                                            <td className={`fw-bold fs-5 ${tableData.effActual < tableData.effTarget ? "text-danger" : "text-success"}`}>
-                                                {tableData.effActual.toFixed(2)} <small className="fs-6 fw-normal">%</small>
+                                            <td className={`fw-bold fs-5 ${tableData.availabilityActual < tableData.availabilityTarget ? "text-danger" : "text-success"}`}>
+                                                {tableData.availabilityActual.toFixed(2)} <small className="fs-6 fw-normal">%</small>
                                             </td>
                                         </tr>
                                         {/* Row 4: Target Data */}
@@ -1374,7 +1380,7 @@ function MachineWorkingInner() {
                                             <td className="fw-bold bg-light text-secondary">Target</td>
                                             <td className="text-muted">{tableData.outputTarget.toLocaleString()} pcs</td>
                                             <td className="text-muted">{tableData.ctTarget.toFixed(2)} sec</td>
-                                            <td className="text-muted">{tableData.effTarget.toFixed(2)} %</td>
+                                            <td className="text-muted">{tableData.availabilityTarget.toFixed(2)} %</td>
                                         </tr>
                                     </tbody>
                                 </table>

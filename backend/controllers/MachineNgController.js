@@ -1,6 +1,14 @@
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const dayjs = require("dayjs");
+const fs = require("fs");
+const path = require("path");
+
+// Load config-driven NG mode per machine type
+const machineCalcConfig = JSON.parse(fs.readFileSync(path.join(__dirname, "../config/machine_calc.json"), "utf-8"));
+const ngModes = machineCalcConfig.ng_modes || {};
+const defaultNgMode = ngModes["default"] || "visual_ng";
+const getNgMode = (machineType) => ngModes[machineType] || defaultNgMode;
 
 module.exports = {
     getMachineNgReport: async (req, res) => {
@@ -87,8 +95,8 @@ module.exports = {
                 const mTargets = targets.filter((t) => t.machine_name === mName);
                 const latestTarget = mTargets.sort((a, b) => b.date - a.date)[0];
 
+                // ✅ model_name = actual model produced (from tb_output_actual / InfluxDB only)
                 const modelNamesSet = new Set();
-                mTargets.forEach(t => { if (t.model_name) modelNamesSet.add(t.model_name); });
                 actuals.filter(a => a.machine_name === mName).forEach(a => { if (a.model_name) modelNamesSet.add(a.model_name); });
 
                 const allModelNames = [...modelNamesSet];
@@ -106,6 +114,7 @@ module.exports = {
                      dailyData[key] = {
                          has_production: false,
                          stations: {},
+                         Machine_Output: "-",
                          Total_Output: "-",
                          All: 0,
                          Visual_NG: "-",
@@ -116,10 +125,13 @@ module.exports = {
                      mStationNames.forEach(name => dailyData[key].stations[name] = 0);
                 }
 
-                // --- Total Output Data ---
+                // --- Total Output (Machine Output) Data ---
                 actuals.filter(a => a.machine_name === mName).forEach(a => {
                     const key = getDateKey(a.date);
                     if (dailyData[key] && a.Overall !== undefined && a.Overall !== null) {
+                        // Machine_Output = raw output from machine
+                        dailyData[key].Machine_Output = a.Overall;
+                        // Default: Total_Output = Machine_Output (may be overridden below for over_reject)
                         dailyData[key].Total_Output = a.Overall;
                         if (a.Overall > 0) dailyData[key].has_production = true;
                     }
@@ -154,46 +166,67 @@ module.exports = {
                     }
                 });
 
-                // --- Visual NG (OEE) and Over Reject Calculation ---
-                oees.filter(o => o.machine_name === mName).forEach(o => {
-                    const key = getDateKey(o.date);
-                    if (dailyData[key]) {
-                        const visualNg = o.ng_qty;
-                        
-                        // ✅ Bug 1 Fix: oee row existing = production happened
-                        dailyData[key].has_production = true;
+                // --- NG Calculation based on ng_mode ---
+                const ngMode = getNgMode(machine.machine_type);
 
-                        if (visualNg !== null && visualNg !== undefined) {
-                            const userHasNotUpdated = oeeMode === 'manual' && visualNg === 0 && o.quality === 0 && o.oee_value === 0;
+                if (ngMode === "over_reject") {
+                    // ABR: NG = All station NG (Over Reject). Visual NG is not applicable.
+                    // Total_Output = Machine_Output - Over_Reject
+                    // Trigger: when station NG data exists (has_production set by station loop)
+                    for (const key of Object.keys(dailyData)) {
+                        const d = dailyData[key];
+                        if (!d.has_production) continue;
+                        const machineOut = d.Machine_Output !== "-" ? Number(d.Machine_Output) : 0;
+                        const overReject = d.All || 0;
+                        const totalOut = Math.max(0, machineOut - overReject);
+                        d.Over_Reject = overReject;
+                        d.Total_Output = totalOut;
+                        d.Over_Reject_Percent = machineOut > 0
+                            ? parseFloat(((overReject / machineOut) * 100).toFixed(2))
+                            : 0;
+                        // Visual_NG is not applicable for ABR — leave as null
+                        d.Visual_NG = null;
+                    }
+                } else {
+                    // AHV / default: Visual NG mode — existing logic
+                    oees.filter(o => o.machine_name === mName).forEach(o => {
+                        const key = getDateKey(o.date);
+                        if (dailyData[key]) {
+                            const visualNg = o.ng_qty;
+                            dailyData[key].has_production = true;
 
-                            if (userHasNotUpdated) {
-                                // Likely user hasn't input visual NG yet, keep as '-'
-                                dailyData[key].Visual_NG = "-";
-                            } else {
-                                dailyData[key].Visual_NG = visualNg;
-                                // ✅ Bug 2 Fix: clamp Over_Reject to 0 minimum (data mismatch guard)
-                                const overReject = Math.max(0, dailyData[key].All - visualNg);
-                                dailyData[key].Over_Reject = overReject;
-                                
-                                const totalOutput = dailyData[key].Total_Output !== "-" ? dailyData[key].Total_Output : 0;
-                                if (totalOutput > 0) {
-                                    // ✅ Bug 3 Fix: return as Number not string (now uses Total_Output)
-                                    dailyData[key].Over_Reject_Percent = parseFloat(((overReject / totalOutput) * 100).toFixed(2));
+                            if (visualNg !== null && visualNg !== undefined) {
+                                const userHasNotUpdated = oeeMode === 'manual' && visualNg === 0 && o.quality === 0 && o.oee_value === 0;
+
+                                if (userHasNotUpdated) {
+                                    dailyData[key].Visual_NG = "-";
                                 } else {
-                                    dailyData[key].Over_Reject_Percent = 0; // was "0.00" string
+                                    dailyData[key].Visual_NG = visualNg;
+                                    const overReject = Math.max(0, dailyData[key].All - visualNg);
+                                    dailyData[key].Over_Reject = overReject;
+
+                                    const totalOutput = dailyData[key].Total_Output !== "-" ? dailyData[key].Total_Output : 0;
+                                    if (totalOutput > 0) {
+                                        dailyData[key].Over_Reject_Percent = parseFloat(((overReject / totalOutput) * 100).toFixed(2));
+                                    } else {
+                                        dailyData[key].Over_Reject_Percent = 0;
+                                    }
+                                    // Machine_Output = Total_Output for visual_ng mode
+                                    dailyData[key].Machine_Output = dailyData[key].Total_Output;
                                 }
                             }
                         }
-                    }
-                });
+                    });
+                }
 
                 return {
                     machine_name: mName,
+                    machine_type: machine.machine_type || "Unknown",
                     oee_mode: oeeMode,
+                    ng_mode: getNgMode(machine.machine_type),
                     model_info: modelInfo,
                     dailyData: dailyData,
-                    stations: mStationNames, // station display names for UI columns
-                    // ✅ include holidays so frontend can highlight them
+                    stations: mStationNames,
                     holidays: holidays
                         .filter(h => h.machine_name === mName)
                         .map(h => dayjs(h.holiday_date).format("YYYY-MM-DD")),

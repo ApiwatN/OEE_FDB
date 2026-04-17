@@ -10,7 +10,7 @@ import { getSocket } from "@/app/lib/socketManager";
 import type { Socket } from "socket.io-client";
 
 import { Suspense } from "react";
-
+import LoadingSpinner from "@/app/components/LoadingSpinner";
 // ─────────────────────────────────────────────
 // Helper: localStorage keys scoped by area+type
 // ─────────────────────────────────────────────
@@ -782,10 +782,8 @@ function OverallMachineContent() {
 
             {/* ── Main Grid ── */}
             {loading ? (
-                <div className="d-flex justify-content-center align-items-center flex-grow-1">
-                    <div className="spinner-border text-primary" role="status" style={{ width: "3rem", height: "3rem" }}>
-                        <span className="visually-hidden">Loading...</span>
-                    </div>
+                <div className="d-flex justify-content-center flex-grow-1 h-100" style={{ minHeight: "400px" }}>
+                    <LoadingSpinner />
                 </div>
             ) : (
                 <>
@@ -905,13 +903,7 @@ function OverallMachineContent() {
 
 export default function OverallMachineWorkingPage() {
     return (
-        <Suspense fallback={
-            <div className="d-flex justify-content-center align-items-center vh-100">
-                <div className="spinner-border text-primary" role="status">
-                    <span className="visually-hidden">Loading...</span>
-                </div>
-            </div>
-        }>
+        <Suspense fallback={<LoadingSpinner message="Loading..." />}>
             <OverallMachineContent />
         </Suspense>
     );

@@ -181,6 +181,18 @@ module.exports = {
                 },
             });
 
+            // ✅ [Phase 5] อัปเดต RAM ทันทีถ้าเป็นการกรอก NG ของวันนี้
+            // ทำให้ Quality% และ OEE บนหน้า Dashboard เปลี่ยนทันทีใน 2 วินาทีโดยไม่ต้องรอ Slow Loop 5 นาที
+            const todayStr = getShiftDateUTC();
+            if (date === todayStr) {
+                try {
+                    const memOeeService = require('../services/memoryOeeService');
+                    memOeeService.setManualNg(machine_name, ngVal);
+                } catch (memErr) {
+                    console.error('[OeeUpdate] memoryOeeService.setManualNg error:', memErr.message);
+                }
+            }
+
             res.json({
                 success: true,
                 data: {

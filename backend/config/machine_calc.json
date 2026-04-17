@@ -3,5 +3,9 @@
     "custom_modes": {
         "AHV": "output_based",
         "ABR": "status_based"
+    },
+    "ng_modes": {
+        "default": "visual_ng",
+        "ABR": "over_reject"
     }
 }

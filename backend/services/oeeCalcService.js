@@ -8,6 +8,16 @@ const EXCLUDED_STATUSES = new Set(["Plan_Stop", "Break_Time", "Preventive"]);
 // MC Status that counts as running
 const RUNNING_STATUS = "Run_Time";
 
+/**
+ * Check if status should be excluded. Also catches any status containing 'Preventive'
+ */
+function isExcludedStatus(status) {
+    if (!status) return false;
+    if (EXCLUDED_STATUSES.has(status)) return true;
+    if (status.includes("Preventive")) return true;
+    return false;
+}
+
 const fs = require('fs');
 const path = require('path');
 let machineCalcConfig = null;
@@ -60,7 +70,7 @@ function calcMcStatusDurations(records, shiftStart, endTime) {
 
         if (rec.MCStatus === RUNNING_STATUS) {
             runTimeSeconds += durationSec;
-        } else if (EXCLUDED_STATUSES.has(rec.MCStatus)) {
+        } else if (isExcludedStatus(rec.MCStatus)) {
             excludedSeconds += durationSec;
         }
         // Other statuses = downtime (not counted in either)
@@ -102,6 +112,7 @@ function calcPerformance(totalOutput, idealCT, runTimeSeconds) {
 module.exports = {
     EXCLUDED_STATUSES,
     RUNNING_STATUS,
+    isExcludedStatus,
     getMachineRunTimeMode,
     calcMcStatusDurations,
     calcAvailability,
