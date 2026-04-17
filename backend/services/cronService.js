@@ -18,7 +18,7 @@ const {
     getShiftIndex,
     getCurrentHourBoundaries,
 } = require("../utils/timeUtils");
-const { calcMcStatusDurations, calcAvailability, calcPerformance } = require("./oeeCalcService");
+const { calcMcStatusDurations, calcMcStatusDurationsPerHour, calcAvailability, calcPerformance, getCTCalcMode } = require("./oeeCalcService");
 const dayjs = require("dayjs");
 const { generatePlanForMachine } = require("../controllers/PlanConfigController");
 
@@ -289,6 +289,13 @@ async function summarizeLastHour() {
             console.error("   ⚠️ Failed to sync InfluxDB events in summarizeLastHour:", e.message);
         }
 
+        // 2.6 🆕 [Phase 6] Runtime + Availability per machine for the last hour
+        try {
+            await upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetDate, Object.keys(machineData));
+        } catch (e) {
+            console.error("   ⚠️ Failed to upsert runtime/availability in summarizeLastHour:", e.message);
+        }
+
         // 3. Recalculate Overall columns in MSSQL
         await recalcOverallInMSSQL(targetDate, Object.keys(machineData));
 
@@ -342,6 +349,172 @@ async function upsertHourlyField(tableName, machineName, date, fieldName, value,
     } catch (err) {
         console.error(`❌ Upsert ${tableName} for ${machineName} failed:`, err.message);
     }
+}
+
+/**
+ * [Phase 6] Upsert runtime + availability for a given thColumn hour
+ * Query tb_MCStatus for the hour window → compute per machine → upsert tb_mc_runtime_hourly + tb_availability_actual
+ * @param {string} thColumn  - hour label "07", "08", ...
+ * @param {Date}   start     - UTC start of that hour
+ * @param {Date}   end       - UTC end of that hour
+ * @param {Date}   targetDate
+ * @param {string[]} machineNames - list to process (from machineData keys in summarizeLastHour)
+ */
+async function upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetDate, machineNames) {
+    if (!machineNames || machineNames.length === 0) return;
+
+    // TH offset: DB stores Thai local time
+    const TH_OFFSET_MS = 7 * 60 * 60 * 1000;
+    const startTH = new Date(start.getTime() + TH_OFFSET_MS);
+    const endTH = new Date(end.getTime() + TH_OFFSET_MS);
+
+    // ── Step 1: Query MCStatus for the hour (all machines in 1 query) ──
+    const mcStatusRows = await prisma.tb_MCStatus.findMany({
+        where: { Datetime: { gte: startTH, lt: endTH } },
+        orderBy: { Datetime: 'asc' },
+        select: { MC: true, Datetime: true, MCStatus: true },
+    });
+
+    // Carry-over: last status per machine before this hour window
+    const carryOverRows = await prisma.$queryRaw`
+        SELECT MC, MCStatus, Datetime FROM (
+            SELECT MC, MCStatus, Datetime, ROW_NUMBER() OVER (PARTITION BY MC ORDER BY Datetime DESC) AS rn
+            FROM tb_MCStatus WHERE Datetime < ${startTH}
+        ) t WHERE rn = 1
+    `;
+
+    // Build grouped records with carry-over prepended
+    const mcStatusByMachine = {};
+    for (const row of carryOverRows) {
+        if (machineNames.includes(row.MC)) {
+            mcStatusByMachine[row.MC] = [{ MC: row.MC, Datetime: startTH, MCStatus: row.MCStatus }];
+        }
+    }
+    for (const rec of mcStatusRows) {
+        if (!machineNames.includes(rec.MC)) continue;
+        if (!mcStatusByMachine[rec.MC]) mcStatusByMachine[rec.MC] = [];
+        mcStatusByMachine[rec.MC].push(rec);
+    }
+
+    // ── Step 2: Bulk fetch target rows (to know which hours are active) ──
+    const allTargetRows = await prisma.tb_output_target.findMany({
+        where: { date: targetDate },
+        select: { machine_name: true, [`target_${thColumn}`]: true, eff_target: true }
+    });
+    const targetMap = {};
+    for (const row of allTargetRows) targetMap[row.machine_name] = row;
+
+    // ── Step 3: Per machine — calc runtime + availability → upsert ──
+    const runtimeOps = [];
+    const availOps = [];
+
+    for (const machineName of machineNames) {
+        try {
+            const mcRecords = mcStatusByMachine[machineName] || [];
+            const targetRow = targetMap[machineName];
+
+            // Skip hours marked inactive by plan config
+            const isHourActive = !targetRow || ((targetRow[`target_${thColumn}`] || 0) > 0);
+            const totalSeconds = isHourActive ? 3600 : 0;
+
+            const { runTimeSeconds, excludedSeconds } = calcMcStatusDurations(mcRecords, startTH, endTH);
+
+            // Availability = runTime / (total - excluded) × 100
+            const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalSeconds);
+
+            // Upsert runtime row
+            runtimeOps.push(
+                prisma.tb_mc_runtime_hourly.upsert({
+                    where: { machine_name_date: { machine_name: machineName, date: targetDate } },
+                    update: {
+                        [`runtime_${thColumn}`]: parseFloat(runTimeSeconds.toFixed(2)),
+                        [`excluded_${thColumn}`]: parseFloat(excludedSeconds.toFixed(2)),
+                        // runtime_total and excluded_total will be recalculated below
+                    },
+                    create: {
+                        machine_name: machineName,
+                        date: targetDate,
+                        [`runtime_${thColumn}`]: parseFloat(runTimeSeconds.toFixed(2)),
+                        [`excluded_${thColumn}`]: parseFloat(excludedSeconds.toFixed(2)),
+                    },
+                })
+            );
+
+            // Upsert availability row
+            availOps.push(
+                prisma.tb_availability_actual.upsert({
+                    where: { machine_name_date: { machine_name: machineName, date: targetDate } },
+                    update: { [`avail_${thColumn}`]: parseFloat(availability.toFixed(2)) },
+                    create: {
+                        machine_name: machineName,
+                        date: targetDate,
+                        [`avail_${thColumn}`]: parseFloat(availability.toFixed(2)),
+                    },
+                })
+            );
+
+            // ── Update in-memory cache ──
+            cacheService.updateHourRuntime(machineName, thColumn, runTimeSeconds, excludedSeconds);
+            cacheService.updateHourAvailability(machineName, thColumn, availability);
+
+        } catch (err) {
+            console.error(`   ❌ [Phase 6] Runtime/Avail calc failed for ${machineName}:`, err.message);
+        }
+    }
+
+    // ── Step 4: Batch execute ──
+    if (runtimeOps.length > 0) await Promise.all(runtimeOps);
+    if (availOps.length > 0) await Promise.all(availOps);
+
+    // ── Step 5: Recalculate totals (runtime_total, excluded_total, avail_actual) per machine ──
+    await recalcRuntimeAndAvailTotals(targetDate, machineNames);
+
+    console.log(`   ✅ [Phase 6] Runtime + Availability upserted for ${machineNames.length} machines (hour: ${thColumn})`);
+}
+
+/**
+ * [Phase 6] Recalculate runtime_total, excluded_total, avail_actual for given machines on a date
+ */
+async function recalcRuntimeAndAvailTotals(targetDate, machineNames) {
+    const { SHIFT_HOURS: HOURS } = require('../utils/timeUtils');
+
+    const [runtimeRows, availRows] = await Promise.all([
+        prisma.tb_mc_runtime_hourly.findMany({ where: { date: targetDate, machine_name: { in: machineNames } } }),
+        prisma.tb_availability_actual.findMany({ where: { date: targetDate, machine_name: { in: machineNames } } }),
+    ]);
+
+    const ops = [];
+
+    for (const row of runtimeRows) {
+        let sumRuntime = 0;
+        let sumExcluded = 0;
+        for (const h of HOURS) {
+            sumRuntime += row[`runtime_${h}`] || 0;
+            sumExcluded += row[`excluded_${h}`] || 0;
+        }
+        ops.push(
+            prisma.tb_mc_runtime_hourly.update({
+                where: { id: row.id },
+                data: {
+                    runtime_total: parseFloat(sumRuntime.toFixed(2)),
+                    excluded_total: parseFloat(sumExcluded.toFixed(2)),
+                },
+            })
+        );
+    }
+
+    for (const row of availRows) {
+        const values = HOURS.map(h => row[`avail_${h}`] || 0).filter(v => v > 0);
+        const avgAvail = values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+        ops.push(
+            prisma.tb_availability_actual.update({
+                where: { id: row.id },
+                data: { avail_actual: parseFloat(avgAvail.toFixed(2)) },
+            })
+        );
+    }
+
+    if (ops.length > 0) await Promise.all(ops);
 }
 
 /**
