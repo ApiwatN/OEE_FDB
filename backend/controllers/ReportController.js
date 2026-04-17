@@ -48,7 +48,7 @@ module.exports = {
                 },
             };
 
-            const [targets, actuals, effs, cycles, oees, holidays, configs, ngs] = await Promise.all([
+            const [targets, actuals, effs, cycles, oees, holidays, configs, ngs, avails] = await Promise.all([
                 prisma.tb_output_target.findMany({ where: whereClause }),
                 prisma.tb_output_actual.findMany({ where: whereClause }),
                 prisma.tb_efficiency_actual.findMany({ where: whereClause }),
@@ -66,6 +66,7 @@ module.exports = {
                     select: { machine_name: true, oee_mode: true },
                 }),
                 prisma.tb_machine_ng.findMany({ where: whereClause }),
+                prisma.tb_availability_actual.findMany({ where: whereClause }),
             ]);
             const modeMap = new Map(configs.map(c => [c.machine_name, c.oee_mode || "manual"]));
 
@@ -154,11 +155,21 @@ module.exports = {
                     });
                 }
 
-                // --- Efficiency Actual ---
+                // --- Availability & Efficiency Actual Priority Read ---
+                // Try from tb_availability_actual first
+                avails.filter(a => a.machine_name === mName).forEach(a => {
+                    const key = getDateKey(a.date);
+                    if (!dailyData[key]) dailyData[key] = {};
+                    dailyData[key].eff_actual = a.avail_actual || 0; // mapping to eff_actual for UI compatibility
+                });
+
+                // Fallback to tb_efficiency_actual if availability is 0 or empty (for older legacy data)
                 effs.filter(e => e.machine_name === mName).forEach(e => {
                     const key = getDateKey(e.date);
                     if (!dailyData[key]) dailyData[key] = {};
-                    dailyData[key].eff_actual = e.eff_actual || 0;
+                    if (!dailyData[key].eff_actual) {
+                        dailyData[key].eff_actual = e.eff_actual || 0;
+                    }
                 });
 
                 // --- Cycle Time Actual ---

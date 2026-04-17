@@ -251,7 +251,7 @@ module.exports = {
             // ✅ Recalculate OEE (A, P, Q) for this date after target update
             await recalculateAPQForDay(machine_name, planDate);
             
-            // ✅ Recalculate Efficiency actual
+            // ✅ Recalculate OEE & Daily Actuals in MSSQL
             const { recalcOverallInMSSQL } = require("../services/cronService");
             await recalcOverallInMSSQL(planDate, [machine_name]);
 
@@ -306,7 +306,7 @@ module.exports = {
             // ✅ Recalculate OEE (A, P, Q) for this date after target update
             await recalculateAPQForDay(machine_name, planDate);
             
-            // ✅ Recalculate Efficiency actual
+            // ✅ Recalculate OEE & Daily Actuals in MSSQL
             const { recalcOverallInMSSQL } = require("../services/cronService");
             await recalcOverallInMSSQL(planDate, [machine_name]);
 
@@ -380,7 +380,7 @@ module.exports = {
             // 6. ✅ Recalculate full OEE (A, P, Q) using the unified backfill service
             await recalculateAPQForDay(machine_name, planDate);
 
-            // ✅ Recalculate Efficiency actual
+            // ✅ Recalculate OEE & Daily Actuals in MSSQL
             const { recalcOverallInMSSQL } = require("../services/cronService");
             await recalcOverallInMSSQL(planDate, [machine_name]);
 
