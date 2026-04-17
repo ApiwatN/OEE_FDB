@@ -27,5 +27,14 @@
     "ct_calc_modes": {
         "default": "runtime_based",
         "AHV": "influx_avg"
+    },
+
+    "_timezone_mode_options": {
+        "local": "เครื่องส่งเวลามาเป็นโซนไทย (GMT+7) ตรงๆ ในฟิลด์ Date_Time_UTC (ไม่ปรับเวลา)",
+        "utc": "เครื่องส่งเวลามาเป็น UTC แท้ (GMT+0) ซึ่งระบบจะแปลงชดเชย +7 ให้ตอนเก็บบันทึกลงฐานข้อมูล (เช่นเครื่อง ABR)"
+    },
+    "timezone_modes": {
+        "default": "local",
+        "ABR": "utc"
     }
 }

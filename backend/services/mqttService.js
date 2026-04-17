@@ -5,6 +5,21 @@ dotenv.config();
 const { getShiftDateUTC, getCurrentHourBoundaries } = require("./../utils/timeUtils");
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
+const fs = require("fs");
+const path = require("path");
+
+const machineCalcConfig = JSON.parse(fs.readFileSync(path.join(__dirname, "../config/machine_calc.json"), "utf8"));
+const timezoneModes = machineCalcConfig.timezone_modes || {};
+const defaultTzMode = timezoneModes["default"] || "local";
+
+const getIsUTC = (machineName) => {
+    for (const key of Object.keys(timezoneModes)) {
+        if (key !== "default" && machineName.startsWith(key)) {
+            return timezoneModes[key] === "utc";
+        }
+    }
+    return defaultTzMode === "utc";
+};
 
 // 1. In-Memory Store for Machine States
 // Key: machine_name, Value: Current State (current_hour_actual, current_hour_ng, cycle_time, etc.)
@@ -122,11 +137,11 @@ const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
                     const statusStr = data.fields?.Status;
                     if (statusStr) {
                                                 // 1. เขียนลง MSSQL 
-                        // ตรวจสอบว่า Time เป็น UTC (ABR) หรือ Local (AHV)
-                        const isABR = machineName.startsWith("ABR");
+                        // ตรวจสอบจาก Config ว่าเครื่องส่งเวลามาเป็น UTC หรือไม่
+                        const isUTC = getIsUTC(machineName);
                         let thaiDataTimeMs = dataTime.getTime();
-                        if (isABR) {
-                            thaiDataTimeMs += 7 * 60 * 60 * 1000; // ABR: Convert UTC to Local Thai Time
+                        if (isUTC) {
+                            thaiDataTimeMs += 7 * 60 * 60 * 1000; // Convert UTC to Local Thai Time
                         }
                         const thaiDataTime = new Date(thaiDataTimeMs);
 
@@ -184,10 +199,10 @@ const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
                     const alarmStr = data.fields?.Alarm;
                     if (alarmStr) {
                                                 // 1. เขียนลง MSSQL 
-                        const isABR = machineName.startsWith("ABR");
+                        const isUTC = getIsUTC(machineName);
                         let thaiDataTimeMs = dataTime.getTime();
-                        if (isABR) {
-                            thaiDataTimeMs += 7 * 60 * 60 * 1000; // ABR: Convert UTC to Local Thai Time
+                        if (isUTC) {
+                            thaiDataTimeMs += 7 * 60 * 60 * 1000; // Convert UTC to Local Thai Time
                         }
                         const thaiDataTime = new Date(thaiDataTimeMs);
 
