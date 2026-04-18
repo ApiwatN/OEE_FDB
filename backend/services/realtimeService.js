@@ -681,7 +681,7 @@ async function _slowPollAndEmitInner() {
                 // 🆕 [Step 4] NG total = RAM (past Cron-confirmed) + pending (bridge) + InfluxDB (current hour)
                 const pastNg = cacheService.getNgPastHours(machineName);
                 const pendingNg = autoNgCache.pendingPrevHour[machineName] || 0;
-                const currentHourNg = currentHourData[machineName]?.ng_count || 0; // แทน queryAllMachinesNgCount
+                const currentHourNg = autoNgCache.data[machineName] || 0; // Fast Loop อัปเดตทุก 10s อยู่แล้ว
                 ngQty = pastNg + pendingNg + currentHourNg;
                 
                 let outputForOee = totalOutput;
