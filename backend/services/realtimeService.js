@@ -31,7 +31,12 @@ let lastOeeUpsertTime = 0; // 🆕 Throttle MSSQL writes
 
 let machineModeCache = new Map(); // 🆕 Cached machine modes (auto/manual)
 let sharedMcRecordsCache = {};    // 🆕 Shared MCStatus records between slow and fast loop
-let autoNgCache = { data: {}, lastFetch: 0 }; // 🆕 Cached NG counts for auto machines
+let autoNgCache = {
+    data: {},              // current hour NG (จาก InfluxDB current hour)
+    pendingPrevHour: {},   // 🆕 NG ชม.ก่อน รอ Cron (:10) confirm (bridge 10-min gap)
+    lastHourColumn: null,  // 🆕 detect การเปลี่ยนชั่วโมง
+    lastFetch: 0,
+}; // 🆕 Cached NG counts for auto machines
 let modeCacheTimer = null;
 
 /**
@@ -117,11 +122,31 @@ async function fastPollAndEmit() {
         const elapsedSeconds = getElapsedSecondsInHour(now);
         const currentShiftIndex = getShiftIndex(thColumn);
 
-        // 🆕 Light fetch for Auto total NG (ทุกๆ 10 วินาที เพื่อสร้าง Quality OEE ในโหมด Auto)
+        // 🆕 [Step 3] NG Cache: RAM (past) + pending + InfluxDB (current hour only)
+        // — ฟังก์ชั่นนี้ทำแค่ current hour (ไม่ใช่ตั้งแต่ต้นกะอีกต่อไป)
+
+        // 3a. Detect hour change → ย้าย currentHour → pendingPrevHour
+        const prevHourColumn = autoNgCache.lastHourColumn;
+        if (prevHourColumn && prevHourColumn !== thColumn) {
+            // ชั่วโมงเปลี่ยน: บันทึก NG ชม.ที่แล้วไว้ รอ Cron :10 มา confirm
+            autoNgCache.pendingPrevHour = { ...autoNgCache.data };
+            autoNgCache.data = {}; // reset สำหรับชั่วโมงใหม่
+        }
+        autoNgCache.lastHourColumn = thColumn;
+
+        // 3b. Auto-clear pendingPrevHour: ตรวจว่า Cron confirm ngCache แล้วหรือยัง
+        // Cron เขียน prevHourColumn → ngCache แล้ว → isNgHourConfirmed = true → ล้าง pending
+        if (prevHourColumn && Object.keys(autoNgCache.pendingPrevHour).length > 0) {
+            const firstMachine = Object.keys(autoNgCache.pendingPrevHour)[0];
+            if (cacheService.isNgHourConfirmed(firstMachine, prevHourColumn)) {
+                autoNgCache.pendingPrevHour = {};
+            }
+        }
+
+        // 3c. Fetch current hour NG from InfluxDB (เฉพาะ window เดียว ไม่ใช่ทั้งวัน)
         if (now.getTime() - autoNgCache.lastFetch > 10000) {
             autoNgCache.lastFetch = now.getTime();
-            const shiftUTCStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
-            influxService.queryAllMachinesNgCount(shiftUTCStart, now)
+            influxService.queryAllMachinesNgCount(start, now) // start = currentHourStart
                 .then(data => { autoNgCache.data = data; })
                 .catch(e => console.error("Fast poll NG sync failed:", e.message));
         }
@@ -382,7 +407,11 @@ async function fastPollAndEmit() {
                 }
 
                 let outputForOee = totalOutput;
-                const ngQty = autoNgCache.data[machineName] || 0;
+                // 🆕 [Step 3d] NG total = RAM (past Cron-confirmed) + pending (bridge) + InfluxDB (current hour)
+                const pastNg = cacheService.getNgPastHours(machineName);
+                const pendingNg = autoNgCache.pendingPrevHour[machineName] || 0;
+                const currentHourNg = autoNgCache.data[machineName] || 0;
+                const ngQty = pastNg + pendingNg + currentHourNg;
 
                 if (mCacheConfig.ng_mode === "over_reject") {
                     outputForOee = Math.max(0, totalOutput - ngQty);
@@ -550,14 +579,9 @@ async function _slowPollAndEmitInner() {
         // 2b. ใช้ machineModeCache จากลูปใหญ่แทนการ query ใหม่
         const modeMap = machineModeCache;
 
-        // 2c. Query NG count จาก InfluxDB สำหรับวันนี้ (ใช้เฉพาะ auto mode)
-        const shiftStartUTC = new Date(Date.UTC(year, month, day, 0, 0, 0)); // 07:00 TH = 00:00 UTC
-        let ngByMachine = {};
-        try {
-            ngByMachine = await influxService.queryAllMachinesNgCount(shiftStartUTC, now);
-        } catch (e) {
-            console.error("   ⚠️ Slow poll: InfluxDB NG query failed:", e.message);
-        }
+        // 2c. 🆕 NG ทั้งวัน = RAM (past hours) + pendingPrevHour (bridge) + InfluxDB current hour
+        // ไม่ต้อง query InfluxDB แยกอีก — currentHourData ถูกดึงแล้วใน block ทัดไป (output)
+        // autoNgCache สยะอยู่ใน Fast Loop แล้ว
 
         // 3. Build status payload — เฉพาะ Availability, Performance, Quality, OEE
         const machines = {};
@@ -582,6 +606,11 @@ async function _slowPollAndEmitInner() {
 
         // ✅ Collect upsert operations (no DB calls in loop)
         const upsertOps = [];
+
+        // ✅ Pre-fetch Actual rows as fallback if cache is missing (Crucial for output_based machines)
+        const allActualRows = await prisma.tb_output_actual.findMany({ where: { date: targetDate } });
+        const actualMap = {};
+        for (const row of allActualRows) actualMap[row.machine_name] = row;
 
         for (const machineName of allMachineNames) {
             // Availability & Performance from MCStatus
@@ -612,6 +641,15 @@ async function _slowPollAndEmitInner() {
                     totalOutput += out;
                     if (out > 0 && ct > 0) sumCtWeighted += ct * out;
                 }
+            } else {
+                // Fallback: หาก cache หายกลางคัน ให้ใช้ db เป็นฐานสำหรับชั่วโมงอดีต
+                const actualRow = actualMap[machineName];
+                if (actualRow) {
+                    for (let i = 0; i < SHIFT_HOURS.length; i++) {
+                        if (i === currentShiftIndex) continue;
+                        totalOutput += (actualRow[`actual_${SHIFT_HOURS[i]}`] || 0);
+                    }
+                }
             }
             // current hour → InfluxDB เท่านั้น (source of truth)
             const currentData = currentHourData[machineName];
@@ -640,7 +678,11 @@ async function _slowPollAndEmitInner() {
             let ngQty = 0;
 
             if (mode === "auto") {
-                ngQty = ngByMachine[machineName] || 0;
+                // 🆕 [Step 4] NG total = RAM (past Cron-confirmed) + pending (bridge) + InfluxDB (current hour)
+                const pastNg = cacheService.getNgPastHours(machineName);
+                const pendingNg = autoNgCache.pendingPrevHour[machineName] || 0;
+                const currentHourNg = currentHourData[machineName]?.ng_count || 0; // แทน queryAllMachinesNgCount
+                ngQty = pastNg + pendingNg + currentHourNg;
                 
                 let outputForOee = totalOutput;
                 if (mCacheConfig.ng_mode === "over_reject") {

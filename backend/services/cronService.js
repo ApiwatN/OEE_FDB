@@ -1562,6 +1562,8 @@ async function summarizeNgHourly() {
                  });
                  totalUpserts++;
              }
+             // 🆕 Sync RAM ngCache: MSSQL confirmed → realtimeService สามารถล้าง pendingPrevHour ได้
+             cacheService.updateHourNg(machineName, thColumn, trueNgVal);
         }
 
         // Recalculate Overall_ng column for rows updated today

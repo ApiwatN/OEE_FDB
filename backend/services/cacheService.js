@@ -20,6 +20,10 @@ const availabilityCache = {};
 // Runtime cache: { machineName: { date, runtime: { runtime_07: 3600, ... }, excluded: { excluded_07: 0, ... } } }
 const runtimeCache = {};
 
+// 🆕 NG cache: past hours only (current hour ดึงจาก InfluxDB แยก)
+// { machineName: { date, ng: { ng_07: 5, ng_08: 2, ... }, totalPastNg: 7 } }
+const ngCache = {};
+
 // Machine list cache: [{ id, machine_name, machine_area, machine_type }]
 let machineListCache = [];
 
@@ -360,6 +364,7 @@ async function hydrateFromMSSQL() {
         // Hydrate new ones too
         await hydrateAvailabilityFromMSSQL();
         await hydrateRuntimeFromMSSQL();
+        await hydrateNgFromMSSQL(); // 🆕 Load past-hours NG into RAM
 
         return count;
     } catch (err) {
@@ -415,6 +420,77 @@ async function hydrateRuntimeFromMSSQL() {
 }
 
 /**
+ * 🆕 Hydrate NG cache from MSSQL at startup
+ * Query tb_machine_ng for today → fill ngCache (past hours only)
+ * เรียกครั้งเดียวตอน startup แทนการสแกน InfluxDB ทั้งวันทุก 10 วินาที
+ */
+async function hydrateNgFromMSSQL() {
+    const dateStr = getShiftDateUTC();
+    const targetDate = new Date(dateStr);
+    try {
+        // station_id = 0 คือ True_NG (1 part NG ต่อ 1 row) — ใช้ตัวนี้แทน per-station
+        const ngRows = await prisma.tb_machine_ng.findMany({
+            where: { date: targetDate, station_id: 0 },
+        });
+
+        for (const row of ngRows) {
+            const mn = row.machine_name;
+            if (!ngCache[mn]) {
+                ngCache[mn] = { date: dateStr, ng: {}, totalPastNg: 0 };
+            }
+            let total = 0;
+            for (const h of SHIFT_HOURS) {
+                const val = row[`ng_${h}`] || 0;
+                ngCache[mn].ng[`ng_${h}`] = val;
+                total += val;
+            }
+            ngCache[mn].totalPastNg = total;
+        }
+        console.log(`✅ NG cache hydrated for ${dateStr} (${ngRows.length} machines)`);
+    } catch (err) {
+        console.error("❌ Hydrating NG cache failed:", err.message);
+    }
+}
+
+/**
+ * 🆕 Update a specific hour's NG count in cache
+ * เรียกจาก cronService หลัง summarizeNgHourly เขียน MSSQL สำเร็จ
+ * ทำให้ RAM sync กับ MSSQL ทันที ไม่ต้อง re-query
+ * @returns {boolean} true ถ้า thColumn นี้ถูก confirm แล้ว (ใช้ตรวจสอบการล้าง pendingPrevHour)
+ */
+function updateHourNg(machineName, thColumn, ngCount) {
+    const dateStr = getShiftDateUTC();
+    if (!ngCache[machineName]) {
+        ngCache[machineName] = { date: dateStr, ng: {}, totalPastNg: 0 };
+    }
+    ngCache[machineName].ng[`ng_${thColumn}`] = ngCount;
+    // Recalculate total
+    let total = 0;
+    for (const h of SHIFT_HOURS) {
+        total += ngCache[machineName].ng[`ng_${h}`] || 0;
+    }
+    ngCache[machineName].totalPastNg = total;
+    return true;
+}
+
+/**
+ * 🆕 Get sum of NG for all past hours (excluding current hour)
+ * เรียกจาก realtimeService Fast/Slow Loop
+ * แทนการสแกน InfluxDB ทั้งวัน
+ */
+function getNgPastHours(machineName) {
+    return ngCache[machineName]?.totalPastNg || 0;
+}
+
+/**
+ * 🆕 Check if a specific thColumn has been confirmed in ngCache
+ * เรียกจาก realtimeService เพื่อตัดสินใจล้าง pendingPrevHour
+ */
+function isNgHourConfirmed(machineName, thColumn) {
+    return ngCache[machineName]?.ng?.[`ng_${thColumn}`] !== undefined;
+}
+
+/**
  * Clear cache and re-hydrate for new day (shift rollover)
  */
 async function clearAndRollover() {
@@ -430,6 +506,10 @@ async function clearAndRollover() {
     }
     for (const key of Object.keys(runtimeCache)) {
         delete runtimeCache[key];
+    }
+    // 🆕 Clear NG cache on daily rollover
+    for (const key of Object.keys(ngCache)) {
+        delete ngCache[key];
     }
     await hydrateFromMSSQL();
 }
@@ -452,5 +532,10 @@ module.exports = {
     hydrateFromMSSQL,
     hydrateAvailabilityFromMSSQL,
     hydrateRuntimeFromMSSQL,
+    // 🆕 NG Cache
+    hydrateNgFromMSSQL,
+    updateHourNg,
+    getNgPastHours,
+    isNgHourConfirmed,
     clearAndRollover,
 };
