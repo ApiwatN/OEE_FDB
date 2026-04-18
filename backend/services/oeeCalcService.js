@@ -209,9 +209,10 @@ async function recalculateAPQForDay(machineName, targetDate) {
             return;
         }
 
-        const [outputRow, targetRow] = await Promise.all([
+        const [outputRow, targetRow, ctRow] = await Promise.all([
             prisma.tb_output_actual.findFirst({ where: { machine_name: machineName, date: targetDate } }),
             prisma.tb_output_target.findFirst({ where: { machine_name: machineName, date: targetDate } }),
+            prisma.tb_cycle_time_actual.findFirst({ where: { machine_name: machineName, date: targetDate } }),
         ]);
 
         let runTimeSeconds = 0;
@@ -234,6 +235,24 @@ async function recalculateAPQForDay(machineName, targetDate) {
                 excludedSeconds += eTime;
                 totalActiveSeconds += 3600;
             }
+        }
+
+        // 🆕 output_based override: AHV ไม่มี MCStatus → ใช้ Output × AvgCT แทน
+        if (getMachineRunTimeMode(machineName) === "output_based") {
+            let sumCtWeighted = 0;
+            let totalOutputForCt = 0;
+            for (let i = 0; i < SHIFT_HOURS.length; i++) {
+                const h = SHIFT_HOURS[i];
+                const out = outputRow ? (outputRow[`actual_${h}`] || 0) : 0;
+                const ct  = ctRow ? (ctRow[`cycle_${h}`] || 0) : 0;
+                if (out > 0 && ct > 0) {
+                    sumCtWeighted += ct * out;
+                    totalOutputForCt += out;
+                }
+            }
+            const avgCtAcross = totalOutputForCt > 0 ? (sumCtWeighted / totalOutputForCt) : 0;
+            runTimeSeconds = totalOutput * avgCtAcross;
+            excludedSeconds = 0;
         }
 
         const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalActiveSeconds);
