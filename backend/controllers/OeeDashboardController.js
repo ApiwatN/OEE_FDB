@@ -173,23 +173,21 @@ module.exports = {
 
             if (!outputTargetDB) return res.json({ message: "No Target Data" });
 
-            // --- 🕒 Logic การคำนวณเวลา ---
+            // --- 🕒 Logic การคำนวณเวลา (UTC-based) ---
+            // ⚠️ ห้ามใช้ setHours(7) — ใช้ local timezone → ผิดบน server UTC (07:00 UTC ≠ 07:00 TH)
+            // Shift 07:00 TH = 00:00 UTC เสมอ → ต้องใช้ getShiftBoundariesForDate
+            const { startUTC: shiftStart, endUTC: shiftEnd } = getShiftBoundariesForDate(date);
             const now = new Date();
-            // สร้างขอบเขตเวลาของกะ (07:00 ของวันที่เลือก ถึง 07:00 ของวันถัดไป)
-            const shiftStart = new Date(targetDate);
-            shiftStart.setHours(7, 0, 0, 0);
 
-            const shiftEnd = new Date(shiftStart);
-            shiftEnd.setDate(shiftEnd.getDate() + 1);
-
-            // ถ้าวันที่ดู เป็นอดีต -> เวลา "ปัจจุบัน" คือจบกะแล้ว
-            // ถ้าวันที่ดู เป็นวันนี้ -> เวลา "ปัจจุบัน" คือ now
+            // ถ้าวันที่ดู เป็นอดีต → เวลา "ปัจจุบัน" คือจบกะแล้ว
+            // ถ้าวันที่ดู เป็นวันนี้ → เวลา "ปัจจุบัน" คือ now
             let calculationTime = now;
             if (now > shiftEnd) {
                 calculationTime = shiftEnd;
             } else if (now < shiftStart) {
                 calculationTime = shiftStart; // ยังไม่เริ่มกะ
             }
+
 
             // --- 🧮 เริ่มคำนวณ ---
             let outputTargetAccumCurrent = 0; // Target สะสม ณ เวลาปัจจุบัน (Pro-rated)
@@ -210,12 +208,9 @@ module.exports = {
                 outputTargetDayTotal += targetVal;
 
                 // 3. คำนวณ Pro-rated Target และ Seconds
-                // สร้างช่วงเวลาของชั่วโมงนี้ (เช่น 07:00 - 08:00)
-                let currentHourStart = new Date(shiftStart);
-                currentHourStart.setHours(shiftStart.getHours() + i); // เพิ่มทีละชั่วโมง
-
-                let currentHourEnd = new Date(currentHourStart);
-                currentHourEnd.setHours(currentHourEnd.getHours() + 1);
+                // สร้างช่วงเวลาของชั่วโมงนี้ (UTC-safe: เพิ่ม ms ตรงๆ แทน setHours)
+                const currentHourStart = new Date(shiftStart.getTime() + i * 3600000);
+                const currentHourEnd   = new Date(currentHourStart.getTime() + 3600000);
 
                 // ตรวจสอบว่า calculationTime อยู่ในช่วงไหน
                 if (calculationTime >= currentHourEnd) {
