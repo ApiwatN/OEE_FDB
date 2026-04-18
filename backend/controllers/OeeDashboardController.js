@@ -6,6 +6,7 @@ const sharp = require("sharp");
 const cacheService = require("../services/cacheService");
 const influxService = require("../services/influxService");
 const { getShiftDateUTC, getCurrentHourBoundaries, utcHourToThColumn } = require("../utils/timeUtils");
+const { calcAvailability, getMachineRunTimeMode } = require("../services/oeeCalcService");
 
 // Helper: สร้าง shift boundaries สำหรับ InfluxDB query (UTC)
 function getShiftBoundariesForDate(dateStr) {
@@ -296,20 +297,28 @@ module.exports = {
             let cycleTimeActual = 0;
 
             if (isToday) {
-                // วันนี้: CT จาก Cache, Availability จาก MemoryOeeService
+                // วันนี้: CT จาก Cache, Availability ขึ้นกับ mode
                 if (cachedData) {
                     cycleTimeActual = cachedData.overall.avgCycleTime || 0;
                 }
-                
-                const memoryOeeService = require("../services/memoryOeeService");
-                const { calcAvailability } = require("../services/oeeCalcService");
-                const { runTimeSec, excludedSec, totalSec } = memoryOeeService.getDurationsNow(machine_name, calculationTime);
-                availabilityActual = calcAvailability(runTimeSec, excludedSec, totalSec);
 
-                // ปรับ Target ปัจจุบัน: ชดเชย excluded time ไม่ให้เป้าหมายวิ่งไปในช่วงเบรค
-                if (validSeconds > 0) {
-                    const ratio = Math.max(0, validSeconds - excludedSec) / validSeconds;
-                    outputTargetAccumCurrent = Math.round(outputTargetAccumCurrent * ratio);
+                const modeRunTime = getMachineRunTimeMode(machine_name);
+                if (modeRunTime === "output_based") {
+                    // AHV: ไม่มี MCStatus → คำนวณจาก output × avgCT
+                    const avgCt = cachedData?.overall?.avgCycleTime || 0;
+                    const runTime = outputActualSum * avgCt;
+                    availabilityActual = validSeconds > 0 ? Math.min(100, (runTime / validSeconds) * 100) : 0;
+                } else {
+                    // status_based (ABR ฯลฯ): ใช้ memoryOeeService ตามเดิม
+                    const memoryOeeService = require("../services/memoryOeeService");
+                    const { runTimeSec, excludedSec, totalSec } = memoryOeeService.getDurationsNow(machine_name, calculationTime);
+                    availabilityActual = calcAvailability(runTimeSec, excludedSec, totalSec);
+
+                    // ปรับ Target ปัจจุบัน: ชดเชย excluded time
+                    if (validSeconds > 0) {
+                        const ratio = Math.max(0, validSeconds - excludedSec) / validSeconds;
+                        outputTargetAccumCurrent = Math.round(outputTargetAccumCurrent * ratio);
+                    }
                 }
             } else {
                 // วันเก่า: Priority อ่าน Availability -> Fallback Efficiency
