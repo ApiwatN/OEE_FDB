@@ -322,7 +322,7 @@ module.exports = {
         });
       }
 
-      // 2. ดึง target ของวันนี้ (ยังต้อง MSSQL เพราะ target ไม่อยู่ใน cache)
+      // 2. ดึง target ของวันนี้ (Layer 3 fallback: process_name + model fallback)
       const targets = await prisma.tb_output_target.findMany({
         where: {
           date: {
@@ -339,7 +339,39 @@ module.exports = {
 
       const targetMap = {};
       for (const t of targets) {
-        targetMap[t.machine_name] = t;
+        if (!targetMap[t.machine_name]) targetMap[t.machine_name] = t; // ใช้ row แรก ไม่ overwrite
+      }
+
+      // 2b. Layer 2: ดึง model จาก tb_output_actual (Cron เขียนทุก 1 ชม.)
+      const actualModelRows = await prisma.tb_output_actual.findMany({
+        where: { date: { gte: targetDate, lt: new Date(targetDate.getTime() + 24 * 60 * 60 * 1000) } },
+        select: { machine_name: true, model_name: true }
+      });
+      const actualModelMap = {};
+      for (const r of actualModelRows) {
+        if (r.model_name) actualModelMap[r.machine_name] = r.model_name;
+      }
+
+      // 2c. Layer 1: ดึง model ล่าสุดจาก InfluxDB (Actual production, วันนี้เท่านั้น)
+      let influxModelMap = {};
+      if (isToday) {
+        try {
+          const shiftStart = new Date(targetDate); // 00:00 UTC = 07:00 TH
+          const nowForModel = new Date();
+          influxModelMap = await influxService.queryAllMachinesModelsForHour(shiftStart, nowForModel);
+        } catch (influxModelErr) {
+          console.error("⚠️ getMachinesWithTodayData: InfluxDB model query failed (non-critical):", influxModelErr.message);
+        }
+      }
+
+      // Build modelMap: Layer 1 (InfluxDB) → Layer 2 (actual) → Layer 3 (target)
+      const modelMap = {};
+      for (const m of machines) {
+        const mn = m.machine_name;
+        modelMap[mn] = influxModelMap[mn]        // Layer 1: InfluxDB actual (ล่าสุด)
+          || actualModelMap[mn]                  // Layer 2: tb_output_actual
+          || targetMap[mn]?.model_name           // Layer 3: tb_output_target
+          || "--";
       }
 
       // 3. ดึง actual data — ใช้ cache ถ้าดูวันนี้
@@ -416,7 +448,7 @@ module.exports = {
         area: m.machine_area,
         type: m.machine_type,
         name: m.machine_name,
-        model: targetMap[m.machine_name]?.model_name || "--",
+        model: modelMap[m.machine_name] || "--",
         process: targetMap[m.machine_name]?.process_name || "--",
         output: outputMap[m.machine_name] ?? "--",
         availability: availMap[m.machine_name] ?? "--",
