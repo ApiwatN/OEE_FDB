@@ -261,9 +261,38 @@ async function summarizeLastHour() {
 
         const targetDate = new Date(dateStr);
 
+        // 2.5 🆕 Sync Status/Alarm Events from InfluxDB for the last hour
+        try {
+            console.log(`   🔄 Syncing InfluxDB events to MSSQL for last hour...`);
+            await syncEventsFromInfluxDb(start, end);
+        } catch (e) {
+            console.error("   ⚠️ Failed to sync InfluxDB events in summarizeLastHour:", e.message);
+        }
+
+        // 2.6 🆕 [Phase 6] Runtime + Availability per machine for the last hour
+        try {
+            await upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetDate, Object.keys(machineData), machineData);
+        } catch (e) {
+            console.error("   ⚠️ Failed to upsert runtime/availability in summarizeLastHour:", e.message);
+        }
+
         // 2. ✅ Upsert MSSQL for each machine (3 ops in parallel per machine)
         for (const [machineName, data] of Object.entries(machineData)) {
-            const { output_count, avg_cycle_time } = data;
+            let { output_count, avg_cycle_time } = data;
+            
+            // 🆕 Support ct_calc_modes
+            const ctMode = getCTCalcMode(machineName);
+            if (ctMode === "runtime_based") {
+                const mcCache = cacheService.getMachineCache(machineName) || { runtime: {} };
+                // 🕒 Because Phase 2.6 ran first, runtime cache is already updated for this hour!
+                const hourRuntime = mcCache.runtime[`runtime_${thColumn}`] || 0;
+                if (output_count > 0) {
+                    avg_cycle_time = hourRuntime / output_count;
+                } else {
+                    avg_cycle_time = 0;
+                }
+            }
+
             const theoreticalMax = avg_cycle_time > 0 ? 3600 / avg_cycle_time : 0;
             const efficiency = theoreticalMax > 0 ? (output_count / theoreticalMax) * 100 : 0;
 
@@ -279,21 +308,6 @@ async function summarizeLastHour() {
 
             // ✅ Yield event loop — ให้ API request อื่นแทรกได้
             await new Promise(resolve => setImmediate(resolve));
-        }
-
-        // 2.5 🆕 Sync Status/Alarm Events from InfluxDB for the last hour
-        try {
-            console.log(`   🔄 Syncing InfluxDB events to MSSQL for last hour...`);
-            await syncEventsFromInfluxDb(start, end);
-        } catch (e) {
-            console.error("   ⚠️ Failed to sync InfluxDB events in summarizeLastHour:", e.message);
-        }
-
-        // 2.6 🆕 [Phase 6] Runtime + Availability per machine for the last hour
-        try {
-            await upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetDate, Object.keys(machineData), machineData);
-        } catch (e) {
-            console.error("   ⚠️ Failed to upsert runtime/availability in summarizeLastHour:", e.message);
         }
 
         // 3. Recalculate Overall columns in MSSQL

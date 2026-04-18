@@ -4,11 +4,7 @@ const dayjs = require("dayjs");
 const fs = require("fs");
 const path = require("path");
 
-// Load config-driven NG mode per machine type
-const machineCalcConfig = JSON.parse(fs.readFileSync(path.join(__dirname, "../config/machine_calc.json"), "utf-8"));
-const ngModes = machineCalcConfig.ng_modes || {};
-const defaultNgMode = ngModes["default"] || "visual_ng";
-const getNgMode = (machineType) => ngModes[machineType] || defaultNgMode;
+const { getNgMode } = require("../services/oeeCalcService");
 
 module.exports = {
     getMachineNgReport: async (req, res) => {
@@ -167,7 +163,7 @@ module.exports = {
                 });
 
                 // --- NG Calculation based on ng_mode ---
-                const ngMode = getNgMode(machine.machine_type);
+                const ngMode = getNgMode(machine.machine_name);
 
                 if (ngMode === "over_reject") {
                     // ABR: NG = All station NG (Over Reject). Visual NG is not applicable.
@@ -223,7 +219,7 @@ module.exports = {
                     machine_name: mName,
                     machine_type: machine.machine_type || "Unknown",
                     oee_mode: oeeMode,
-                    ng_mode: getNgMode(machine.machine_type),
+                    ng_mode: getNgMode(machine.machine_name),
                     model_info: modelInfo,
                     dailyData: dailyData,
                     stations: mStationNames,

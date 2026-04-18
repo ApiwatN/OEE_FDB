@@ -251,7 +251,8 @@ async function recalculateAPQForDay(machineName, targetDate) {
                 }
             }
             const avgCtAcross = totalOutputForCt > 0 ? (sumCtWeighted / totalOutputForCt) : 0;
-            runTimeSeconds = totalOutput * avgCtAcross;
+            const avgToUse = avgCtAcross > 0 ? avgCtAcross : (targetRow?.cycle_time_target || 0);
+            runTimeSeconds = totalOutput * avgToUse;
             excludedSeconds = 0;
         }
 

@@ -4,11 +4,7 @@ const dayjs = require("dayjs");
 const fs = require("fs");
 const path = require("path");
 
-// Load config-driven NG mode per machine type
-const machineCalcConfig = JSON.parse(fs.readFileSync(path.join(__dirname, "../config/machine_calc.json"), "utf-8"));
-const ngModes = machineCalcConfig.ng_modes || {};
-const defaultNgMode = ngModes["default"] || "visual_ng";
-const getNgMode = (machineType) => ngModes[machineType] || defaultNgMode;
+const { getNgMode } = require("../services/oeeCalcService");
 
 module.exports = {
     getMachineReport: async (req, res) => {
@@ -73,7 +69,7 @@ module.exports = {
             // 3. Aggregate Data
             const reportData = machines.map((machine) => {
                 const mName = machine.machine_name;
-                const ngMode = getNgMode(machine.machine_type);
+                const ngMode = getNgMode(machine.machine_name);
                 const dailyData = {};
 
                 // Initialize daily data structure for the whole month? 

@@ -6,7 +6,7 @@ const sharp = require("sharp");
 const cacheService = require("../services/cacheService");
 const influxService = require("../services/influxService");
 const { getShiftDateUTC, getCurrentHourBoundaries, utcHourToThColumn } = require("../utils/timeUtils");
-const { calcAvailability, getMachineRunTimeMode } = require("../services/oeeCalcService");
+const { calcAvailability, getMachineRunTimeMode, getCTCalcMode } = require("../services/oeeCalcService");
 
 // Helper: สร้าง shift boundaries สำหรับ InfluxDB query (UTC)
 function getShiftBoundariesForDate(dateStr) {
@@ -292,15 +292,21 @@ module.exports = {
             let cycleTimeActual = 0;
 
             if (isToday) {
-                // วันนี้: CT จาก Cache, Availability ขึ้นกับ mode
-                if (cachedData) {
+                // วันนี้: CT จาก Cache หรือคำนวณสดถ้าระบุเป็น runtime_based
+                const ctMode = getCTCalcMode(machine_name);
+                if (ctMode === "runtime_based") {
+                    const memoryOeeService = require("../services/memoryOeeService");
+                    const { runTimeSec } = memoryOeeService.getDurationsNow(machine_name, calculationTime);
+                    cycleTimeActual = outputActualSum > 0 ? runTimeSec / outputActualSum : 0;
+                } else if (cachedData) {
                     cycleTimeActual = cachedData.overall.avgCycleTime || 0;
                 }
 
                 const modeRunTime = getMachineRunTimeMode(machine_name);
                 if (modeRunTime === "output_based") {
                     // AHV: ไม่มี MCStatus → คำนวณจาก output × avgCT
-                    const avgCt = cachedData?.overall?.avgCycleTime || 0;
+                    const cacheCt = cachedData?.overall?.avgCycleTime || 0;
+                    const avgCt = cacheCt > 0 ? cacheCt : (outputTargetDB.cycle_time_target || 0);
                     const runTime = outputActualSum * avgCt;
                     availabilityActual = validSeconds > 0 ? Math.min(100, (runTime / validSeconds) * 100) : 0;
                 } else {
