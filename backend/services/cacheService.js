@@ -319,16 +319,20 @@ async function hydrateFromMSSQL() {
         // Fill cache from MSSQL data
         for (const row of outputs) {
             const mn = row.machine_name;
+            // ✅ Skip "--" rows — they are stale data from before Telegraf restart
+            // Real model rows are the source of truth; "--" causes double-count with SUM logic
+            if (row.model_name === "--") continue;
             initMachineCache(mn, dateStr);
 
             for (const h of SHIFT_HOURS) {
                 const val = row[`actual_${h}`];
                 if (val != null && val > 0) {
-                    // ✅ SUM ทุก model row แทนการทับ (รองรับ multi-model per day)
+                    // SUM ทุก model row (รองรับ multi-model per day)
                     machineCache[mn].output[`actual_${h}`] = (machineCache[mn].output[`actual_${h}`] || 0) + val;
                 }
             }
         }
+
 
         for (const row of cycleTimes) {
             const mn = row.machine_name;

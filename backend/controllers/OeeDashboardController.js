@@ -169,9 +169,11 @@ module.exports = {
                 }
                 outputActualDBArray = [outputActualDB];
             } else {
-                outputActualDBArray = await prisma.tb_output_actual.findMany({
+                const rawRows = await prisma.tb_output_actual.findMany({
                     where: { machine_name, date: targetDate },
                 });
+                // ✅ Filter "--" rows — stale data before Telegraf restart, real models are source of truth
+                outputActualDBArray = rawRows.filter(r => r.model_name !== "--");
             }
 
             // ✅ Fix: current hour → InfluxDB เป็น source of truth (ต้องอยู่นอก else เพื่อให้ทำงานทั้งกรณี cache และ MSSQL)
@@ -222,7 +224,7 @@ module.exports = {
                 
                 let actualVal = 0;
                 for (const row of outputActualDBArray) {
-                    // ✅ SUM ทุก model row (รองรับ multi-model per day)
+                    // ✅ SUM all model rows ("--" already filtered from array)
                     actualVal += (row[`actual_${hStr}`] || 0);
                 }
 
@@ -465,9 +467,11 @@ module.exports = {
                 }
                 outputActualDBArray = [outputActualDB];
             } else {
-                outputActualDBArray = await prisma.tb_output_actual.findMany({
+                const rawRows = await prisma.tb_output_actual.findMany({
                     where: { machine_name, date: targetDate },
                 });
+                // ✅ Filter "--" rows — stale data before Telegraf restart
+                outputActualDBArray = rawRows.filter(r => r.model_name !== "--");
             }
 
             // ✅ Fix: current hour → InfluxDB เป็น source of truth
