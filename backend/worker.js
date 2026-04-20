@@ -1,8 +1,14 @@
 /**
- * Worker Thread — Background Services
+ * Worker Thread — Realtime Services
  * ================================
- * Runs: Cron Jobs, MQTT, Real-time Polling, InfluxDB, Cache
- * ไม่มี Express/Socket.IO — ส่ง payload กลับ Main Thread ผ่าน IPC
+ * Runs: MQTT, Real-time Polling, InfluxDB, Cache
+ * ไม่มี: Cron Jobs (ย้ายไป worker_cron.js แล้ว)
+ * ไม่มี: Express/Socket.IO — ส่ง payload กลับ Main Thread ผ่าน IPC
+ *
+ * IPC IN (รับจาก Main Thread):
+ *   { type: "save_snapshot" }   — Graceful shutdown trigger
+ *   { type: "cache_reload" }    — โหลด cache ใหม่จาก MSSQL (ส่งมาจาก cron worker)
+ *   { type: "cache_rollover" }  — clearAndRollover สำหรับวันใหม่
  */
 require("dotenv").config();
 const { parentPort } = require("worker_threads");
@@ -24,18 +30,12 @@ function log(message) {
 
 // ── Load Services ──────────────────────────────────────
 const { initClient } = require("./services/influxService");
-const { hydrateFromMSSQL, hydrateAvailabilityFromMSSQL, hydrateRuntimeFromMSSQL } = require("./services/cacheService");
+const { hydrateFromMSSQL, hydrateAvailabilityFromMSSQL, hydrateRuntimeFromMSSQL, clearAndRollover } = require("./services/cacheService");
 // Phase 11: State Snapshot Service — Checkpoint + Boot Recovery + Graceful Shutdown
 const { loadAndRestore, startCheckpoint } = require("./services/stateSnapshotService");
-const {
-    startCronJobs,
-    backfillStartup,
-    upsertOeeHourly,
-    backfillOeeStartup,
-    backfillNgStartup,
-    backfillEventsStartup,
-    pollMssqlStatusForWeb,
-} = require("./services/cronService");
+// 🆕 pollMssqlStatusForWeb ย้ายมาอยู่ใน worker.js เพราะต้องการ mqttService instance ของ realtime thread
+// (updateStateFromMssqlPoller ใช้ machineStateMem + localEmitToRoomFn ที่ init ใน worker.js)
+const { pollMssqlStatusForWeb } = require("./services/cronService");
 const { startRealtimePolling } = require("./services/realtimeService");
 const {
     initializeMqtt,
@@ -43,10 +43,13 @@ const {
     scheduleResync,
 } = require("./services/mqttService");
 
+// Debounce flag: ป้องกัน cache_reload ที่มาถี่เกินไปจาก cron worker startup
+let cacheReloadPending = false;
+
 // ── Startup Sequence ───────────────────────────────────
 async function startup() {
     try {
-        log("🔧 Worker thread starting...");
+        log("🔧 Worker thread starting (Realtime only)...");
 
         // 1. Initialize InfluxDB client
         initClient();
@@ -56,29 +59,19 @@ async function startup() {
         // ถ้าไม่มี backup หรือ backup เก่าเกินไป → cold boot ตามปกติ
         await loadAndRestore();
 
-        // 2. Hydrate cache from MSSQL (initial load)
+        // 2. Hydrate cache from MSSQL (initial load สำหรับ realtime thread)
+        // หมายเหตุ: cron worker จะ notify cache_reload หลัง backfill เสร็จ → hydrate ใหม่
         await hydrateFromMSSQL();
 
-        // 2.1 Backfill ALL hours (including current) from InfluxDB → MSSQL
-        await backfillStartup();
+        // 2.1–2.16: backfillStartup, backfillNgStartup, backfillEventsStartup
+        // ถูกย้ายไปรันใน worker_cron.js แล้ว (คนละ thread ไม่กระทบ UI)
 
-        // 2.15 🆕 Backfill station NG data (mirrors Output backfill — 5 days + today)
-        await backfillNgStartup();
-
-        // 2.16 🆕 Backfill historical Status & Alarm (Recover from InfluxDB)
-        await backfillEventsStartup();
-
-        // 2.2 Re-hydrate cache from corrected MSSQL data (including availability + runtime tables)
-        await hydrateFromMSSQL();
-        // Phase 11: Hydrate Availability + Runtime caches from new tables
+        // 2.2 Hydrate Availability + Runtime cache
         await hydrateAvailabilityFromMSSQL();
         await hydrateRuntimeFromMSSQL();
 
-        // 2.3 OEE: upsert availability + performance to tb_oee immediately
-        await upsertOeeHourly();
-
-        // 2.4 OEE Backfill: recalc availability + performance for past 5 days
-        await backfillOeeStartup();
+        // 2.3–2.4: upsertOeeHourly, backfillOeeStartup
+        // ถูกย้ายไปรันใน worker_cron.js แล้ว
 
         // 2.5 🆕 [Phase 4] Hydrate OEE Memory Stopwatch from MSSQL (cold-boot recovery)
         // ถ้า server รีสตาร์ทกลางวัน stopwatch จะถูก rebuild จาก MCStatus history ทันที
@@ -88,8 +81,7 @@ async function startup() {
         await memOeeService.hydrateFromMssql(todayShiftDate);
         log(`✅ OEE memory stopwatch hydrated (shift: ${todayShiftDate})`);
 
-        // 3. Start cron jobs
-        startCronJobs();
+        // 3. ไม่ startCronJobs() ที่นี่ — ย้ายไป worker_cron.js แล้ว
 
         // 4. Start real-time polling (emit via IPC instead of Socket.IO)
         startRealtimePolling(emitToRoom, broadcast);
@@ -106,11 +98,21 @@ async function startup() {
         // 4.8 🆕 Force initial poll from MSSQL to populate live Status/Alarm in memory
         await pollMssqlStatusForWeb();
 
+        // 4.85 🆕 Schedule pollMssqlStatusForWeb ทุก 5 นาที
+        // (ย้ายมาจาก cronService Job 4.6 เพราะต้องการ mqttService instance ของ thread นี้)
+        setInterval(async () => {
+            try {
+                await pollMssqlStatusForWeb();
+            } catch (err) {
+                console.error("[Worker] pollMssqlStatusForWeb error:", err.message);
+            }
+        }, 5 * 60 * 1000); // ทุก 5 นาที
+
         // 4.9 Phase 11: Start Checkpoint timer — save state to disk every 5 minutes
         // ต้องเริ่มหลังจาก services ทั้งหมดพร้อมแล้ว เพื่อให้ snapshot มีข้อมูลครบ
         startCheckpoint();
 
-        log("✅ Worker thread startup completed!");
+        log("✅ Worker thread startup completed! (Realtime ready — cron in separate thread)");
     } catch (err) {
         console.error("❌ Worker startup failed:", err);
         process.exit(1);
@@ -119,10 +121,12 @@ async function startup() {
 
 startup();
 
-// Phase 11: รับ IPC message จาก Main Thread (Graceful Shutdown)
-// เมื่อ Main Thread ส่ง { type: "save_snapshot" } มา → Worker จะ saveNow() แล้วตอบกลับ
+// Phase 11: รับ IPC message จาก Main Thread
 parentPort.on("message", async (msg) => {
-    if (msg && msg.type === "save_snapshot") {
+    if (!msg || !msg.type) return;
+
+    // Graceful Shutdown: Main Thread ส่ง save_snapshot มา
+    if (msg.type === "save_snapshot") {
         try {
             const snapshotService = require("./services/stateSnapshotService");
             snapshotService.saveNow();
@@ -132,5 +136,47 @@ parentPort.on("message", async (msg) => {
         }
         // แจ้ง Main Thread ว่า save เสร็จแล้ว → safe to call server.close()
         parentPort.postMessage({ type: "snapshot_saved" });
+    }
+
+    // 🆕 Cache Reload: Cron Worker แจ้งว่า MSSQL อัปเดตแล้ว
+    // ใช้ Debounce 3 วิ ป้องกัน hydrateFromMSSQL() ถูกเรียกซ้ำหลายครั้งจาก cron startup
+    if (msg.type === "cache_reload") {
+        if (!cacheReloadPending) {
+            cacheReloadPending = true;
+            setTimeout(async () => {
+                try {
+                    const { hydrateFromMSSQL: reload, hydrateAvailabilityFromMSSQL: reloadAvail,
+                            hydrateNgFromMSSQL: reloadNg } = require("./services/cacheService");
+                    await reload();
+                    // hydrateAvail เฉพาะ reason ที่เกี่ยวข้องกับ MCStatus
+                    if (msg.reason === "hourly_done" || msg.reason === "oee_hourly_done"
+                        || msg.reason === "oee_startup_done" || msg.reason === "oee_backfill_done") {
+                        await reloadAvail();
+                    }
+                    // hydrateNg เฉพาะ reason ที่เกี่ยวข้องกับ NG
+                    if (msg.reason === "ng_hourly_done" || msg.reason === "backfill_ng_done") {
+                        await reloadNg();
+                    }
+                    console.log(`[Worker] ✅ Cache reloaded (reason: ${msg.reason || "unknown"})`);
+                } catch (e) {
+                    console.error("[Worker] Cache reload failed:", e.message);
+                } finally {
+                    cacheReloadPending = false;
+                }
+            }, 3000); // Debounce 3 วิ
+        } else {
+            console.log(`[Worker] Cache reload debounced (reason: ${msg.reason})`);
+        }
+    }
+
+    // 🆕 Cache Rollover: Daily rollover (00:05 TH) → clear cache + hydrate วันใหม่
+    if (msg.type === "cache_rollover") {
+        try {
+            console.log("[Worker] 🌅 Cache rollover triggered");
+            await clearAndRollover();
+            console.log("[Worker] ✅ Cache rolled over successfully");
+        } catch (e) {
+            console.error("[Worker] Cache rollover failed:", e.message);
+        }
     }
 });

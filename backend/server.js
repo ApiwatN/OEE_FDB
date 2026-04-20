@@ -232,7 +232,8 @@ const { Worker } = require("worker_threads");
 // NOTE: stateSnapshotService อ่าน mqttService/memoryOeeService ที่อยู่ใน Worker Thread
 // การ save จาก Main Thread จึงเป็น "best-effort" — ส่วน Worker Thread save ทุก 5 นาทีผ่าน startCheckpoint()
 // Graceful shutdown จึงดัก signal เพื่อ notify Worker ให้ save ก่อน terminate
-let workerRef = null; // เก็บ reference สำหรับ shutdown
+let workerRef = null;     // Realtime Worker — เก็บ reference สำหรับ shutdown
+let workerCronRef = null; // 🆕 Cron Worker — เก็บ reference สำหรับ shutdown
 
 // Start Express server FIRST — so frontend can connect immediately
 server.listen(port, () => {
@@ -242,7 +243,7 @@ server.listen(port, () => {
   const worker = new Worker("./worker.js");
   workerRef = worker; // Phase 11: เก็บ reference สำหรับ graceful shutdown
 
-  // ── IPC: Worker → Main Thread (Socket.IO emit) ──
+  // ── IPC: Realtime Worker → Main Thread (Socket.IO emit) ──
   const handleWorkerMessage = (msg) => {
     switch (msg.type) {
       case "emit":
@@ -282,6 +283,56 @@ server.listen(port, () => {
   });
 
   console.log("🔧 Worker thread spawned for background services");
+
+  // 🆕 Spawn Cron Worker Thread (Heavy DB write — แยก thread เพื่อไม่กระทบ UI)
+  const spawnCronWorker = () => {
+    const cronWorker = new Worker("./worker_cron.js");
+    workerCronRef = cronWorker;
+
+    // ── IPC: Cron Worker → Main Thread → Relay ไปยัง Realtime Worker ──
+    cronWorker.on("message", (msg) => {
+      if (!msg || !msg.type) return;
+      switch (msg.type) {
+        case "log":
+          // Forward log จาก cron worker
+          console.log(`[CronWorker] ${msg.message}`);
+          break;
+        case "cache_reload":
+          // 📡 Relay → Realtime Worker ให้โหลด cache ใหม่จาก MSSQL
+          if (workerRef) {
+            workerRef.postMessage({ type: "cache_reload", reason: msg.reason });
+          }
+          break;
+        case "cache_rollover":
+          // 📡 Relay → Realtime Worker ให้ clearAndRollover
+          if (workerRef) {
+            workerRef.postMessage({ type: "cache_rollover" });
+          }
+          break;
+      }
+    });
+
+    cronWorker.on("error", (err) => {
+      console.error("❌ Cron worker thread error:", err);
+    });
+
+    cronWorker.on("exit", (code) => {
+      if (code !== 0) {
+        console.error(`⚠️ Cron worker thread exited with code ${code}, restarting in 5s...`);
+        // Auto-restart cron worker on crash (5 วิ delay เพื่อป้องกัน restart loop)
+        setTimeout(() => {
+          console.log("🔄 [CronWorker] Restarting...");
+          spawnCronWorker();
+        }, 5000);
+      } else {
+        console.log("[CronWorker] Exited cleanly.");
+      }
+    });
+
+    console.log("🔧 Cron worker thread spawned (heavy DB write isolated)");
+  };
+
+  spawnCronWorker();
 });
 
 // ─────────────────────────────────────────────────────────
@@ -309,6 +360,12 @@ function gracefulShutdown(signal) {
       console.log("[Shutdown] Server closed. Exiting.");
       process.exit(0);
     });
+  }
+
+  // 🆕 Terminate Cron Worker ด้วย (ไม่รอ snapshot เพราะ cron ไม่มี state สำคัญใน RAM)
+  if (workerCronRef) {
+    workerCronRef.terminate();
+    console.log("[Shutdown] Cron worker terminated.");
   }
 }
 

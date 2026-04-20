@@ -73,7 +73,14 @@ const lastProcessedTime = {};
 /**
  * Start all cron jobs
  */
-function startCronJobs() {
+/**
+ * Start all cron jobs
+ * @param {Function|null} onSyncComplete - callback(reason) เรียกเมื่อ job หนักเสร็จ
+ *   reason: "hourly_done" | "late_data_done" | "oee_hourly_done" | "ng_hourly_done"
+ *           | "daily_sync_done" | "rollover_done"
+ *   Worker_cron จะส่ง IPC cache_reload ไปยัง realtime worker ผ่าน callback นี้
+ */
+function startCronJobs(onSyncComplete = null) {
     const hourlyExpr = process.env.CRON_HOURLY || "0 * * * *";
     const lateExpr = process.env.CRON_LATE_DATA || "*/15 * * * *";
     const rolloverExpr = process.env.CRON_DAILY_ROLLOVER || "5 0 * * *";
@@ -85,6 +92,8 @@ function startCronJobs() {
         try {
             console.log(`⏰ [Cron] Hourly summary starting at ${new Date().toISOString()}`);
             await summarizeLastHour();
+            // 🆕 Notify realtime thread to reload cache (MSSQL updated)
+            if (onSyncComplete) onSyncComplete("hourly_done");
         } finally { releaseLock(); }
     });
 
@@ -98,13 +107,23 @@ function startCronJobs() {
         try {
             console.log(`🔍 [Cron] Late data check at ${new Date().toISOString()}`);
             await handleLateData();
+            // 🆕 Notify realtime thread (late data may update MSSQL)
+            if (onSyncComplete) onSyncComplete("late_data_done");
         } finally { releaseLock(); }
     });
 
     // Job 3: Daily rollover — 00:05 UTC (07:05 TH)
+    // 🆕 ใน cron thread: ไม่เรียก cacheService.clearAndRollover() โดยตรง
+    // เพราะ cacheService ของ cron thread คนละ instance กับ realtime thread
+    // ส่ง rollover_done แทน → realtime thread ทำ clearAndRollover เอง
     cron.schedule(rolloverExpr, async () => {
         console.log(`🌅 [Cron] Daily rollover at ${new Date().toISOString()}`);
-        await cacheService.clearAndRollover();
+        // ถ้าไม่มี callback (worker.js เดิม) ยังคงทำ local clearAndRollover ได้
+        if (onSyncComplete) {
+            onSyncComplete("rollover_done");
+        } else {
+            await cacheService.clearAndRollover();
+        }
     });
 
     // Job 3.5: Machine NG per station hourly
@@ -114,6 +133,8 @@ function startCronJobs() {
         try {
             console.log(`🎯 [Cron] Machine NG hourly saving at ${new Date().toISOString()}`);
             await summarizeNgHourly();
+            // 🆕 Notify realtime thread (ngCache needs reload)
+            if (onSyncComplete) onSyncComplete("ng_hourly_done");
         } finally { releaseLock(); }
     });
 
@@ -125,6 +146,8 @@ function startCronJobs() {
         try {
             console.log(`📈 [Cron] OEE hourly upsert at ${new Date().toISOString()}`);
             await upsertOeeHourly();
+            // 🆕 Notify realtime thread
+            if (onSyncComplete) onSyncComplete("oee_hourly_done");
         } finally { releaseLock(); }
     });
 
@@ -139,16 +162,14 @@ function startCronJobs() {
             await backfillOeeStartup(3);
             await backfillEventsStartup(3); // 🆕 Sync Status and Alarms
             console.log(`✅ [Cron] Daily Influx to MSSQL Sync completed.`);
+            // 🆕 Notify realtime thread
+            if (onSyncComplete) onSyncComplete("daily_sync_done");
         } finally { releaseLock(); }
     });
 
-    // Job 4.6: 5-Minute MSSQL Status Poller for Web Dashboard (Fallback offline MQTT)
-    cron.schedule("*/5 * * * *", async () => {
-        if (!(await acquireLock("pollMssqlStatusForWeb"))) return;
-        try {
-            await pollMssqlStatusForWeb();
-        } finally { releaseLock(); }
-    });
+    // ✅ Job 4.6 (pollMssqlStatusForWeb) ถูกย้ายไปอยู่ใน worker.js แล้ว
+    // เพราะต้องการ mqttService instance ของ realtime thread โดยตรง
+    // (updateStateFromMssqlPoller ใช้ machineStateMem + localEmitToRoomFn ที่ init ใน worker.js)
 
     // Job 5: Auto Plan Daily — 00:10 UTC (07:10 TH)
     const autoPlanExpr = process.env.CRON_AUTO_PLAN || "10 0 * * *";
@@ -164,6 +185,7 @@ function startCronJobs() {
     console.log(`   OEE hourly: "${oeeExpr}"`);
     console.log(`   Daily Sync: "${dailySyncExpr}"`);
     console.log(`   Auto plan: "${autoPlanExpr}"`);
+    if (onSyncComplete) console.log("   📡 Cache sync callback: enabled");
 }
 
 /**
@@ -454,9 +476,6 @@ async function upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetD
     for (const row of allTargetRows) targetMap[row.machine_name] = row;
 
     // ── Step 3: Per machine — calc runtime + availability → upsert ──
-    const runtimeOps = [];
-    const availOps = [];
-
     for (const machineName of machineNames) {
         try {
             const mcRecords = mcStatusByMachine[machineName] || [];
@@ -464,56 +483,6 @@ async function upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetD
 
             // Skip hours marked inactive by plan config
             const isHourActive = !targetRow || ((targetRow[`target_${thColumn}`] || 0) > 0);
-            const totalSeconds = isHourActive ? 3600 : 0;
-
-            let { runTimeSeconds, excludedSeconds } = calcMcStatusDurations(mcRecords, startTH, endTH);
-
-            // 🆕 output_based override: เครื่องที่ไม่ใช้ MCStatus ในการคำนวณ runtime → ใช้ output × avgCT แทน
-            const modeRunTime = getMachineRunTimeMode(machineName);
-            if (modeRunTime === "output_based") {
-                const hourData = resolvedInfluxData[machineName] || {};
-                const hourOutput = hourData.output_count || 0;
-                const hourAvgCt = hourData.avg_cycle_time || 0;
-                runTimeSeconds = hourOutput * hourAvgCt;
-                excludedSeconds = 0; // output-based machines ไม่มี excluded time
-            }
-
-            // Availability = runTime / (total - excluded) × 100
-            const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalSeconds);
-
-            // Upsert runtime row
-            runtimeOps.push(
-                prisma.tb_mc_runtime_hourly.upsert({
-                    where: { machine_name_date: { machine_name: machineName, date: targetDate } },
-                    update: {
-                        [`runtime_${thColumn}`]: parseFloat(runTimeSeconds.toFixed(2)),
-                        [`excluded_${thColumn}`]: parseFloat(excludedSeconds.toFixed(2)),
-                        // runtime_total and excluded_total will be recalculated below
-                    },
-                    create: {
-                        machine_name: machineName,
-                        date: targetDate,
-                        [`runtime_${thColumn}`]: parseFloat(runTimeSeconds.toFixed(2)),
-                        [`excluded_${thColumn}`]: parseFloat(excludedSeconds.toFixed(2)),
-                    },
-                })
-            );
-
-            // Upsert availability row
-            availOps.push(
-                prisma.tb_availability_actual.upsert({
-                    where: { machine_name_date: { machine_name: machineName, date: targetDate } },
-                    update: { [`avail_${thColumn}`]: parseFloat(availability.toFixed(2)) },
-                    create: {
-                        machine_name: machineName,
-                        date: targetDate,
-                        [`avail_${thColumn}`]: parseFloat(availability.toFixed(2)),
-                    },
-                })
-            );
-
-            // ── Update in-memory cache ──
-            cacheService.updateHourRuntime(machineName, thColumn, runTimeSeconds, excludedSeconds);
             cacheService.updateHourAvailability(machineName, thColumn, availability);
 
             // ✅ Yield event loop
@@ -522,10 +491,6 @@ async function upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetD
             console.error(`   ❌ [Phase 6] Runtime/Avail calc failed for ${machineName}:`, err.message);
         }
     }
-
-    // ── Step 4: Batch execute ──
-    if (runtimeOps.length > 0) await Promise.all(runtimeOps);
-    if (availOps.length > 0) await Promise.all(availOps);
 
     // ── Step 5: Recalculate totals (runtime_total, excluded_total, avail_actual) per machine ──
     await recalcRuntimeAndAvailTotals(targetDate, machineNames);
@@ -544,38 +509,39 @@ async function recalcRuntimeAndAvailTotals(targetDate, machineNames) {
         prisma.tb_availability_actual.findMany({ where: { date: targetDate, machine_name: { in: machineNames } } }),
     ]);
 
-    const ops = [];
-
-    for (const row of runtimeRows) {
-        let sumRuntime = 0;
-        let sumExcluded = 0;
-        for (const h of HOURS) {
-            sumRuntime += row[`runtime_${h}`] || 0;
-            sumExcluded += row[`excluded_${h}`] || 0;
-        }
-        ops.push(
-            prisma.tb_mc_runtime_hourly.update({
+    const CHUNK_SIZE = 10;
+    for (let i = 0; i < runtimeRows.length; i += CHUNK_SIZE) {
+        const chunk = runtimeRows.slice(i, i + CHUNK_SIZE);
+        await Promise.all(chunk.map(async (row) => {
+            let sumRuntime = 0;
+            let sumExcluded = 0;
+            for (const h of HOURS) {
+                sumRuntime += row[`runtime_${h}`] || 0;
+                sumExcluded += row[`excluded_${h}`] || 0;
+            }
+            await prisma.tb_mc_runtime_hourly.update({
                 where: { id: row.id },
                 data: {
                     runtime_total: parseFloat(sumRuntime.toFixed(2)),
                     excluded_total: parseFloat(sumExcluded.toFixed(2)),
                 },
-            })
-        );
+            });
+        }));
+        await yieldEventLoop();
     }
 
-    for (const row of availRows) {
-        const values = HOURS.map(h => row[`avail_${h}`] || 0).filter(v => v > 0);
-        const avgAvail = values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0;
-        ops.push(
-            prisma.tb_availability_actual.update({
+    for (let i = 0; i < availRows.length; i += CHUNK_SIZE) {
+        const chunk = availRows.slice(i, i + CHUNK_SIZE);
+        await Promise.all(chunk.map(async (row) => {
+            const values = HOURS.map(h => row[`avail_${h}`] || 0).filter(v => v > 0);
+            const avgAvail = values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+            await prisma.tb_availability_actual.update({
                 where: { id: row.id },
                 data: { avail_actual: parseFloat(avgAvail.toFixed(2)) },
-            })
-        );
+            });
+        }));
+        await yieldEventLoop();
     }
-
-    if (ops.length > 0) await Promise.all(ops);
 }
 
 /**
@@ -654,8 +620,11 @@ async function recalcOverallInMSSQL(targetDate, machineNames) {
             const theoreticalMax = avgCt > 0 ? totalValidSeconds / avgCt : 0;
             const overallEff = theoreticalMax > 0 ? (totalOutputMachine / theoreticalMax) * 100 : 0;
 
-            // Update Overall columns
-            await Promise.all(outputUpdates);
+            // Update Overall columns - Batch by 5 parallel ops
+            for (let b = 0; b < outputUpdates.length; b += 5) {
+                await Promise.all(outputUpdates.slice(b, b + 5));
+                await yieldEventLoop();
+            }
 
             if (ctRow) {
                 await prisma.tb_cycle_time_actual.update({
@@ -677,10 +646,8 @@ async function recalcOverallInMSSQL(targetDate, machineNames) {
             console.error(`❌ Recalc overall for ${machineName} failed:`, err.message);
         }
 
-        // ✅ Yield event loop ทุก 10 เครื่อง
-        if ((idx + 1) % 10 === 0) {
-            await new Promise(resolve => setImmediate(resolve));
-        }
+        // ✅ Yield event loop ทุก 10 เครื่อง -> เปลี่ยนเป็นทุกเครื่อง
+        await new Promise(resolve => setImmediate(resolve));
     }
 }
 
@@ -1136,9 +1103,16 @@ async function backfillStartup(days = 5) {
                     if (op.type === "update") {
                         return prisma[op.table].update({ where: { id: op.id }, data: op.data });
                     } else {
+                        let whereClause = {};
+                        if (op.table === "tb_output_actual") {
+                            whereClause = { machine_name_date_model_name: { machine_name: op.data.machine_name, date: op.data.date, model_name: op.data.model_name || "--" } };
+                        } else {
+                            whereClause = { machine_name_date: { machine_name: op.data.machine_name, date: op.data.date } };
+                        }
+                        
                         // Use upsert instead of create to avoid duplicates from race conditions
                         return prisma[op.table].upsert({
-                            where: { machine_name_date: { machine_name: op.data.machine_name, date: op.data.date } },
+                            where: whereClause,
                             update: op.data,
                             create: op.data,
                         });
@@ -1386,13 +1360,11 @@ async function upsertOeeHourly() {
                     oee_value: parseFloat(oeeValue.toFixed(2)),
                 };
 
-                upsertOps.push(
-                    prisma.tb_oee.upsert({
-                        where: { machine_name_date: { machine_name: machineName, date: targetDate } },
-                        update: dataToWrite,
-                        create: { date: targetDate, machine_name: machineName, ...dataToWrite, ng_qty: 0, quality: 0, oee_value: 0 },
-                    })
-                );
+                await prisma.tb_oee.upsert({
+                    where: { machine_name_date: { machine_name: machineName, date: targetDate } },
+                    update: dataToWrite,
+                    create: { date: targetDate, machine_name: machineName, ...dataToWrite, ng_qty: 0, quality: 0, oee_value: 0 },
+                });
 
                 // ✅ Yield event loop inside heavy OEE calc
                 await yieldEventLoop();
@@ -1401,12 +1373,7 @@ async function upsertOeeHourly() {
             }
         }
 
-        // ✅ Batch execute all upserts
-        if (upsertOps.length > 0) {
-            await Promise.all(upsertOps);
-        }
-
-        console.log(`✅ [Cron] OEE hourly: updated ${upsertOps.length} machines for ${todayStr}`);
+        console.log(`✅ [Cron] OEE hourly: updated machines for ${todayStr}`);
     } catch (err) {
         console.error("❌ OEE hourly cron failed:", err.message);
     }
@@ -1555,22 +1522,18 @@ async function backfillOeeStartup(days = 5) {
                     }
 
                     // 🆕 [Phase 6] Backfill runtime hourly
-                    upsertOps.push(
-                        prisma.tb_mc_runtime_hourly.upsert({
-                            where: { machine_name_date: { machine_name: machineName, date: targetDate } },
-                            update: runtimeHData,
-                            create: { machine_name: machineName, date: targetDate, ...runtimeHData }
-                        })
-                    );
+                    await prisma.tb_mc_runtime_hourly.upsert({
+                        where: { machine_name_date: { machine_name: machineName, date: targetDate } },
+                        update: runtimeHData,
+                        create: { machine_name: machineName, date: targetDate, ...runtimeHData }
+                    });
 
                     // 🆕 [Phase 6] Backfill availability
-                    upsertOps.push(
-                        prisma.tb_availability_actual.upsert({
-                            where: { machine_name_date: { machine_name: machineName, date: targetDate } },
-                            update: availHData,
-                            create: { machine_name: machineName, date: targetDate, ...availHData }
-                        })
-                    );
+                    await prisma.tb_availability_actual.upsert({
+                        where: { machine_name_date: { machine_name: machineName, date: targetDate } },
+                        update: availHData,
+                        create: { machine_name: machineName, date: targetDate, ...availHData }
+                    });
 
                     const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalActiveSeconds);
                     const idealCT = targetRow?.cycle_time_target || 0;
@@ -1611,24 +1574,17 @@ async function backfillOeeStartup(days = 5) {
                         oee_value: parseFloat(oeeValue.toFixed(2)),
                     };
 
-                    upsertOps.push(
-                        prisma.tb_oee.upsert({
-                            where: { machine_name_date: { machine_name: machineName, date: targetDate } },
-                            update: dataToWrite,
-                            create: { date: targetDate, machine_name: machineName, ...dataToWrite, ng_qty: 0, quality: 0, oee_value: 0 },
-                        })
-                    );
+                    await prisma.tb_oee.upsert({
+                        where: { machine_name_date: { machine_name: machineName, date: targetDate } },
+                        update: dataToWrite,
+                        create: { date: targetDate, machine_name: machineName, ...dataToWrite, ng_qty: 0, quality: 0, oee_value: 0 },
+                    });
 
                     // ✅ Yield event loop inside heavy historical calculation
                     await yieldEventLoop();
                 } catch (err) {
                     console.error(`   ❌ OEE backfill calc failed for ${machineName} on ${dateStr}:`, err.message);
                 }
-            }
-
-            // ✅ Batch execute all upserts for this day
-            if (upsertOps.length > 0) {
-                await Promise.all(upsertOps);
             }
 
             // 🆕 [Phase 6] Recalculate totals for runtime and availability
@@ -2046,5 +2002,6 @@ module.exports = {
     backfillOeeStartup,
     autoPlanDaily,
     syncEventsFromInfluxDb,
-    pollMssqlStatusForWeb
+    pollMssqlStatusForWeb,
+    upsertRuntimeAndAvailabilityForHour
 };
