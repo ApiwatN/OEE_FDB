@@ -22,6 +22,9 @@ const { calcMcStatusDurations, calcMcStatusDurationsPerHour, calcAvailability, c
 const dayjs = require("dayjs");
 const { generatePlanForMachine } = require("../controllers/PlanConfigController");
 
+// ✅ Utility: Yield event loop to prevent blocking Realtime Worker (UI Freeze fix)
+const yieldEventLoop = () => new Promise(resolve => setImmediate(resolve));
+
 // ✅ Fix #2 (v3): True Queue-based lock — resolves thundering herd concurrency issue
 const lockQueue = [];
 let isLocked = false;
@@ -513,6 +516,8 @@ async function upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetD
             cacheService.updateHourRuntime(machineName, thColumn, runTimeSeconds, excludedSeconds);
             cacheService.updateHourAvailability(machineName, thColumn, availability);
 
+            // ✅ Yield event loop
+            await yieldEventLoop();
         } catch (err) {
             console.error(`   ❌ [Phase 6] Runtime/Avail calc failed for ${machineName}:`, err.message);
         }
@@ -1111,6 +1116,9 @@ async function backfillStartup(days = 5) {
                         console.log(`   🧹 ${machineName}: zeroed stale ${actualField} (was ${dbRow[actualField]})`);
                     }
                 }
+
+                // ✅ Yield event loop to prevent UI freezing during large mapping
+                await yieldEventLoop();
             }
 
             // ── Step 4: Batch execute pending operations ──
@@ -1385,6 +1393,9 @@ async function upsertOeeHourly() {
                         create: { date: targetDate, machine_name: machineName, ...dataToWrite, ng_qty: 0, quality: 0, oee_value: 0 },
                     })
                 );
+
+                // ✅ Yield event loop inside heavy OEE calc
+                await yieldEventLoop();
             } catch (err) {
                 console.error(`   ❌ OEE calc failed for ${machineName}:`, err.message);
             }
@@ -1607,6 +1618,9 @@ async function backfillOeeStartup(days = 5) {
                             create: { date: targetDate, machine_name: machineName, ...dataToWrite, ng_qty: 0, quality: 0, oee_value: 0 },
                         })
                     );
+
+                    // ✅ Yield event loop inside heavy historical calculation
+                    await yieldEventLoop();
                 } catch (err) {
                     console.error(`   ❌ OEE backfill calc failed for ${machineName} on ${dateStr}:`, err.message);
                 }
