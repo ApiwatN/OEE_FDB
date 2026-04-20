@@ -169,11 +169,10 @@ module.exports = {
                 }
                 outputActualDBArray = [outputActualDB];
             } else {
-                const rawRows = await prisma.tb_output_actual.findMany({
+                // Keep all rows (both real model and "--") — per-hour fallback applied in SUM loop below
+                outputActualDBArray = await prisma.tb_output_actual.findMany({
                     where: { machine_name, date: targetDate },
                 });
-                // ✅ Filter "--" rows — stale data before Telegraf restart, real models are source of truth
-                outputActualDBArray = rawRows.filter(r => r.model_name !== "--");
             }
 
             // ✅ Fix: current hour → InfluxDB เป็น source of truth (ต้องอยู่นอก else เพื่อให้ทำงานทั้งกรณี cache และ MSSQL)
@@ -223,9 +222,13 @@ module.exports = {
                 const targetVal = outputTargetDB[`target_${hStr}`] || 0;
                 
                 let actualVal = 0;
-                for (const row of outputActualDBArray) {
-                    // ✅ SUM all model rows ("--" already filtered from array)
-                    actualVal += (row[`actual_${hStr}`] || 0);
+                // Per-hour fallback: real model wins; "--" used only if no real model produced output this hour
+                const realForHour = outputActualDBArray.filter(r => r.model_name !== "--" && (r[`actual_${hStr}`] || 0) > 0);
+                if (realForHour.length > 0) {
+                    actualVal = realForHour.reduce((acc, row) => acc + (row[`actual_${hStr}`] || 0), 0);
+                } else {
+                    const dashRow = outputActualDBArray.find(r => r.model_name === "--");
+                    actualVal = dashRow ? (dashRow[`actual_${hStr}`] || 0) : 0;
                 }
 
                 // 1. ผลรวม Actual ทั้งหมด
@@ -467,11 +470,10 @@ module.exports = {
                 }
                 outputActualDBArray = [outputActualDB];
             } else {
-                const rawRows = await prisma.tb_output_actual.findMany({
+                // Keep all rows — per-hour fallback applied in SUM loop below
+                outputActualDBArray = await prisma.tb_output_actual.findMany({
                     where: { machine_name, date: targetDate },
                 });
-                // ✅ Filter "--" rows — stale data before Telegraf restart
-                outputActualDBArray = rawRows.filter(r => r.model_name !== "--");
             }
 
             // ✅ Fix: current hour → InfluxDB เป็น source of truth
@@ -501,8 +503,13 @@ module.exports = {
             for (const h of SHIFT_HOURS) {
                 // Actual
                 let act = 0;
-                for (const row of outputActualDBArray) {
-                    act += (row[`actual_${h}`] || 0);
+                // Per-hour fallback: real model wins; "--" used only if no real model output this hour
+                const realForH = outputActualDBArray.filter(r => r.model_name !== "--" && (r[`actual_${h}`] || 0) > 0);
+                if (realForH.length > 0) {
+                    act = realForH.reduce((acc, row) => acc + (row[`actual_${h}`] || 0), 0);
+                } else {
+                    const dashRow = outputActualDBArray.find(r => r.model_name === "--");
+                    act = dashRow ? (dashRow[`actual_${h}`] || 0) : 0;
                 }
                 
                 accActual += act;

@@ -316,19 +316,34 @@ async function hydrateFromMSSQL() {
             targetCache[mn].target = row; // Store the whole row (contains target_07, target_08...)
         }
 
-        // Fill cache from MSSQL data
+        // Fill cache from MSSQL data using per-hour fallback:
+        // Pass 1: bucket all rows into { real: sum, dash: value } per machine per hour
+        // Pass 2: for each hour, use real model sum if > 0, else fallback to "--" value
+        const machineHourBucket = {}; // { mn: { h: { real: 0, dash: 0 } } }
         for (const row of outputs) {
             const mn = row.machine_name;
-            // ✅ Skip "--" rows — they are stale data from before Telegraf restart
-            // Real model rows are the source of truth; "--" causes double-count with SUM logic
-            if (row.model_name === "--") continue;
-            initMachineCache(mn, dateStr);
-
+            const isDash = row.model_name === "--";
+            if (!machineHourBucket[mn]) machineHourBucket[mn] = {};
             for (const h of SHIFT_HOURS) {
                 const val = row[`actual_${h}`];
                 if (val != null && val > 0) {
-                    // SUM ทุก model row (รองรับ multi-model per day)
-                    machineCache[mn].output[`actual_${h}`] = (machineCache[mn].output[`actual_${h}`] || 0) + val;
+                    if (!machineHourBucket[mn][h]) machineHourBucket[mn][h] = { real: 0, dash: 0 };
+                    if (isDash) {
+                        machineHourBucket[mn][h].dash += val;
+                    } else {
+                        machineHourBucket[mn][h].real += val;
+                    }
+                }
+            }
+        }
+        // Apply per-hour fallback to cache
+        for (const [mn, hourBuckets] of Object.entries(machineHourBucket)) {
+            initMachineCache(mn, dateStr);
+            for (const [h, bucket] of Object.entries(hourBuckets)) {
+                // If real model produced output this hour → use real; else fallback to "--"
+                const val = bucket.real > 0 ? bucket.real : bucket.dash;
+                if (val > 0) {
+                    machineCache[mn].output[`actual_${h}`] = val;
                 }
             }
         }
