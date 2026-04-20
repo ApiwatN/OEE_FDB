@@ -278,7 +278,14 @@ async function fastPollAndEmit() {
                 const h = SHIFT_HOURS[i];
                 const targetVal = targets[`target_${h}`] || 0;
                 if (targetVal > 0) {
-                    totalValidSeconds += (i < currentShiftIndex) ? 3600 : adjustedElapsedSeconds;
+                    if (i < currentShiftIndex) {
+                        totalValidSeconds += 3600;
+                    } else {
+                        // Current hour passed time (up to 3600s)
+                        const mins = now.getMinutes();
+                        const secs = now.getSeconds();
+                        totalValidSeconds += (mins * 60) + secs;
+                    }
                 }
             }
 
@@ -306,6 +313,35 @@ async function fastPollAndEmit() {
             // 🆕 [Phase 7] Get Hourly Availability from Cache array
             const hourlyAvailability = cacheService.getAvailability(machineName);
 
+            // 🛠️ Calculate Current Hour Availability dynamically for Fast Loop
+            const totalHourSecs = Math.max(0, (now.getTime() - new Date(start).getTime()) / 1000);
+            const modeRunTime = getMachineRunTimeMode(machineName);
+            let currentHourRun = 0;
+            if (modeRunTime === "output_based") {
+                currentHourRun = currentData.output_count * parseFloat(effectiveCt.toFixed(2));
+            } else {
+                const mcRecords = sharedMcRecordsCache[machineName] || [];
+                if (mcRecords.length > 0) {
+                    const { runTimeSeconds } = calcMcStatusDurations(mcRecords, new Date(start), now);
+                    currentHourRun = runTimeSeconds;
+                }
+            }
+            const currentAvail = calcAvailability(currentHourRun, currentHourExcluded, totalHourSecs);
+            if (currentShiftIndex < hourlyAvailability.length) {
+                hourlyAvailability[currentShiftIndex] = parseFloat(currentAvail.toFixed(2));
+            }
+
+            // 🆕 Daily Availability สำหรับ output_based machines (real-time ทุก 2 วิ)
+            // output_based ใช้ totalOutput × avgCT หารด้วย totalValidSeconds
+            let dailyAvailability = undefined; // number | undefined
+            if (modeRunTime === "output_based") {
+                const avgCtForAvail = overallAvgCt > 0 ? overallAvgCt : (targets.cycle_time_target || 0);
+                if (avgCtForAvail > 0 && totalValidSeconds > 0) {
+                    const dailyRunTimeSecs = totalOutput * avgCtForAvail;
+                    dailyAvailability = parseFloat(Math.min(100, (dailyRunTimeSecs / totalValidSeconds) * 100).toFixed(2));
+                }
+            }
+
             // Build full production payload
             const machinePayload = {
                 currentHour: {
@@ -324,12 +360,13 @@ async function fastPollAndEmit() {
                     achieve: parseFloat(overallAchieve.toFixed(2)),
                     avgCycleTime: parseFloat(overallAvgCt.toFixed(2)),
                     overallEfficiency: parseFloat(overallEff.toFixed(2)),
-                    // ❌ ไม่มี availability, performance, quality, oee (รอ Slow Loop)
+                    // 🆕 availability สำหรับ output_based (ส่งทุก 2 วิ); ส่วน status_based รอ Slow Loop
+                    ...(dailyAvailability !== undefined && { availability: dailyAvailability }),
                     hourly: {
                         output: hourlyOutput,
                         cycleTime: hourlyCycleTime,
                         efficiency: hourlyEfficiency,
-                        availability: hourlyAvailability, // 🆕 Add availability array
+                        availability: hourlyAvailability,
                         outputAccum: hourlyOutputAccum,
                     },
                 },
@@ -358,6 +395,8 @@ async function fastPollAndEmit() {
             const currentStationNgStr = JSON.stringify(machinePayload.currentHour.stationNg); // 🆕 Convert to string for deep compare
             const currentStatus = machinePayload.currentHour.live_status;
             const currentAlarm = machinePayload.currentHour.live_alarm;
+            // 🆕 Calculate current Availability matching float scale for delta check
+            const currentAvailTruncated = parseFloat(currentAvail.toFixed(2));
 
             const hasChanged = !lastData ||
                 lastData.output !== currentOutput ||
@@ -367,7 +406,8 @@ async function fastPollAndEmit() {
                 lastData.shiftIndex !== currentShiftIndex ||
                 lastData.stationNgStr !== currentStationNgStr ||
                 lastData.status !== currentStatus ||
-                lastData.alarm !== currentAlarm;
+                lastData.alarm !== currentAlarm ||
+                lastData.availability !== currentAvailTruncated;
 
             if (hasChanged) {
                 dashboardMachines[machineName] = machinePayload;
@@ -380,6 +420,7 @@ async function fastPollAndEmit() {
                     stationNgStr: currentStationNgStr, // 🆕 Store stringified state
                     status: currentStatus,
                     alarm: currentAlarm,
+                    availability: currentAvailTruncated, // 🆕 Track numeric decay correctly
                 });
             }
 
@@ -609,8 +650,15 @@ async function _slowPollAndEmitInner() {
 
         // ✅ Pre-fetch Actual rows as fallback if cache is missing (Crucial for output_based machines)
         const allActualRows = await prisma.tb_output_actual.findMany({ where: { date: targetDate } });
-        const actualMap = {};
-        for (const row of allActualRows) actualMap[row.machine_name] = row;
+        // ✅ SUM ทุก model row เป็น fallback เมื่อ cache ว่าง (รองรับ multi-model per day)
+        const actualSumMap = {};
+        for (const row of allActualRows) {
+            if (!actualSumMap[row.machine_name]) actualSumMap[row.machine_name] = {};
+            for (const h of SHIFT_HOURS) {
+                actualSumMap[row.machine_name][`actual_${h}`] =
+                    (actualSumMap[row.machine_name][`actual_${h}`] || 0) + (row[`actual_${h}`] || 0);
+            }
+        }
 
         for (const machineName of allMachineNames) {
             // Availability & Performance from MCStatus
@@ -643,11 +691,11 @@ async function _slowPollAndEmitInner() {
                 }
             } else {
                 // Fallback: หาก cache หายกลางคัน ให้ใช้ db เป็นฐานสำหรับชั่วโมงอดีต
-                const actualRow = actualMap[machineName];
-                if (actualRow) {
+                const actualSumRow = actualSumMap[machineName];
+                if (actualSumRow) {
                     for (let i = 0; i < SHIFT_HOURS.length; i++) {
                         if (i === currentShiftIndex) continue;
-                        totalOutput += (actualRow[`actual_${SHIFT_HOURS[i]}`] || 0);
+                        totalOutput += (actualSumRow[`actual_${SHIFT_HOURS[i]}`] || 0);
                     }
                 }
             }

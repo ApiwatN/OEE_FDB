@@ -98,12 +98,25 @@ module.exports = {
                 endOfTargetDay = yesterday;
             }
 
-            // กำหนดเวลาเป็นสิ้นวัน
-            endOfTargetDay.setHours(23, 59, 59, 999);
-
-            whereCondition.date = {
-                lte: endOfTargetDay
-            };
+            if (targetDate < serverToday) {
+                // 🔹 กรณีดูข้อมูลย้อนหลัง: บังคับให้หาเฉพาะ "วันนั้น" เท่านั้น (ไม่ Fallback ไปวันก่อนหน้า)
+                const startOfDayUTC = new Date(targetDate);
+                startOfDayUTC.setUTCHours(0, 0, 0, 0);
+                
+                const endOfDayUTC = new Date(targetDate);
+                endOfDayUTC.setUTCHours(23, 59, 59, 999);
+                
+                whereCondition.date = {
+                    gte: startOfDayUTC,
+                    lte: endOfDayUTC
+                };
+            } else {
+                // 🔹 กรณีดูข้อมูลวันนี้: อนุญาตให้ดึงก้อนล่าสุด (รวมที่ Fallback มาจากเมื่อวานได้ถ้ายังไม่มีของวันนี้)
+                endOfTargetDay.setUTCHours(23, 59, 59, 999); // ปรับหลีกเลี่ยง Timezone Shift
+                whereCondition.date = {
+                    lte: endOfTargetDay
+                };
+            }
 
             const data = await prisma.tb_oee.findFirst({
                 where: whereCondition,
@@ -146,28 +159,35 @@ module.exports = {
             }
 
             // 2. ดึงข้อมูล Actual — ใช้ cache ถ้าดูวันนี้
-            let outputActualDB;
+            let outputActualDBArray = [];
             const cachedData = isToday ? cacheService.getFullDay(machine_name) : null;
             if (cachedData) {
                 // Build a pseudo-DB row from cache
-                outputActualDB = { machine_name, date: targetDate };
+                const outputActualDB = { machine_name, date: targetDate };
                 for (const h of SHIFT_HOURS) {
                     outputActualDB[`actual_${h}`] = cachedData.output[`actual_${h}`] || 0;
                 }
+                outputActualDBArray = [outputActualDB];
             } else {
-                outputActualDB = await prisma.tb_output_actual.findFirst({
+                outputActualDBArray = await prisma.tb_output_actual.findMany({
                     where: { machine_name, date: targetDate },
                 });
             }
 
             // ✅ Fix: current hour → InfluxDB เป็น source of truth (ต้องอยู่นอก else เพื่อให้ทำงานทั้งกรณี cache และ MSSQL)
-            if (isToday && outputActualDB) {
+            if (isToday) {
                 try {
                     const now2 = new Date();
                     const { start, thColumn } = getCurrentHourBoundaries(now2);
                     const field = `actual_${thColumn}`;
                     const influxData = await influxService.queryMachineForHour(machine_name, start, now2);
-                    outputActualDB[field] = (influxData && influxData.output_count > 0) ? influxData.output_count : 0;
+                    if (influxData && influxData.output_count > 0) {
+                        if (outputActualDBArray.length === 0) {
+                             outputActualDBArray = [{ machine_name, date: targetDate }];
+                        }
+                        // Assume current hour overrides total in the first pseudo-row to maintain sums if cache is used
+                        outputActualDBArray[0][field] = influxData.output_count;
+                    }
                 } catch (e) { /* non-critical — keep cache/MSSQL value */ }
             }
 
@@ -199,7 +219,12 @@ module.exports = {
             for (let i = 0; i < SHIFT_HOURS.length; i++) {
                 const hStr = SHIFT_HOURS[i];
                 const targetVal = outputTargetDB[`target_${hStr}`] || 0;
-                const actualVal = outputActualDB ? (outputActualDB[`actual_${hStr}`] || 0) : 0;
+                
+                let actualVal = 0;
+                for (const row of outputActualDBArray) {
+                    // ✅ SUM ทุก model row (รองรับ multi-model per day)
+                    actualVal += (row[`actual_${hStr}`] || 0);
+                }
 
                 // 1. ผลรวม Actual ทั้งหมด
                 outputActualSum += actualVal;
@@ -305,7 +330,24 @@ module.exports = {
                 const modeRunTime = getMachineRunTimeMode(machine_name);
                 if (modeRunTime === "output_based") {
                     // AHV: ไม่มี MCStatus → คำนวณจาก output × avgCT
-                    const cacheCt = cachedData?.overall?.avgCycleTime || 0;
+                    let cacheCt = cachedData?.overall?.avgCycleTime || 0;
+
+                    // Fallback: ถ้า cache ว่าง → อ่าน avg CT จริงจาก tb_cycle_time_actual
+                    if (cacheCt <= 0) {
+                        const ctActualRow = await prisma.tb_cycle_time_actual.findFirst({
+                            where: { machine_name, date: targetDate },
+                        });
+                        if (ctActualRow) {
+                            // คำนวณ weighted avg CT จากทุก hour ที่มีข้อมูล
+                            let sumCt = 0, countHours = 0;
+                            for (const h of SHIFT_HOURS) {
+                                const hCt = ctActualRow[`cycle_${h}`] || 0;
+                                if (hCt > 0) { sumCt += hCt; countHours++; }
+                            }
+                            cacheCt = countHours > 0 ? sumCt / countHours : 0;
+                        }
+                    }
+
                     const avgCt = cacheCt > 0 ? cacheCt : (outputTargetDB.cycle_time_target || 0);
                     const runTime = outputActualSum * avgCt;
                     availabilityActual = validSeconds > 0 ? Math.min(100, (runTime / validSeconds) * 100) : 0;
@@ -349,22 +391,31 @@ module.exports = {
             let actualModel = "-";
             try {
                 const { startUTC, endUTC } = getShiftBoundariesForDate(date);
-                const now = new Date();
                 const queryEnd = now < endUTC ? now : endUTC;
                 const actualModels = await influxService.queryActualModels(machine_name, startUTC, queryEnd);
                 if (actualModels.length > 0) {
-                    actualModel = actualModels[0].model_name; // dominant model (sorted by count desc)
+                    const models = actualModels.map(m => m.model_name).filter(m => m && m !== "--");
+                    if (models.length > 0) actualModel = models.join(", ");
                 }
             } catch (e) {
                 console.error("getDataTable: InfluxDB model query failed:", e.message);
             }
             // Fallback chain: InfluxDB → tb_output_actual → tb_output_target
             if (actualModel === "-") {
-                const actualRow = await prisma.tb_output_actual.findFirst({
+                const actualRows = await prisma.tb_output_actual.findMany({
                     where: { machine_name, date: targetDate },
+                    select: { model_name: true }
                 });
-                if (actualRow?.model_name) actualModel = actualRow.model_name;
-                else actualModel = outputTargetDB.model_name || "-";
+                if (actualRows.length > 0) {
+                    const distinctModels = [...new Set(actualRows.map(r => r.model_name).filter(m => m && m !== "--"))];
+                    if (distinctModels.length > 0) {
+                        actualModel = distinctModels.join(", ");
+                    } else {
+                        actualModel = outputTargetDB.model_name || "-";
+                    }
+                } else {
+                    actualModel = outputTargetDB.model_name || "-";
+                }
             }
 
             res.json({
@@ -405,27 +456,33 @@ module.exports = {
             });
 
             // ใช้ cache ถ้าดูวันนี้
-            let outputActualDB;
+            let outputActualDBArray = [];
             const cachedData = isToday ? cacheService.getFullDay(machine_name) : null;
             if (cachedData) {
-                outputActualDB = { machine_name, date: targetDate };
+                const outputActualDB = { machine_name, date: targetDate };
                 for (const h of SHIFT_HOURS) {
                     outputActualDB[`actual_${h}`] = cachedData.output[`actual_${h}`] || 0;
                 }
+                outputActualDBArray = [outputActualDB];
             } else {
-                outputActualDB = await prisma.tb_output_actual.findFirst({
+                outputActualDBArray = await prisma.tb_output_actual.findMany({
                     where: { machine_name, date: targetDate },
                 });
             }
 
-            // ✅ Fix: current hour → InfluxDB เป็น source of truth (ต้องอยู่นอก else เพื่อให้ทำงานทั้งกรณี cache และ MSSQL)
-            if (isToday && outputActualDB) {
+            // ✅ Fix: current hour → InfluxDB เป็น source of truth
+            if (isToday) {
                 try {
                     const now = new Date();
                     const { start, thColumn } = getCurrentHourBoundaries(now);
                     const field = `actual_${thColumn}`;
                     const influxData = await influxService.queryMachineForHour(machine_name, start, now);
-                    outputActualDB[field] = (influxData && influxData.output_count > 0) ? influxData.output_count : 0;
+                    if (influxData && influxData.output_count > 0) {
+                        if (outputActualDBArray.length === 0) {
+                             outputActualDBArray = [{ machine_name, date: targetDate }];
+                        }
+                        outputActualDBArray[0][field] = influxData.output_count;
+                    }
                 } catch (e) { /* non-critical — keep cache/MSSQL value */ }
             }
 
@@ -439,7 +496,11 @@ module.exports = {
 
             for (const h of SHIFT_HOURS) {
                 // Actual
-                const act = outputActualDB ? (outputActualDB[`actual_${h}`] || 0) : 0;
+                let act = 0;
+                for (const row of outputActualDBArray) {
+                    act += (row[`actual_${h}`] || 0);
+                }
+                
                 accActual += act;
                 outputActual.push(act);
                 outputActualAccum.push(accActual);

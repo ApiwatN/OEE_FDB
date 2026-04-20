@@ -324,7 +324,8 @@ async function hydrateFromMSSQL() {
             for (const h of SHIFT_HOURS) {
                 const val = row[`actual_${h}`];
                 if (val != null && val > 0) {
-                    machineCache[mn].output[`actual_${h}`] = val;
+                    // ✅ SUM ทุก model row แทนการทับ (รองรับ multi-model per day)
+                    machineCache[mn].output[`actual_${h}`] = (machineCache[mn].output[`actual_${h}`] || 0) + val;
                 }
             }
         }

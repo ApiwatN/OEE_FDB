@@ -209,11 +209,19 @@ async function recalculateAPQForDay(machineName, targetDate) {
             return;
         }
 
-        const [outputRow, targetRow, ctRow] = await Promise.all([
-            prisma.tb_output_actual.findFirst({ where: { machine_name: machineName, date: targetDate } }),
+        const [outputRows, targetRow, ctRow] = await Promise.all([
+            prisma.tb_output_actual.findMany({ where: { machine_name: machineName, date: targetDate } }),
             prisma.tb_output_target.findFirst({ where: { machine_name: machineName, date: targetDate } }),
             prisma.tb_cycle_time_actual.findFirst({ where: { machine_name: machineName, date: targetDate } }),
         ]);
+
+        // ✅ Pre-compute SUM per hour สำหรับทุก model row
+        const outputSumPerHour = {};
+        for (const row of outputRows) {
+            for (const h of SHIFT_HOURS) {
+                outputSumPerHour[h] = (outputSumPerHour[h] || 0) + (row[`actual_${h}`] || 0);
+            }
+        }
 
         let runTimeSeconds = 0;
         let excludedSeconds = 0;
@@ -225,7 +233,7 @@ async function recalculateAPQForDay(machineName, targetDate) {
             const isActive = !targetRow || (targetRow[`target_${h}`] > 0);
             
             if (isActive) {
-                totalOutput += (outputRow ? (outputRow[`actual_${h}`] || 0) : 0);
+                totalOutput += (outputSumPerHour[h] || 0);
 
                 const hStart = new Date(shiftStart.getTime() + i * 3600000);
                 const hEnd = new Date(hStart.getTime() + 3600000);
@@ -243,7 +251,7 @@ async function recalculateAPQForDay(machineName, targetDate) {
             let totalOutputForCt = 0;
             for (let i = 0; i < SHIFT_HOURS.length; i++) {
                 const h = SHIFT_HOURS[i];
-                const out = outputRow ? (outputRow[`actual_${h}`] || 0) : 0;
+                const out = outputSumPerHour[h] || 0;
                 const ct  = ctRow ? (ctRow[`cycle_${h}`] || 0) : 0;
                 if (out > 0 && ct > 0) {
                     sumCtWeighted += ct * out;

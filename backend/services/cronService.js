@@ -278,7 +278,7 @@ async function summarizeLastHour() {
 
         // 2. ✅ Upsert MSSQL for each machine (3 ops in parallel per machine)
         for (const [machineName, data] of Object.entries(machineData)) {
-            let { output_count, avg_cycle_time } = data;
+            let { output_count, avg_cycle_time, models } = data;
             
             // 🆕 Support ct_calc_modes
             const ctMode = getCTCalcMode(machineName);
@@ -296,12 +296,21 @@ async function summarizeLastHour() {
             const theoreticalMax = avg_cycle_time > 0 ? 3600 / avg_cycle_time : 0;
             const efficiency = theoreticalMax > 0 ? (output_count / theoreticalMax) * 100 : 0;
 
-            // ✅ Run 3 upserts in parallel instead of sequential
-            await Promise.all([
-                upsertHourlyField("tb_output_actual", machineName, targetDate, `actual_${thColumn}`, output_count, "Overall", null),
+            // ✅ Upserts
+            const upsertOps = [
                 upsertHourlyField("tb_cycle_time_actual", machineName, targetDate, `cycle_${thColumn}`, parseFloat(avg_cycle_time.toFixed(2)), "cycle_time", null),
                 upsertHourlyField("tb_efficiency_actual", machineName, targetDate, `eff_${thColumn}`, parseFloat(efficiency.toFixed(2)), "eff_actual", null),
-            ]);
+            ];
+
+            if (models && Object.keys(models).length > 0) {
+                for (const [mName, mData] of Object.entries(models)) {
+                    upsertOps.push(upsertHourlyField("tb_output_actual", machineName, targetDate, `actual_${thColumn}`, mData.output_count, "Overall", null, mName));
+                }
+            } else {
+                upsertOps.push(upsertHourlyField("tb_output_actual", machineName, targetDate, `actual_${thColumn}`, output_count, "Overall", null, "--"));
+            }
+
+            await Promise.all(upsertOps);
 
             cacheService.updateHour(machineName, thColumn, output_count, avg_cycle_time, efficiency);
             console.log(`   ✅ ${machineName}: output=${output_count}, ct=${avg_cycle_time.toFixed(2)}, eff=${efficiency.toFixed(1)}%`);
@@ -313,21 +322,6 @@ async function summarizeLastHour() {
         // 3. Recalculate Overall columns in MSSQL
         await recalcOverallInMSSQL(targetDate, Object.keys(machineData));
 
-        // 4. ✅ Phase 1: Write model_name from InfluxDB to tb_output_actual (batched)
-        try {
-            const modelsByMachine = await influxService.queryAllMachinesModelsForHour(start, end);
-            const modelEntries = Object.entries(modelsByMachine).filter(([, v]) => !!v);
-            await Promise.all(modelEntries.map(([machineName, modelName]) =>
-                prisma.tb_output_actual.updateMany({
-                    where: { machine_name: machineName, date: targetDate },
-                    data: { model_name: modelName },
-                }).catch(e => console.error(`   ⚠️ Failed to write model_name for ${machineName}:`, e.message))
-            ));
-            console.log(`   📋 Model names written for ${modelEntries.length} machines`);
-        } catch (e) {
-            console.error("   ⚠️ InfluxDB model query failed in summarizeLastHour:", e.message);
-        }
-
     } catch (err) {
         console.error("❌ Hourly summary failed:", err.message);
     }
@@ -336,7 +330,7 @@ async function summarizeLastHour() {
 /**
  * Upsert a single hourly field in MSSQL
  */
-async function upsertHourlyField(tableName, machineName, date, fieldName, value, overallFieldName, overallValue) {
+async function upsertHourlyField(tableName, machineName, date, fieldName, value, overallFieldName, overallValue, modelName = null) {
     try {
         const updateData = { [fieldName]: value };
         if (overallValue !== null && overallFieldName) {
@@ -352,11 +346,16 @@ async function upsertHourlyField(tableName, machineName, date, fieldName, value,
             createData[overallFieldName] = overallValue;
         }
 
-        // Atomic upsert using @@unique([machine_name, date]) — no race condition
+        let whereClause = { machine_name_date: { machine_name: machineName, date } };
+
+        if (tableName === "tb_output_actual" && modelName !== null) {
+            whereClause = { machine_name_date_model_name: { machine_name: machineName, date, model_name: modelName } };
+            createData.model_name = modelName;
+        }
+
+        // Atomic upsert
         await prisma[tableName].upsert({
-            where: {
-                machine_name_date: { machine_name: machineName, date },
-            },
+            where: whereClause,
             update: updateData,
             create: createData,
         });
@@ -565,34 +564,46 @@ async function recalcOverallInMSSQL(targetDate, machineNames) {
     for (let idx = 0; idx < machineNames.length; idx++) {
         const machineName = machineNames[idx];
         try {
-            // Read current row
-            const outputRow = await prisma.tb_output_actual.findFirst({
+            // Read current rows
+            const outputRows = await prisma.tb_output_actual.findMany({
                 where: { machine_name: machineName, date: targetDate },
             });
             const ctRow = await prisma.tb_cycle_time_actual.findFirst({
                 where: { machine_name: machineName, date: targetDate },
             });
 
-            if (!outputRow) continue;
+            if (outputRows.length === 0) continue;
 
             // Calculate Overall output
-            let totalOutput = 0;
+            let totalOutputMachine = 0;
             let sumCtWeighted = 0;
             let totalOutputForCt = 0;
             let countWithData = 0;
+            const outputUpdates = [];
 
-            for (const h of SHIFT_HOURS) {
-                const out = outputRow[`actual_${h}`] || 0;
-                const ct = ctRow ? (ctRow[`cycle_${h}`] || 0) : 0;
-                totalOutput += out;
+            for (const outputRow of outputRows) {
+                let rowOverallOutput = 0;
+                for (const h of SHIFT_HOURS) {
+                    const out = outputRow[`actual_${h}`] || 0;
+                    rowOverallOutput += out;
+                    totalOutputMachine += out;
 
-                if (out > 0) {
-                    if (ct > 0) {
-                        sumCtWeighted += ct * out;
-                        totalOutputForCt += out;
+                    if (out > 0) {
+                        const ct = ctRow ? (ctRow[`cycle_${h}`] || 0) : 0;
+                        if (ct > 0) {
+                            sumCtWeighted += ct * out;
+                            totalOutputForCt += out;
+                        }
+                        countWithData++;
                     }
-                    countWithData++;
                 }
+                
+                outputUpdates.push(
+                    prisma.tb_output_actual.update({
+                        where: { id: outputRow.id },
+                        data: { Overall: rowOverallOutput },
+                    })
+                );
             }
 
             const avgCt = totalOutputForCt > 0 ? sumCtWeighted / totalOutputForCt : 0;
@@ -619,13 +630,10 @@ async function recalcOverallInMSSQL(targetDate, machineNames) {
             }
 
             const theoreticalMax = avgCt > 0 ? totalValidSeconds / avgCt : 0;
-            const overallEff = theoreticalMax > 0 ? (totalOutput / theoreticalMax) * 100 : 0;
+            const overallEff = theoreticalMax > 0 ? (totalOutputMachine / theoreticalMax) * 100 : 0;
 
             // Update Overall columns
-            await prisma.tb_output_actual.update({
-                where: { id: outputRow.id },
-                data: { Overall: totalOutput },
-            });
+            await Promise.all(outputUpdates);
 
             if (ctRow) {
                 await prisma.tb_cycle_time_actual.update({
@@ -696,16 +704,25 @@ async function handleLateData() {
                 const utcHour = hourDate.getUTCHours();
                 const dateStr = hourDate.toISOString().split("T")[0];
                 const thColumn = utcHourToThColumn(utcHour);
-                const { output_count, avg_cycle_time } = data;
+                const { output_count, avg_cycle_time, models } = data;
                 const theoreticalMax = avg_cycle_time > 0 ? 3600 / avg_cycle_time : 0;
                 const efficiency = theoreticalMax > 0 ? (output_count / theoreticalMax) * 100 : 0;
 
                 if (!dateGroups[dateStr]) dateGroups[dateStr] = {};
-                if (!dateGroups[dateStr][machineName]) dateGroups[dateStr][machineName] = { output: {}, ct: {}, eff: {} };
+                if (!dateGroups[dateStr][machineName]) dateGroups[dateStr][machineName] = { output: {}, models: {}, ct: {}, eff: {} };
 
-                dateGroups[dateStr][machineName].output[`actual_${thColumn}`] = output_count;
                 dateGroups[dateStr][machineName].ct[`cycle_${thColumn}`] = parseFloat(avg_cycle_time.toFixed(2));
                 dateGroups[dateStr][machineName].eff[`eff_${thColumn}`] = parseFloat(efficiency.toFixed(2));
+
+                if (models && Object.keys(models).length > 0) {
+                    for (const [mName, mData] of Object.entries(models)) {
+                        if (!dateGroups[dateStr][machineName].models[mName]) dateGroups[dateStr][machineName].models[mName] = {};
+                        dateGroups[dateStr][machineName].models[mName][`actual_${thColumn}`] = mData.output_count;
+                    }
+                } else {
+                    if (!dateGroups[dateStr][machineName].models["--"]) dateGroups[dateStr][machineName].models["--"] = {};
+                    dateGroups[dateStr][machineName].models["--"][`actual_${thColumn}`] = output_count;
+                }
 
                 lastProcessedTime[cacheKey] = { count: output_count, lastSeenAt: Date.now() };
 
@@ -734,31 +751,37 @@ async function handleLateData() {
                 prisma.tb_efficiency_actual.findMany({ where: { date: targetDate } }),
             ]);
 
-            // Build lookup maps: machine_name → row
-            const outputMap = {};
-            for (const row of dbOutputRows) outputMap[row.machine_name] = row;
+            // Build lookup maps
+            const outputMap = {}; // "AHV-001_Model A" -> row
+            for (const row of dbOutputRows) {
+                const mk = `${row.machine_name}_${row.model_name || "--"}`;
+                outputMap[mk] = row;
+            }
             const ctMap = {};
             for (const row of dbCtRows) ctMap[row.machine_name] = row;
             const effMap = {};
             for (const row of dbEffRows) effMap[row.machine_name] = row;
 
-            // Collect pending DB operations (1 per machine per table)
+            // Collect pending DB operations
             const pendingOps = [];
 
             for (const [machineName, changes] of Object.entries(machineChanges)) {
                 // Output
-                if (Object.keys(changes.output).length > 0) {
-                    if (outputMap[machineName]) {
-                        pendingOps.push(prisma.tb_output_actual.update({
-                            where: { id: outputMap[machineName].id },
-                            data: changes.output,
-                        }));
-                        totalUpdated++;
-                    } else {
-                        pendingOps.push(prisma.tb_output_actual.create({
-                            data: { machine_name: machineName, date: targetDate, ...changes.output },
-                        }));
-                        totalCreated++;
+                if (changes.models) {
+                    for (const [mName, mUpdates] of Object.entries(changes.models)) {
+                        const mk = `${machineName}_${mName}`;
+                        if (outputMap[mk]) {
+                            pendingOps.push(prisma.tb_output_actual.update({
+                                where: { id: outputMap[mk].id },
+                                data: mUpdates,
+                            }));
+                            totalUpdated++;
+                        } else {
+                            pendingOps.push(prisma.tb_output_actual.create({
+                                data: { machine_name: machineName, date: targetDate, model_name: mName, ...mUpdates },
+                            }));
+                            totalCreated++;
+                        }
                     }
                 }
                 // Cycle Time
@@ -880,9 +903,12 @@ async function backfillStartup(days = 5) {
                 prisma.tb_efficiency_actual.findMany({ where: { date: targetDate } }),
             ]);
 
-            // Build lookup maps: machine_name → row
+            // Build lookup maps
             const outputMap = {};
-            for (const row of dbOutputRows) outputMap[row.machine_name] = row;
+            for (const row of dbOutputRows) {
+                const mk = `${row.machine_name}_${row.model_name || "--"}`;
+                outputMap[mk] = row;
+            }
             const ctMap = {};
             for (const row of dbCtRows) ctMap[row.machine_name] = row;
             const effMap = {};
@@ -892,8 +918,7 @@ async function backfillStartup(days = 5) {
             const pendingOps = []; // { type: 'update'|'create', table, ... }
 
             for (const [machineName, hourData] of Object.entries(influxData)) {
-                // Collect all hour changes for this machine first
-                const outputChanges = {};
+                const modelsChanges = {};
                 const ctChanges = {};
                 const effChanges = {};
 
@@ -902,7 +927,7 @@ async function backfillStartup(days = 5) {
                     const utcHour = hourDate.getUTCHours();
                     const thColumn = utcHourToThColumn(utcHour);
 
-                    const { output_count, avg_cycle_time } = data;
+                    const { output_count, avg_cycle_time, models } = data;
                     if (output_count <= 0) continue;
 
                     const theoreticalMax = avg_cycle_time > 0 ? 3600 / avg_cycle_time : 0;
@@ -910,11 +935,18 @@ async function backfillStartup(days = 5) {
                     const ctRounded = parseFloat(avg_cycle_time.toFixed(2));
                     const effRounded = parseFloat(efficiency.toFixed(2));
 
-                    // ✅ ALWAYS overwrite MSSQL with InfluxDB values (source of truth)
-                    // Previous logic skipped if values matched — but corrupted data can persist
-                    outputChanges[`actual_${thColumn}`] = output_count;
                     ctChanges[`cycle_${thColumn}`] = ctRounded;
                     effChanges[`eff_${thColumn}`] = effRounded;
+
+                    if (models && Object.keys(models).length > 0) {
+                        for (const [mName, mData] of Object.entries(models)) {
+                            if (!modelsChanges[mName]) modelsChanges[mName] = {};
+                            modelsChanges[mName][`actual_${thColumn}`] = mData.output_count;
+                        }
+                    } else {
+                        if (!modelsChanges["--"]) modelsChanges["--"] = {};
+                        modelsChanges["--"][`actual_${thColumn}`] = output_count;
+                    }
 
                     // Update cache for today
                     if (isToday) {
@@ -922,12 +954,13 @@ async function backfillStartup(days = 5) {
                     }
                 }
 
-                // Build pending operations per machine (1 update/create per table per machine)
-                if (Object.keys(outputChanges).length > 0) {
-                    if (outputMap[machineName]) {
-                        pendingOps.push({ type: "update", table: "tb_output_actual", id: outputMap[machineName].id, data: outputChanges, machineName });
+                // Build pending operations
+                for (const [mName, mUpdates] of Object.entries(modelsChanges)) {
+                    const mk = `${machineName}_${mName}`;
+                    if (outputMap[mk]) {
+                        pendingOps.push({ type: "update", table: "tb_output_actual", id: outputMap[mk].id, data: mUpdates, machineName });
                     } else {
-                        pendingOps.push({ type: "create", table: "tb_output_actual", data: { machine_name: machineName, date: targetDate, ...outputChanges }, machineName });
+                        pendingOps.push({ type: "create", table: "tb_output_actual", data: { machine_name: machineName, date: targetDate, model_name: mName, ...mUpdates }, machineName });
                     }
                 }
                 if (Object.keys(ctChanges).length > 0) {
@@ -1115,8 +1148,15 @@ async function upsertOeeHourly() {
             prisma.tb_output_actual.findMany({ where: { date: targetDate } }),
             prisma.tb_output_target.findMany({ where: { date: targetDate } }),
         ]);
-        const outputMap = {};
-        for (const row of allOutputRows) outputMap[row.machine_name] = row;
+        // ✅ SUM ทุก model row ต่อเครื่อง (รองรับ multi-model per day)
+        const outputSumMap = {};
+        for (const row of allOutputRows) {
+            if (!outputSumMap[row.machine_name]) outputSumMap[row.machine_name] = {};
+            for (const h of SHIFT_HOURS) {
+                outputSumMap[row.machine_name][`actual_${h}`] =
+                    (outputSumMap[row.machine_name][`actual_${h}`] || 0) + (row[`actual_${h}`] || 0);
+            }
+        }
         const targetMap = {};
         for (const row of allTargetRows) targetMap[row.machine_name] = row;
 
@@ -1147,7 +1187,7 @@ async function upsertOeeHourly() {
                 // Calc Availability and Performance dynamically
                 const ngMode = getNgMode(machineName);
                 const mcRecords = mcStatusByMachine[machineName] || [];
-                const outputRow = outputMap[machineName];
+                const outputRow = outputSumMap[machineName]; // SUM ทุก model
                 const targetRow = targetMap[machineName];
                 
                 let runTimeSeconds = 0;
