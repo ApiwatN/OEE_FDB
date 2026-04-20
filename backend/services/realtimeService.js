@@ -243,7 +243,8 @@ async function fastPollAndEmit() {
                 } else if (i === currentShiftIndex) {
                     // Current hour → from InfluxDB (CT with fallback to prev hour / target)
                     out = currentData.output_count;
-                    ct = parseFloat(effectiveCt.toFixed(2));
+                    // ✅ Fix: Show Cycle Time 0 visually if there is no output for the hour
+                    ct = out > 0 ? parseFloat(effectiveCt.toFixed(2)) : 0;
                     eff = parseFloat(currentEfficiency.toFixed(2));
                 }
 
@@ -348,7 +349,8 @@ async function fastPollAndEmit() {
                     hour: thColumn,
                     shiftIndex: currentShiftIndex,
                     output: currentData.output_count,
-                    cycleTime: parseFloat(effectiveCt.toFixed(2)),
+                    // ✅ Fix: Only show Cycle Time if output > 0
+                    cycleTime: currentData.output_count > 0 ? parseFloat(effectiveCt.toFixed(2)) : 0,
                     efficiency: parseFloat(currentEfficiency.toFixed(2)),
                     stationNg: currentData.station_ng || {}, // 🆕 Pass to frontend
                     live_status: currentData.live_status, // 🆕 Real-Time Status
