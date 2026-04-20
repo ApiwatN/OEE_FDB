@@ -9,7 +9,7 @@ const prisma = new PrismaClient();
 const influxService = require("./influxService");
 const cacheService = require("./cacheService");
 const { getMachineStateMem } = require("./mqttService"); // 🆕 Use MQTT Memory
-const { getMachineRunTimeMode, calcMcStatusDurations, calcAvailability, calcPerformance } = require("./oeeCalcService");
+const { getMachineRunTimeMode, calcMcStatusDurations, calcAvailability, calcPerformance, getTargetDeductMode } = require("./oeeCalcService");
 const {
     SHIFT_HOURS,
     utcHourToThColumn,
@@ -293,16 +293,33 @@ async function fastPollAndEmit() {
             const overallTheoreticalMax = overallAvgCt > 0 ? totalValidSeconds / overallAvgCt : 0;
             const overallEff = overallTheoreticalMax > 0 ? (totalOutput / overallTheoreticalMax) * 100 : 0;
 
-            // Accumulated target (pro-rated)
+            // Accumulated target (pro-rated) — หัก Excluded time ตาม config
+            const shouldDeductTarget = getTargetDeductMode(machineName);
+            // pre-compute shiftDayStart สำหรับคำนวณรายชั่วโมง
+            const { dateStr: shiftDateStr } = getCurrentHourBoundaries(now);
+            const [sy, sm, sd] = shiftDateStr.split('-').map(Number);
+            const shiftDayStart = new Date(Date.UTC(sy, sm - 1, sd, 0, 0, 0));
+
             let overallAccumTarget = 0;
             if (targetEntry && targetEntry.target) {
                 for (let i = 0; i <= currentShiftIndex && i < SHIFT_HOURS.length; i++) {
                     const h = SHIFT_HOURS[i];
                     const targetVal = targets[`target_${h}`] || 0;
+                    if (targetVal <= 0) continue; // ไม่มีแผนชั่วโมงนี้ → อย่าบวก
+
                     if (i < currentShiftIndex) {
-                        overallAccumTarget += targetVal;
+                        // ชั่วโมงที่ผ่านมาแล้ว → คำนวณ excluded ต่อชั่วโมง (ถ้า config = true)
+                        if (shouldDeductTarget && mcRecords.length > 0) {
+                            const hourStart = new Date(shiftDayStart.getTime() + i * 3600000);
+                            const hourEnd = new Date(hourStart.getTime() + 3600000);
+                            const { excludedSeconds: hourExcluded } = calcMcStatusDurations(mcRecords, hourStart, hourEnd);
+                            const ratio = hourExcluded > 0 ? Math.max(0, 3600 - hourExcluded) / 3600 : 1;
+                            overallAccumTarget += Math.round(targetVal * ratio);
+                        } else {
+                            overallAccumTarget += targetVal;
+                        }
                     } else {
-                        // 🆕 [Phase 7] Target ณ เวลาปัจจุบัน: ใช้ Effective Time แทน Total Elapsed
+                        // ชั่วโมงปัจจุบัน: ใช้ Effective Time (adjustedElapsedSeconds ที่หัก excluded แล้ว)
                         const ratio = Math.min(adjustedElapsedSeconds / 3600, 1);
                         overallAccumTarget += Math.round(targetVal * ratio);
                     }

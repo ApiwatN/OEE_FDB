@@ -6,7 +6,7 @@ const sharp = require("sharp");
 const cacheService = require("../services/cacheService");
 const influxService = require("../services/influxService");
 const { getShiftDateUTC, getCurrentHourBoundaries, utcHourToThColumn } = require("../utils/timeUtils");
-const { calcAvailability, getMachineRunTimeMode, getCTCalcMode } = require("../services/oeeCalcService");
+const { calcAvailability, calcMcStatusDurations, getMachineRunTimeMode, getCTCalcMode, getTargetDeductMode } = require("../services/oeeCalcService");
 
 // Helper: สร้าง shift boundaries สำหรับ InfluxDB query (UTC)
 function getShiftBoundariesForDate(dateStr) {
@@ -321,6 +321,9 @@ module.exports = {
             let availabilityActual = 0;
             let cycleTimeActual = 0;
 
+            // ✅ Config-driven: ควรหักเวลา Excluded ออกจาก Target หรือไม่
+            const shouldDeductTarget = getTargetDeductMode(machine_name);
+
             if (isToday) {
                 // วันนี้: CT จาก Cache หรือคำนวณสดถ้าระบุเป็น runtime_based
                 const ctMode = getCTCalcMode(machine_name);
@@ -343,7 +346,6 @@ module.exports = {
                             where: { machine_name, date: targetDate },
                         });
                         if (ctActualRow) {
-                            // คำนวณ weighted avg CT จากทุก hour ที่มีข้อมูล
                             let sumCt = 0, countHours = 0;
                             for (const h of SHIFT_HOURS) {
                                 const hCt = ctActualRow[`cycle_${h}`] || 0;
@@ -356,20 +358,21 @@ module.exports = {
                     const avgCt = cacheCt > 0 ? cacheCt : (outputTargetDB.cycle_time_target || 0);
                     const runTime = outputActualSum * avgCt;
                     availabilityActual = validSeconds > 0 ? Math.min(100, (runTime / validSeconds) * 100) : 0;
+                    // output_based: ไม่หัก target (ไม่มี MCStatus → ไม่รู้ excluded)
                 } else {
-                    // status_based (ABR ฯลฯ): ใช้ memoryOeeService ตามเดิม
+                    // status_based: ใช้ memoryOeeService
                     const memoryOeeService = require("../services/memoryOeeService");
                     const { runTimeSec, excludedSec, totalSec } = memoryOeeService.getDurationsNow(machine_name, calculationTime);
                     availabilityActual = calcAvailability(runTimeSec, excludedSec, totalSec);
 
-                    // ปรับ Target ปัจจุบัน: ชดเชย excluded time
-                    if (validSeconds > 0) {
+                    // ✅ หัก Excluded Time ออกจาก Target ตาม config
+                    if (shouldDeductTarget && validSeconds > 0 && excludedSec > 0) {
                         const ratio = Math.max(0, validSeconds - excludedSec) / validSeconds;
                         outputTargetAccumCurrent = Math.round(outputTargetAccumCurrent * ratio);
                     }
                 }
             } else {
-                // วันเก่า: Priority อ่าน Availability -> Fallback Efficiency
+                // 📅 วันเก่า: Availability จาก MSSQL
                 const cycleTimeActualDB = await prisma.tb_cycle_time_actual.findFirst({
                     where: { machine_name, date: targetDate },
                 });
@@ -388,6 +391,46 @@ module.exports = {
                     });
                     if (effActualDB && effActualDB.eff_actual != null) {
                         availabilityActual = effActualDB.eff_actual;
+                    }
+                }
+
+                // ✅ วันเก่า: หัก excluded ออกจาก Target ถ้า config = true
+                if (shouldDeductTarget && validSeconds > 0) {
+                    try {
+                        const { startUTC: hShiftStart } = getShiftBoundariesForDate(date);
+                        const hShiftEnd = new Date(hShiftStart.getTime() + 24 * 60 * 60 * 1000);
+                        const TH_OFFSET_MS = 7 * 60 * 60 * 1000;
+                        const hShiftStartTH = new Date(hShiftStart.getTime() + TH_OFFSET_MS);
+                        const hShiftEndTH = new Date(hShiftEnd.getTime() + TH_OFFSET_MS);
+
+                        const mcRows = await prisma.tb_MCStatus.findMany({
+                            where: { MC: machine_name, Datetime: { gte: hShiftStartTH, lte: hShiftEndTH } },
+                            orderBy: { Datetime: 'asc' },
+                            select: { MC: true, Datetime: true, MCStatus: true }
+                        });
+                        const carryRows = await prisma.$queryRaw`
+                            SELECT MC, MCStatus, Datetime FROM (
+                                SELECT MC, MCStatus, Datetime,
+                                       ROW_NUMBER() OVER (PARTITION BY MC ORDER BY Datetime DESC) AS rn
+                                FROM tb_MCStatus WHERE MC = ${machine_name} AND Datetime < ${hShiftStartTH}
+                            ) t WHERE rn = 1
+                        `;
+                        const allMcRecs = [];
+                        if (carryRows && carryRows.length > 0) {
+                            allMcRecs.push({ MC: carryRows[0].MC, Datetime: hShiftStartTH, MCStatus: carryRows[0].MCStatus });
+                        }
+                        allMcRecs.push(...mcRows);
+
+                        if (allMcRecs.length > 0) {
+                            const calcEndTime = calculationTime < hShiftEndTH ? calculationTime : hShiftEndTH;
+                            const { excludedSeconds: totalExcluded } = calcMcStatusDurations(allMcRecs, hShiftStartTH, calcEndTime);
+                            if (totalExcluded > 0) {
+                                const ratio = Math.max(0, validSeconds - totalExcluded) / validSeconds;
+                                outputTargetAccumCurrent = Math.round(outputTargetAccumCurrent * ratio);
+                            }
+                        }
+                    } catch (e) {
+                        console.error('[getDataTable] Historical target deduct failed:', e.message);
                     }
                 }
             }

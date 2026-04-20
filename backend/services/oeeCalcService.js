@@ -82,6 +82,24 @@ function getNgMode(machineName) {
 }
 
 /**
+ * Get Target Deduct Mode — ควรหัก Excluded Time ออกจาก Output Target หรือไม่
+ * true  = หัก Plan_Stop/Break_Time/Preventive ออกจาก Target (เช่น ABR)
+ * false = ไม่หัก (เช่น AHV ที่ไม่มี MCStatus)
+ */
+function getTargetDeductMode(machineName) {
+    if (!machineCalcConfig) {
+        getMachineRunTimeMode(machineName); // force load config
+    }
+    const deductMap = machineCalcConfig.target_deduct_excluded || {};
+    for (const prefix of Object.keys(deductMap)) {
+        if (prefix !== 'default' && machineName.startsWith(prefix)) {
+            return deductMap[prefix];
+        }
+    }
+    return deductMap.default ?? false;
+}
+
+/**
  * Calculate run time and excluded time from MC Status records for a given shift period.
  *
  * @param {Array<{Datetime: Date, MCStatus: string}>} records - sorted by Datetime ASC
@@ -316,5 +334,6 @@ module.exports = {
     getMachineRunTimeMode,
     getCTCalcMode,
     getNgMode,
+    getTargetDeductMode,
     recalculateAPQForDay
 };

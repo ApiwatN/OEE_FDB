@@ -3,7 +3,7 @@
 
     "_mode_options": {
         "status_based": "คำนวณ Performance จาก Runtime จริง: ดูจาก MCStatus = Run_Time สะสมวินาทีใน RAM ไม่ต้อง Query DB เพิ่ม",
-        "output_based": "คำนวณ Performance จากยอดผลิต × Standard CT: ใช้เมื่อ Status ของเครื่องส่งมาไม่แม่น หรือไม่มี Run_Time signal"
+        "output_based": "คำนวณ Performance จากยอดผลิต × Standard CT: ใช้เมื่อ Status ของเครื่องส่งมาไม่แม่น หรือไม่มี Run_Time signal, calaulate by ct target/ct actuaal"
     },
     "default_mode": "status_based",
     "custom_modes": {
@@ -36,5 +36,14 @@
     "timezone_modes": {
         "default": "local",
         "ABR": "utc"
+    },
+
+    "_target_deduct_options": {
+        "true":  "หักเวลา Excluded (Plan_Stop/Break_Time/Preventive) ออกจาก Output Target ก่อนแสดง — ใช้กับเครื่องที่มี MCStatus ที่เชื่อถือได้ (เช่น ABR)",
+        "false": "ไม่หัก — ใช้กับเครื่องที่ไม่มี MCStatus หรือคำนวณแบบ output_based (เช่น AHV)"
+    },
+    "target_deduct_excluded": {
+        "default": false,
+        "ABR": true
     }
 }
