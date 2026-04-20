@@ -302,12 +302,29 @@ async function summarizeLastHour() {
                 upsertHourlyField("tb_efficiency_actual", machineName, targetDate, `eff_${thColumn}`, parseFloat(efficiency.toFixed(2)), "eff_actual", null),
             ];
 
+            // 🆕 Auto-merge "--" to cached real model
+            let finalModels = {};
             if (models && Object.keys(models).length > 0) {
-                for (const [mName, mData] of Object.entries(models)) {
-                    upsertOps.push(upsertHourlyField("tb_output_actual", machineName, targetDate, `actual_${thColumn}`, mData.output_count, "Overall", null, mName));
-                }
+                for (const [k, v] of Object.entries(models)) finalModels[k] = { ...v };
             } else {
-                upsertOps.push(upsertHourlyField("tb_output_actual", machineName, targetDate, `actual_${thColumn}`, output_count, "Overall", null, "--"));
+                finalModels["--"] = { output_count };
+            }
+
+            if (finalModels["--"]) {
+                const cached = cacheService.getFullDay(machineName);
+                if (cached && cached.models) {
+                    const realModels = Object.keys(cached.models).filter(m => m !== "--");
+                    if (realModels.length > 0) {
+                        const tgtModel = realModels[0];
+                        if (!finalModels[tgtModel]) finalModels[tgtModel] = { output_count: 0 };
+                        finalModels[tgtModel].output_count += finalModels["--"].output_count;
+                        delete finalModels["--"];
+                    }
+                }
+            }
+
+            for (const [mName, mData] of Object.entries(finalModels)) {
+                upsertOps.push(upsertHourlyField("tb_output_actual", machineName, targetDate, `actual_${thColumn}`, mData.output_count, "Overall", null, mName));
             }
 
             await Promise.all(upsertOps);
@@ -751,9 +768,39 @@ async function handleLateData() {
                 prisma.tb_efficiency_actual.findMany({ where: { date: targetDate } }),
             ]);
 
+            // 🆕 Auto-discard "--" model when real model exists in MSSQL
+            // InfluxDB data from before Telegraf restart is unreliable (model tag was missing)
+            // → If MSSQL already has a real model row, drop "--" from changes entirely
+            //   and queue the stale "--" row in MSSQL for deletion to prevent double-count.
+            const staleRowsToDelete = [];
+            for (const [mNameGroup, changes] of Object.entries(machineChanges)) {
+                if (changes.models && changes.models["--"]) {
+                    const realModels = dbOutputRows.filter(r => r.machine_name === mNameGroup && r.model_name && r.model_name !== "--");
+                    if (realModels.length > 0) {
+                        // Discard "--" from InfluxDB — real model rows are the source of truth
+                        delete changes.models["--"];
+
+                        // Queue stale "--" row in MSSQL for deletion (if it exists)
+                        const staleRow = dbOutputRows.find(r => r.machine_name === mNameGroup && r.model_name === "--");
+                        if (staleRow) {
+                            staleRowsToDelete.push(staleRow.id);
+                            console.log(`   🗑️ [LateData] Queued stale "--" row for ${mNameGroup} (id=${staleRow.id})`);
+                        }
+                    }
+                    // If no real model exists → keep "--" as-is (machine Telegraf not yet restarted)
+                }
+            }
+
+            // Execute stale "--" deletions before processing other changes
+            if (staleRowsToDelete.length > 0) {
+                await Promise.all(staleRowsToDelete.map(id => prisma.tb_output_actual.delete({ where: { id } })));
+                console.log(`   🗑️ [LateData] Deleted ${staleRowsToDelete.length} stale "--" rows`);
+            }
+
             // Build lookup maps
             const outputMap = {}; // "AHV-001_Model A" -> row
             for (const row of dbOutputRows) {
+                if (staleRowsToDelete.includes(row.id)) continue; // skip just-deleted rows
                 const mk = `${row.machine_name}_${row.model_name || "--"}`;
                 outputMap[mk] = row;
             }
@@ -913,6 +960,56 @@ async function backfillStartup(days = 5) {
             for (const row of dbCtRows) ctMap[row.machine_name] = row;
             const effMap = {};
             for (const row of dbEffRows) effMap[row.machine_name] = row;
+
+            // ── Step 2.5: Auto-discard "--" data from InfluxDB when MSSQL has real model rows ──
+            // InfluxDB data from before Telegraf restart is unreliable (no model tag → stored as "--")
+            // If MSSQL already has a real model row for the machine, skip all "--" InfluxDB data
+            // and delete any stale "--" rows in MSSQL to prevent double-count with SUM logic.
+            const backfillStaleToDelete = [];
+            for (const machineName of Object.keys(influxData)) {
+                const hasRealModelInMssql = dbOutputRows.some(
+                    r => r.machine_name === machineName && r.model_name && r.model_name !== "--"
+                );
+                if (!hasRealModelInMssql) continue; // No real model yet → keep "--" as-is
+
+                // Check if any hour in InfluxDB for this machine has no model tag (→ "--")
+                const hourData = influxData[machineName];
+                const hasAnyDashHour = Object.values(hourData).some(
+                    d => (!d.models || Object.keys(d.models).length === 0) && d.output_count > 0
+                );
+                if (!hasAnyDashHour) continue; // All hours already have model tags → nothing to do
+
+                // Has real model in MSSQL + InfluxDB sending "--" → skip those hours
+                // Remove hours that would produce "--" from influxData for this machine
+                for (const [hourKey, data] of Object.entries(hourData)) {
+                    if (!data.models || Object.keys(data.models).length === 0) {
+                        delete influxData[machineName][hourKey];
+                        console.log(`   ⏭️ [Backfill] Skipped "${machineName}" ${hourKey} "--" (real model exists in MSSQL)`);
+                    }
+                }
+                // If all hours removed → remove machine entirely to skip CT/Eff upsert too
+                if (Object.keys(influxData[machineName]).length === 0) {
+                    delete influxData[machineName];
+                }
+
+                // Queue stale "--" row in MSSQL for deletion
+                const staleRow = dbOutputRows.find(r => r.machine_name === machineName && r.model_name === "--");
+                if (staleRow) {
+                    backfillStaleToDelete.push(staleRow.id);
+                    console.log(`   🗑️ [Backfill] Queued stale "--" row for ${machineName} (id=${staleRow.id})`);
+                }
+            }
+
+            // Execute stale "--" deletions before building pendingOps
+            if (backfillStaleToDelete.length > 0) {
+                await Promise.all(backfillStaleToDelete.map(id => prisma.tb_output_actual.delete({ where: { id } })));
+                // Remove deleted rows from outputMap so they won't be referenced
+                for (const id of backfillStaleToDelete) {
+                    const key = Object.keys(outputMap).find(k => outputMap[k].id === id);
+                    if (key) delete outputMap[key];
+                }
+                console.log(`   🗑️ [Backfill] Deleted ${backfillStaleToDelete.length} stale "--" rows`);
+            }
 
             // ── Step 3: Compare in memory & collect changes ──
             const pendingOps = []; // { type: 'update'|'create', table, ... }
