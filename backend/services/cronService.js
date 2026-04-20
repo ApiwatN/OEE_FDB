@@ -1245,13 +1245,25 @@ async function upsertOeeHourly() {
             prisma.tb_output_actual.findMany({ where: { date: targetDate } }),
             prisma.tb_output_target.findMany({ where: { date: targetDate } }),
         ]);
-        // ✅ SUM ทุก model row ต่อเครื่อง (รองรับ multi-model per day)
-        const outputSumMap = {};
+        // ✅ Group multi-model into per-hour fallback (Option B)
+        const outputSumMap = {}; // { machineName: { actual_07: val, actual_08: val... } }
+        // Group rows by machine first
+        const machineRows = {};
         for (const row of allOutputRows) {
-            if (!outputSumMap[row.machine_name]) outputSumMap[row.machine_name] = {};
+            if (!machineRows[row.machine_name]) machineRows[row.machine_name] = [];
+            machineRows[row.machine_name].push(row);
+        }
+        // Then apply per-hour fallback for each machine
+        for (const [mn, mRows] of Object.entries(machineRows)) {
+            outputSumMap[mn] = {};
             for (const h of SHIFT_HOURS) {
-                outputSumMap[row.machine_name][`actual_${h}`] =
-                    (outputSumMap[row.machine_name][`actual_${h}`] || 0) + (row[`actual_${h}`] || 0);
+                const realRows = mRows.filter(r => r.model_name !== "--" && (r[`actual_${h}`] || 0) > 0);
+                if (realRows.length > 0) {
+                    outputSumMap[mn][`actual_${h}`] = realRows.reduce((acc, r) => acc + (r[`actual_${h}`] || 0), 0);
+                } else {
+                    const dashRow = mRows.find(r => r.model_name === "--");
+                    outputSumMap[mn][`actual_${h}`] = dashRow ? (dashRow[`actual_${h}`] || 0) : 0;
+                }
             }
         }
         const targetMap = {};

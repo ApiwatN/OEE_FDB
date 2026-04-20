@@ -215,11 +215,15 @@ async function recalculateAPQForDay(machineName, targetDate) {
             prisma.tb_cycle_time_actual.findFirst({ where: { machine_name: machineName, date: targetDate } }),
         ]);
 
-        // ✅ Pre-compute SUM per hour สำหรับทุก model row
+        // ✅ Pre-compute SUM per hour: per-hour fallback (Option B)
         const outputSumPerHour = {};
-        for (const row of outputRows) {
-            for (const h of SHIFT_HOURS) {
-                outputSumPerHour[h] = (outputSumPerHour[h] || 0) + (row[`actual_${h}`] || 0);
+        for (const h of SHIFT_HOURS) {
+            const realRows = outputRows.filter(r => r.model_name !== "--" && (r[`actual_${h}`] || 0) > 0);
+            if (realRows.length > 0) {
+                outputSumPerHour[h] = realRows.reduce((acc, r) => acc + (r[`actual_${h}`] || 0), 0);
+            } else {
+                const dashRow = outputRows.find(r => r.model_name === "--");
+                outputSumPerHour[h] = dashRow ? (dashRow[`actual_${h}`] || 0) : 0;
             }
         }
 
