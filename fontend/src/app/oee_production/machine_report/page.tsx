@@ -583,10 +583,10 @@ function MachineReportPage() {
             }
         });
 
-        if (key.includes("target")) {
+        if (key.includes("target") && key !== "output_target") {
             return latestTarget > 0 ? latestTarget : "-";
         }
-        if (["output_actual", "machine_output_actual", "ng_qty", "over_reject_qty"].includes(key)) {
+        if (["output_actual", "machine_output_actual", "ng_qty", "over_reject_qty", "output_target"].includes(key)) {
             return sum > 0 ? sum : "-";
         }
         if (count > 0) {
