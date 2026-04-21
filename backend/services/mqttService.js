@@ -145,13 +145,30 @@ const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
                         }
                         const thaiDataTime = new Date(thaiDataTimeMs);
 
+                        let remarkToSave = null;
+                        if (statusStr === "MC_Alarm" || statusStr === "MC_Error") {
+                            const recentAlarm = await prisma.tb_MCAlarm.findFirst({
+                                where: { 
+                                    MC: machineName,
+                                    Datetime: { 
+                                        gte: new Date(thaiDataTime.getTime() - 2000),
+                                        lte: new Date(thaiDataTime.getTime() + 2000)
+                                    }
+                                },
+                                orderBy: { Datetime: 'desc' },
+                                select: { MCAlarm: true }
+                            });
+                            if (recentAlarm) remarkToSave = recentAlarm.MCAlarm;
+                        }
+
                         try {
                             await prisma.tb_MCStatus.create({
                                 data: {
                                     Datetime: thaiDataTime,
                                     MC: machineName,
                                     MCStatus: statusStr,
-                                    UTC_Time: dataTime // 🆕 เก็บเวลา UTC เดิมไว้เพื่อประวัติที่ชัดเจน
+                                    UTC_Time: dataTime, // 🆕 เก็บเวลา UTC เดิมไว้เพื่อประวัติที่ชัดเจน
+                                    Remark: remarkToSave
                                 }
                             });
                             // ✅ [Phase 2] Feed live status into In-Memory OEE Stopwatch
@@ -217,6 +234,31 @@ const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
                             });
                         } catch (e) {
                             console.error(`[MQTT] tb_MCAlarm Insert Error for ${machineName}:`, e.message);
+                        }
+
+                        // 🆕 Update recent MC_Alarm status with this remark
+                        try {
+                            const recentStatus = await prisma.tb_MCStatus.findFirst({
+                                where: {
+                                    MC: machineName,
+                                    MCStatus: { in: ["MC_Alarm", "MC_Error"] },
+                                    Datetime: { 
+                                        gte: new Date(thaiDataTime.getTime() - 2000),
+                                        lte: new Date(thaiDataTime.getTime() + 2000)
+                                    },
+                                    Remark: null
+                                },
+                                orderBy: { Datetime: 'desc' }
+                            });
+
+                            if (recentStatus) {
+                                await prisma.tb_MCStatus.update({
+                                    where: { ID: recentStatus.ID },
+                                    data: { Remark: alarmStr }
+                                });
+                            }
+                        } catch (e) {
+                            console.error(`[MQTT] tb_MCStatus Remark Update Error:`, e.message);
                         }
 
                         // 2. ไปดึงจาก MSSQL มาแสดง

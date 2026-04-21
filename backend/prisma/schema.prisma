@@ -117,7 +117,7 @@ model tb_output_actual {
   Overall      Int?
   model_name   String?
 
-  @@unique([machine_name, date])
+  @@unique([machine_name, date, model_name])
   @@index([date])
 }
 
@@ -223,6 +223,7 @@ model tb_MCStatus {
   MC       String   @db.NVarChar(50)
   MCStatus String   @db.NVarChar(50)
   UTC_Time DateTime?
+  Remark   String?  @db.NVarChar(255)
 
   @@index([Datetime])
 }
