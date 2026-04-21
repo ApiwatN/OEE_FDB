@@ -580,7 +580,7 @@ function MachineReportPage() {
             if (val !== undefined && val !== null && val !== "" && val !== "-") {
                 const num = Number(val);
                 if (!isNaN(num)) {
-                    if (key.includes("target")) {
+                    if (key.includes("target") && key !== "output_target") {
                         if (num > 0) latestTarget = num;
                     } else {
                         sum += num;
