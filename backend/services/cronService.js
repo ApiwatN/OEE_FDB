@@ -309,9 +309,12 @@ async function summarizeLastHour() {
             // 🆕 Support ct_calc_modes
             const ctMode = getCTCalcMode(machineName);
             if (ctMode === "runtime_based") {
-                const mcCache = cacheService.getMachineCache(machineName) || { runtime: {} };
-                // 🕒 Because Phase 2.6 ran first, runtime cache is already updated for this hour!
-                const hourRuntime = mcCache.runtime[`runtime_${thColumn}`] || 0;
+                // 🔧 Fix: getRuntime() คือ function ที่ถูกต้อง — getMachineCache ไม่ได้ export จาก cacheService
+                const { runtime: runtimeArr } = cacheService.getRuntime(machineName);
+                // runtime array เรียงตาม SHIFT_HOURS index ใช้ getShiftIndex เพื่อหา index
+                const { getShiftIndex: getIdx } = require('../utils/timeUtils');
+                const hourIdx = getIdx(thColumn);
+                const hourRuntime = (runtimeArr && runtimeArr[hourIdx]) || 0;
                 if (output_count > 0) {
                     avg_cycle_time = hourRuntime / output_count;
                 } else {
