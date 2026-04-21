@@ -477,6 +477,9 @@ async function upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetD
     for (const row of allTargetRows) targetMap[row.machine_name] = row;
 
     // ── Step 3: Per machine — calc runtime + availability → upsert ──
+    const runtimeOps = [];
+    const availOps = [];
+
     for (const machineName of machineNames) {
         try {
             const mcRecords = mcStatusByMachine[machineName] || [];
@@ -484,6 +487,55 @@ async function upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetD
 
             // Skip hours marked inactive by plan config
             const isHourActive = !targetRow || ((targetRow[`target_${thColumn}`] || 0) > 0);
+            const totalSeconds = isHourActive ? 3600 : 0;
+
+            let { runTimeSeconds, excludedSeconds } = calcMcStatusDurations(mcRecords, startTH, endTH);
+
+            // 🆕 output_based override: คำนวณ runtime จาก output x avgCT แทน MCStatus
+            const modeRunTime = getMachineRunTimeMode(machineName);
+            if (modeRunTime === "output_based") {
+                const hourData = (resolvedInfluxData[machineName]) || {};
+                const hourOutput = hourData.output_count || 0;
+                const hourAvgCt = hourData.avg_cycle_time || 0;
+                runTimeSeconds = hourOutput * hourAvgCt;
+                excludedSeconds = 0; // output-based machines ไม่มี excluded time
+            }
+
+            // Availability = runTime / (total - excluded) × 100
+            const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalSeconds);
+
+            // Upsert runtime row
+            runtimeOps.push(
+                prisma.tb_mc_runtime_hourly.upsert({
+                    where: { machine_name_date: { machine_name: machineName, date: targetDate } },
+                    update: {
+                        [`runtime_${thColumn}`]: parseFloat(runTimeSeconds.toFixed(2)),
+                        [`excluded_${thColumn}`]: parseFloat(excludedSeconds.toFixed(2)),
+                    },
+                    create: {
+                        machine_name: machineName,
+                        date: targetDate,
+                        [`runtime_${thColumn}`]: parseFloat(runTimeSeconds.toFixed(2)),
+                        [`excluded_${thColumn}`]: parseFloat(excludedSeconds.toFixed(2)),
+                    },
+                })
+            );
+
+            // Upsert availability row
+            availOps.push(
+                prisma.tb_availability_actual.upsert({
+                    where: { machine_name_date: { machine_name: machineName, date: targetDate } },
+                    update: { [`avail_${thColumn}`]: parseFloat(availability.toFixed(2)) },
+                    create: {
+                        machine_name: machineName,
+                        date: targetDate,
+                        [`avail_${thColumn}`]: parseFloat(availability.toFixed(2)),
+                    },
+                })
+            );
+
+            // ── Update in-memory cache (cron thread's own copy for diff-check) ──
+            cacheService.updateHourRuntime(machineName, thColumn, runTimeSeconds, excludedSeconds);
             cacheService.updateHourAvailability(machineName, thColumn, availability);
 
             // ✅ Yield event loop
@@ -492,6 +544,10 @@ async function upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetD
             console.error(`   ❌ [Phase 6] Runtime/Avail calc failed for ${machineName}:`, err.message);
         }
     }
+
+    // ── Step 4: Batch execute runtimeOps + availOps ──
+    if (runtimeOps.length > 0) await Promise.all(runtimeOps);
+    if (availOps.length > 0) await Promise.all(availOps);
 
     // ── Step 5: Recalculate totals (runtime_total, excluded_total, avail_actual) per machine ──
     await recalcRuntimeAndAvailTotals(targetDate, machineNames);
