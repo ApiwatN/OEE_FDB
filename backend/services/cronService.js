@@ -953,12 +953,30 @@ async function handleLateData() {
             await new Promise(resolve => setImmediate(resolve));
         }
 
-        // ── Step 4: Late Data Event Sync (Check last 2 hours to avoid heavy querying) ──
+        // ── Step 4: Late Data Event Sync (Check last 12 hours to avoid heavy querying) ──
+        let recoveredEvents = { statusRecovered: false, alarmRecovered: false };
         try {
-            const eventStartCutoff = new Date(now.getTime() - (2 * 60 * 60 * 1000));
-            await syncEventsFromInfluxDb(eventStartCutoff, now);
+            const eventStartCutoff = new Date(now.getTime() - (12 * 60 * 60 * 1000));
+            recoveredEvents = await syncEventsFromInfluxDb(eventStartCutoff, now);
         } catch (e) {
             console.error("❌ Late data event sync failed:", e.message);
+        }
+
+        // 🆕 If late status events were recovered, force runtime recalc for status_based machines
+        if (recoveredEvents && recoveredEvents.statusRecovered) {
+             const statusMachines = activeMachines.filter(m => getMachineRunTimeMode(m) !== "output_based");
+             if (statusMachines.length > 0) {
+                 console.log(`⏳ Triggering full runtime recalculation for past 12 hours due to recovered events...`);
+                 for (let h = 1; h <= 12; h++) {
+                     const pastDate = new Date(now.getTime() - (h * 60 * 60 * 1000));
+                     const { dateStr, thColumn, start, end } = getCurrentHourBoundaries(pastDate);
+                     const targetDateObj = new Date(dateStr + "T00:00:00.000Z");
+                     
+                     // Run single-hour upsert for status-based machines
+                     await upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetDateObj, statusMachines);
+                 }
+                 console.log(`✅ Completed runtime recalculation.`);
+             }
         }
 
         if (totalUpdated > 0 || totalCreated > 0) {
@@ -2030,6 +2048,8 @@ async function syncEventsFromInfluxDb(startUTC, endUTC) {
     if (statusRecovered > 0 || alarmRecovered > 0) {
         console.log(`   ✅ Recovered ${statusRecovered} Status and ${alarmRecovered} Alarm records from InfluxDB.`);
     }
+
+    return { statusRecovered: statusRecovered > 0, alarmRecovered: alarmRecovered > 0 };
 }
 
 /**
