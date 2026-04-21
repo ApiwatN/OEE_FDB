@@ -626,26 +626,15 @@ async function recalcOverallInMSSQL(targetDate, machineNames) {
             let totalOutputMachine = 0;
             let sumCtWeighted = 0;
             let totalOutputForCt = 0;
-            let countWithData = 0;
+
             const outputUpdates = [];
 
+            // 1) Update row-level 'Overall'
             for (const outputRow of outputRows) {
                 let rowOverallOutput = 0;
                 for (const h of SHIFT_HOURS) {
-                    const out = outputRow[`actual_${h}`] || 0;
-                    rowOverallOutput += out;
-                    totalOutputMachine += out;
-
-                    if (out > 0) {
-                        const ct = ctRow ? (ctRow[`cycle_${h}`] || 0) : 0;
-                        if (ct > 0) {
-                            sumCtWeighted += ct * out;
-                            totalOutputForCt += out;
-                        }
-                        countWithData++;
-                    }
+                    rowOverallOutput += (outputRow[`actual_${h}`] || 0);
                 }
-                
                 outputUpdates.push(
                     prisma.tb_output_actual.update({
                         where: { id: outputRow.id },
@@ -654,7 +643,30 @@ async function recalcOverallInMSSQL(targetDate, machineNames) {
                 );
             }
 
-            const avgCt = totalOutputForCt > 0 ? sumCtWeighted / totalOutputForCt : 0;
+            // 2) Aggregate safe total output and CT using per-hour fallback to avoid double counting '--' rows
+            for (const h of SHIFT_HOURS) {
+                const realRows = outputRows.filter(r => r.model_name && r.model_name !== "--" && (r[`actual_${h}`] || 0) > 0);
+                let outThisHour = 0;
+                
+                if (realRows.length > 0) {
+                    outThisHour = realRows.reduce((sum, r) => sum + (r[`actual_${h}`] || 0), 0);
+                } else {
+                    const dashRow = outputRows.find(r => !r.model_name || r.model_name === "--");
+                    outThisHour = dashRow ? (dashRow[`actual_${h}`] || 0) : 0;
+                }
+
+                totalOutputMachine += outThisHour;
+
+                if (outThisHour > 0) {
+                    const ct = ctRow ? (ctRow[`cycle_${h}`] || 0) : 0;
+                    if (ct > 0) {
+                        sumCtWeighted += ct * outThisHour;
+                        totalOutputForCt += outThisHour;
+                    }
+                }
+            }
+
+            const avgCt = totalOutputForCt > 0 ? parseFloat((sumCtWeighted / totalOutputForCt).toFixed(2)) : 0;
             const todayStr = getShiftDateUTC();
             const isToday = targetDate.toISOString().split('T')[0] === todayStr;
             let totalHoursPassed;
@@ -689,7 +701,7 @@ async function recalcOverallInMSSQL(targetDate, machineNames) {
             if (ctRow) {
                 await prisma.tb_cycle_time_actual.update({
                     where: { id: ctRow.id },
-                    data: { cycle_time: parseFloat(avgCt.toFixed(2)) },
+                    data: { cycle_time: avgCt },
                 });
             }
 
