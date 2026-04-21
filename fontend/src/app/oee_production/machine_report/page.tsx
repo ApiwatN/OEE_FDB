@@ -146,6 +146,8 @@ function MachineReportPage() {
                         output_actual: socketData.daily.totalOutput,
                         eff_actual: socketData.daily.overallEfficiency,
                         cycle_actual: socketData.daily.avgCycleTime,
+                        // ✅ ถอด availability แบบเดียวกับหน้า machine_working
+                        ...(socketData.daily.availability !== undefined && { availability: socketData.daily.availability }),
                     };
 
                     return { ...machine, daily_data: updatedDailyData };
@@ -175,7 +177,6 @@ function MachineReportPage() {
                         ...existing,
                         availability: socketData.daily.availability,
                         performance: socketData.daily.performance,
-                        // Auto mode: อัปเดต NG/Quality/OEE realtime
                         ...(isAuto ? {
                             ng_qty: socketData.daily.ngQty ?? 0,
                             over_reject_qty: socketData.daily.over_reject_qty,
@@ -415,7 +416,7 @@ function MachineReportPage() {
                     daysArray.forEach(day => {
                         const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
                         const val = daily_data[dateKey]?.[r.key];
-                        rowData.push((val !== undefined && val !== null && val !== 0 && val !== "-") ? (r.isPercent ? `${val}%` : val) : "");
+                        rowData.push((val !== undefined && val !== null && val !== 0 && val !== "-") ? (r.isPercent ? `${Number(val).toFixed(2)}%` : parseFloat(Number(val).toFixed(2))) : "");
                     });
 
                     // Add Total Column
@@ -445,7 +446,7 @@ function MachineReportPage() {
                 daysArray.forEach(day => {
                     const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
                     const val = group.summaryData[dateKey]?.[r.key];
-                    rowData.push((val !== undefined && val !== null && val !== 0 && val !== "-") ? (r.isPercent ? `${val}%` : parseFloat(Number(val).toFixed(2))) : "");
+                    rowData.push((val !== undefined && val !== null && val !== 0 && val !== "-") ? (r.isPercent ? `${Number(val).toFixed(2)}%` : parseFloat(Number(val).toFixed(2))) : "");
                 });
 
                 // Compute summary block's own total recursively on its synthetic daily_data
@@ -524,7 +525,7 @@ function MachineReportPage() {
                         const isInteger = Number.isInteger(ws[cellRef].v);
                         ws[cellRef].s = {
                             ...centerStyle,
-                            numFmt: isInteger ? "#,##0" : "#,##0.##"
+                            numFmt: isInteger ? "#,##0" : "#,##0.00"
                         };
                     } else {
                         ws[cellRef].s = centerStyle;
@@ -644,14 +645,14 @@ function MachineReportPage() {
                         <div>
                             {/* <small className="fw-bold d-block mb-1">Area</small> */}
                             <select className="form-select form-select-sm" value={selectedArea} onChange={(e) => handleAreaChange(e.target.value)}>
-                                <option value="all">All Area</option>
+                                {/* <option value="all">All Area</option> */}
                                 {areas.map(a => <option key={a} value={a}>{a}</option>)}
                             </select>
                         </div>
                         <div>
                             {/* <small className="fw-bold d-block mb-1">Machine Type</small> */}
                             <select className="form-select form-select-sm" value={selectedType} onChange={(e) => handleTypeChange(e.target.value)}>
-                                <option value="all">All Type</option>
+                                {/* <option value="all">All Type</option> */}
                                 {types.map(t => <option key={t} value={t}>{t}</option>)}
                             </select>
                         </div>

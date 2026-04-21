@@ -393,12 +393,12 @@ function MachineNgReportPage() {
                 if (mNgMode === "over_reject") {
                     rows.push({ label: "Machine Output", key: "Machine_Output", isStation: false, isPercent: false, showZero: true });
                     rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
-                    rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                    rows.push({ label: "NG Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
                     rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
                     rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
                 } else {
                     rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
-                    rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                    rows.push({ label: "NG Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
                     rows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
                     rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
                     rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
@@ -444,7 +444,7 @@ function MachineNgReportPage() {
                         } else if (val === 0 || val === "0.00") {
                              cellVal = r.showZero ? (r.isPercent ? "0%" : 0) : "";
                         } else if (val !== undefined && val !== null && val !== "") {
-                             cellVal = r.isPercent ? `${val}%` : val;
+                             cellVal = r.isPercent ? `${Number(val).toFixed(2)}%` : parseFloat(Number(val).toFixed(2));
                         }
                         rowData.push(cellVal);
                     });
@@ -463,12 +463,12 @@ function MachineNgReportPage() {
             if (group.ng_mode === "over_reject") {
                 rows.push({ label: "Machine Output", key: "Machine_Output", isStation: false, isPercent: false, showZero: true });
                 rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
-                rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                rows.push({ label: "NG Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
                 rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
                 rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
             } else {
                 rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
-                rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                rows.push({ label: "NG Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
                 rows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
                 rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
                 rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
@@ -510,7 +510,7 @@ function MachineNgReportPage() {
                     } else if (val === 0 || val === "0.00") {
                          cellVal = r.showZero ? (r.isPercent ? "0%" : 0) : "";
                     } else if (val !== undefined && val !== null && val !== "") {
-                         cellVal = r.isPercent ? `${val}%` : val;
+                         cellVal = r.isPercent ? `${Number(val).toFixed(2)}%` : parseFloat(Number(val).toFixed(2));
                     }
                     rowData.push(cellVal);
                 });
@@ -590,7 +590,7 @@ function MachineNgReportPage() {
                         const isInteger = Number.isInteger(ws[cellRef].v);
                         ws[cellRef].s = {
                             ...centerStyle,
-                            numFmt: isInteger ? "#,##0" : "#,##0.##"
+                            numFmt: isInteger ? "#,##0" : "#,##0.00"
                         };
                     } else {
                         ws[cellRef].s = centerStyle;
@@ -701,14 +701,14 @@ function MachineNgReportPage() {
                         <div>
                             {/* <small className="fw-bold d-block mb-1">Area</small> */}
                             <select className="form-select form-select-sm" value={selectedArea} onChange={(e) => handleAreaChange(e.target.value)}>
-                                <option value="all">All Area</option>
+                                {/* <option value="all">All Area</option> */}
                                 {areas.map(a => <option key={a} value={a}>{a}</option>)}
                             </select>
                         </div>
                         <div>
                             {/* <small className="fw-bold d-block mb-1">Machine Type</small> */}
                             <select className="form-select form-select-sm" value={selectedType} onChange={(e) => handleTypeChange(e.target.value)}>
-                                <option value="all">All Type</option>
+                                {/* <option value="all">All Type</option> */}
                                 {types.map(t => <option key={t} value={t}>{t}</option>)}
                             </select>
                         </div>
@@ -742,7 +742,7 @@ function MachineNgReportPage() {
                                     <th style={{ position: "sticky", left: "100px", top: 0, minWidth: "100px", width: "100px", maxWidth: "100px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000", zIndex: 110 }}>Model Type</th>
                                     <th style={{ position: "sticky", left: "200px", top: 0, minWidth: "120px", width: "120px", maxWidth: "120px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000", zIndex: 110 }}>Model Name</th>
                                     <th style={{ position: "sticky", left: "320px", top: 0, minWidth: "80px", width: "80px", maxWidth: "80px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000", zIndex: 110 }}>Process</th>
-                                    <th style={{ position: "sticky", left: "400px", top: 0, minWidth: "150px", width: "150px", maxWidth: "150px", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000", zIndex: 110, boxShadow: "2px 0 5px rgba(0,0,0,0.1)" }}>Data</th>
+                                    <th style={{ position: "sticky", left: "400px", top: 0, minWidth: "200px", whiteSpace: "nowrap", height: "40px", background: "#f8f9fa", borderRight: "2px solid #000", borderBottom: "3px double #000", zIndex: 110, boxShadow: "2px 0 5px rgba(0,0,0,0.1)" }}>Data</th>
                                     
                                     {/* Scrollable Right Headers */}
                                     {daysArray.map(d => (
@@ -758,12 +758,12 @@ function MachineNgReportPage() {
                                     if (group.ng_mode === "over_reject") {
                                         rows.push({ label: "Machine Output", key: "Machine_Output", isStation: false, isPercent: false, showZero: true });
                                         rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
-                                        rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                                        rows.push({ label: "NG Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
                                         rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
                                         rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
                                     } else {
                                         rows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
-                                        rows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                                        rows.push({ label: "NG Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
                                         rows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
                                         rows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
                                         rows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
@@ -780,12 +780,12 @@ function MachineNgReportPage() {
                                                 if (machineNgMode === "over_reject") {
                                                     mRows.push({ label: "Machine Output", key: "Machine_Output", isStation: false, isPercent: false, showZero: true });
                                                     mRows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
-                                                    mRows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                                                    mRows.push({ label: "NG Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
                                                     mRows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
                                                     mRows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
                                                 } else {
                                                     mRows.push({ label: "Total Output", key: "Total_Output", isStation: false, isPercent: false, showZero: true });
-                                                    mRows.push({ label: "Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
+                                                    mRows.push({ label: "NG Total (All Station)", key: "All", isStation: false, isPercent: false, showZero: false });
                                                     mRows.push({ label: "Visual NG", key: "Visual_NG", isStation: false, isPercent: false, showZero: true });
                                                     mRows.push({ label: "Over Reject", key: "Over_Reject", isStation: false, isPercent: false, showZero: true });
                                                     mRows.push({ label: "Over Reject %", key: "Over_Reject_Percent", isStation: false, isPercent: true, showZero: true });
@@ -807,7 +807,7 @@ function MachineNgReportPage() {
                                                                     <td rowSpan={mRows.length} style={{ position: "sticky", left: "320px", zIndex: 50, background: "white", borderRight: "2px solid #000", borderBottom: "2px solid #333", verticalAlign: "middle", padding: "0 8px" }}>{model_info.process_name}</td>
                                                                 </>
                                                             )}
-                                                            <td style={{ position: "sticky", left: "400px", zIndex: 50, textAlign: "left", paddingLeft: "10px", borderRight: "2px solid #000", borderBottom: borderBottomStyle, fontWeight: "500", background: "#fcfcfc", height: "30px", boxSizing: "border-box", padding: "0 10px", boxShadow: "2px 0 5px rgba(0,0,0,0.1)" }}>{row.label}</td>
+                                                            <td style={{ position: "sticky", left: "400px", zIndex: 50, textAlign: "left", paddingLeft: "10px", borderRight: "2px solid #000", borderBottom: borderBottomStyle, fontWeight: "500", background: "#fcfcfc", height: "30px", boxSizing: "border-box", padding: "0 10px", boxShadow: "2px 0 5px rgba(0,0,0,0.1)", whiteSpace: "nowrap" }}>{row.label}</td>
 
                                                             {/* Scrollable Right Cells */}
                                                             {daysArray.map(day => {
@@ -882,7 +882,7 @@ function MachineNgReportPage() {
                                                                 <td rowSpan={rows.length} style={{ position: "sticky", left: "320px", zIndex: 50, background: "#fff2cc", borderRight: "2px solid #000", borderBottom: "3px double #000", verticalAlign: "middle", padding: "0 8px", fontSize: "0.75rem", lineHeight: "1.2" }}>{group.processesArr}</td>
                                                             </>
                                                         )}
-                                                        <td style={{ position: "sticky", left: "400px", zIndex: 50, textAlign: "left", paddingLeft: "10px", borderRight: "2px solid #000", borderBottom: borderBottomStyle, fontWeight: "bold", background: "#fff2cc", color: "#b98300", height: "30px", boxSizing: "border-box", padding: "0 10px", boxShadow: "2px 0 5px rgba(0,0,0,0.1)" }}>{row.label}</td>
+                                                        <td style={{ position: "sticky", left: "400px", zIndex: 50, textAlign: "left", paddingLeft: "10px", borderRight: "2px solid #000", borderBottom: borderBottomStyle, fontWeight: "bold", background: "#fff2cc", color: "#b98300", height: "30px", boxSizing: "border-box", padding: "0 10px", boxShadow: "2px 0 5px rgba(0,0,0,0.1)", whiteSpace: "nowrap" }}>{row.label}</td>
 
                                                         {daysArray.map(day => {
                                                             const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
