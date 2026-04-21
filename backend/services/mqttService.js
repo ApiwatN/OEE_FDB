@@ -147,18 +147,22 @@ const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
 
                         let remarkToSave = null;
                         if (statusStr === "MC_Alarm" || statusStr === "MC_Error") {
-                            const recentAlarm = await prisma.tb_MCAlarm.findFirst({
-                                where: { 
-                                    MC: machineName,
-                                    Datetime: { 
-                                        gte: new Date(thaiDataTime.getTime() - 2000),
-                                        lte: new Date(thaiDataTime.getTime() + 2000)
-                                    }
-                                },
-                                orderBy: { Datetime: 'desc' },
-                                select: { MCAlarm: true }
-                            });
-                            if (recentAlarm) remarkToSave = recentAlarm.MCAlarm;
+                            try {
+                                const recentAlarm = await prisma.tb_MCAlarm.findFirst({
+                                    where: { 
+                                        MC: machineName,
+                                        Datetime: { 
+                                            gte: new Date(thaiDataTime.getTime() - 2000),
+                                            lte: new Date(thaiDataTime.getTime() + 2000)
+                                        }
+                                    },
+                                    orderBy: { Datetime: 'desc' },
+                                    select: { MCAlarm: true }
+                                });
+                                if (recentAlarm) remarkToSave = recentAlarm.MCAlarm;
+                            } catch (e) {
+                                console.error(`[MQTT] recentAlarm lookup error for ${machineName}:`, e.message);
+                            }
                         }
 
                         try {
