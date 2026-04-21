@@ -4,7 +4,7 @@ const dayjs = require("dayjs");
 const fs = require("fs");
 const path = require("path");
 
-const { getNgMode } = require("../services/oeeCalcService");
+const { getNgMode, getAvailabilityTargetConfig } = require("../services/oeeCalcService");
 
 // ✅ Same shift-hour order used by cronService & OeeDashboardController
 const SHIFT_HOURS = [
@@ -106,6 +106,8 @@ module.exports = {
                     process_name: latestTarget?.process_name || "-",
                 };
 
+                const availConf = getAvailabilityTargetConfig(mName);
+
                 mTargets.forEach(t => {
                     const key = getDateKey(t.date);
                     if (!dailyData[key]) dailyData[key] = {};
@@ -119,7 +121,7 @@ module.exports = {
                     ].reduce((sum, val) => sum + (val || 0), 0);
 
                     dailyData[key].output_target = totalTarget;
-                    dailyData[key].eff_target = t.eff_target || 0;
+                    dailyData[key].eff_target = typeof availConf === "number" ? availConf : (t.eff_target || 0);
                     dailyData[key].cycle_target = t.cycle_time_target || 0;
                 });
 
