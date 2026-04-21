@@ -58,21 +58,22 @@ function MachineReportPage() {
     // ==========================
     useEffect(() => {
         const init = async () => {
-            await fetchAreas();
+            const fetchedAreas = await fetchAreas();
+            if (!fetchedAreas || fetchedAreas.length === 0) return;
 
             // Load Filters from LocalStorage
             const localArea = localStorage.getItem("report_filter_area");
-            const localType = localStorage.getItem("report_filter_type");
-
-            const targetArea = localArea && localArea !== "all" ? localArea : "all";
-            const targetType = localType && localType !== "all" ? localType : "all";
+            const targetArea = localArea && localArea !== "all" && fetchedAreas.includes(localArea) 
+                             ? localArea : fetchedAreas[0];
 
             setSelectedArea(targetArea);
-            setSelectedType(targetType);
 
-            if (targetArea !== "all") {
-                await fetchTypes(targetArea);
-            }
+            const fetchedTypes = await fetchTypes(targetArea);
+            const localType = localStorage.getItem("report_filter_type");
+            const targetType = localType && localType !== "all" && fetchedTypes.includes(localType) 
+                             ? localType : (fetchedTypes.length > 0 ? fetchedTypes[0] : "all");
+
+            setSelectedType(targetType);
 
             // Fetch Report
             await fetchReport(selectedMonth, targetArea, targetType);
@@ -201,10 +202,10 @@ function MachineReportPage() {
     // 🔸 API Calls
     // ==========================
     const fetchAreas = async () => {
-        try { const res = await axios.get(`${config.apiServer}/api/machine/listArea`); setAreas(res.data.results.map((r: any) => r.machine_area)); } catch (e) { console.error(e); }
+        try { const res = await axios.get(`${config.apiServer}/api/machine/listArea`); const arr = res.data.results.map((r: any) => r.machine_area); setAreas(arr); return arr; } catch (e) { console.error(e); return []; }
     };
     const fetchTypes = async (area: string) => {
-        try { if (area === "all" || !area) { setTypes([]); return; } const res = await axios.get(`${config.apiServer}/api/machine/listType/${area}`); setTypes(res.data.results); } catch (e) { console.error(e); }
+        try { if (area === "all" || !area) { setTypes([]); return []; } const res = await axios.get(`${config.apiServer}/api/machine/listType/${area}`); const arr = res.data.results; setTypes(arr); return arr; } catch (e) { console.error(e); return []; }
     };
 
     const fetchReport = async (month: string, area: string, type: string, showLoading: boolean = true) => {
