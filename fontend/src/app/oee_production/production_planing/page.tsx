@@ -554,7 +554,6 @@ function ProductionPlanningPage() {
                                             <th style={{ width: "40px" }}>#</th>
                                             <th>Machine</th>
                                             <th>Type</th>
-                                            <th className="text-center">Eff (%)</th>
                                             <th className="text-center">CT (s)</th>
                                             <th className="text-center">Target/Day</th>
                                             <th>Process</th>
@@ -569,7 +568,6 @@ function ProductionPlanningPage() {
                                                 <td className="text-muted">{i + 1}</td>
                                                 <td className="fw-bold">{row.machine_name}</td>
                                                 <td className="text-muted">{row.machine_type}</td>
-                                                <td className="text-center">{row.hasConfig ? <span className="fw-bold" style={{ color: "#2e7d32" }}>{row.eff_target}</span> : <span className="text-muted">-</span>}</td>
                                                 <td className="text-center">{row.hasConfig ? <span className="fw-bold" style={{ color: "#e65100" }}>{row.cycle_time_target}</span> : <span className="text-muted">-</span>}</td>
                                                 <td className="text-center">{row.hasConfig ? <span className="fw-bold" style={{ color: "#1565c0" }}>{row.pc_target.toLocaleString("en-US")}</span> : <span className="text-muted">-</span>}</td>
                                                 <td>{row.process_name}</td>

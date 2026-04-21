@@ -6,7 +6,7 @@ const sharp = require("sharp");
 const cacheService = require("../services/cacheService");
 const influxService = require("../services/influxService");
 const { getShiftDateUTC, getCurrentHourBoundaries, utcHourToThColumn } = require("../utils/timeUtils");
-const { calcAvailability, calcMcStatusDurations, getMachineRunTimeMode, getCTCalcMode, getTargetDeductMode } = require("../services/oeeCalcService");
+const { calcAvailability, calcMcStatusDurations, getMachineRunTimeMode, getCTCalcMode, getTargetDeductMode, getAvailabilityTargetConfig } = require("../services/oeeCalcService");
 
 // Helper: สร้าง shift boundaries สำหรับ InfluxDB query (UTC)
 function getShiftBoundariesForDate(dateStr) {
@@ -466,6 +466,10 @@ module.exports = {
                 }
             }
 
+            // Determine Availability Target
+            const availConf = getAvailabilityTargetConfig(machine_name);
+            const finalAvailTarget = typeof availConf === "number" ? availConf : (outputTargetDB.eff_target || 0);
+
             res.json({
                 machine_name,
                 model: actualModel,
@@ -473,7 +477,7 @@ module.exports = {
                 outputActual: outputActualSum,
                 cycleTimeTarget: outputTargetDB.cycle_time_target,
                 cycleTimeActual: parseFloat(cycleTimeActual.toFixed(2)),
-                availabilityTarget: outputTargetDB.eff_target,
+                availabilityTarget: finalAvailTarget,
                 availabilityActual: parseFloat(availabilityActual.toFixed(2)),
                 Achieve: parseFloat(achieve.toFixed(2)),
                 oee: dataOee ? dataOee.oee_value : 0,
@@ -640,13 +644,66 @@ module.exports = {
                 } catch (e) { /* non-critical — keep cache/MSSQL value */ }
             }
 
+            // ✅ Fix: current hour Availability → Calculate dynamically for Graph
+            if (isToday && availabilityArray && availabilityArray.length === 24) {
+                try {
+                    const now = new Date();
+                    const { start, thColumn } = getCurrentHourBoundaries(now);
+                    const shiftIndex = SHIFT_HOURS.indexOf(thColumn);
+                    if (shiftIndex !== -1) {
+                        const totalHourSecs = Math.max(0, (now.getTime() - new Date(start).getTime()) / 1000);
+                        const modeRunTime = getMachineRunTimeMode(machine_name);
+                        let currentHourRun = 0;
+                        let currentHourExcluded = 0;
+                        
+                        if (modeRunTime === "output_based") {
+                            const influxData = await influxService.queryMachineForHour(machine_name, start, now);
+                            let ctForRun = (influxData && influxData.avg_cycle_time > 0) ? influxData.avg_cycle_time : (outputTargetDB ? outputTargetDB.cycle_time_target : 0);
+                            currentHourRun = (influxData ? influxData.output_count : 0) * parseFloat(ctForRun.toFixed(2));
+                        } else {
+                            const TH_OFFSET = 7 * 3600000;
+                            const startTH = new Date(new Date(start).getTime() + TH_OFFSET);
+                            const nowTH = new Date(now.getTime() + TH_OFFSET);
+                            
+                            const mcRecords = await prisma.tb_MCStatus.findMany({
+                                where: { MC: machine_name, Datetime: { gte: startTH, lte: nowTH } },
+                                orderBy: { Datetime: 'asc' },
+                                select: { MC: true, Datetime: true, MCStatus: true }
+                            });
+                            
+                            const carryOverRows = await prisma.$queryRaw`
+                                SELECT MC, MCStatus, Datetime FROM (
+                                    SELECT MC, MCStatus, Datetime, ROW_NUMBER() OVER (PARTITION BY MC ORDER BY Datetime DESC) AS rn
+                                    FROM tb_MCStatus WHERE MC=${machine_name} AND Datetime < ${startTH}
+                                ) t WHERE rn = 1
+                            `;
+                            
+                            if (carryOverRows && carryOverRows.length > 0) {
+                                mcRecords.unshift({ MC: carryOverRows[0].MC, MCStatus: carryOverRows[0].MCStatus, Datetime: startTH });
+                            }
+                            
+                            if (mcRecords.length > 0) {
+                                const { runTimeSeconds, excludedSeconds } = calcMcStatusDurations(mcRecords, startTH, nowTH);
+                                currentHourRun = runTimeSeconds;
+                                currentHourExcluded = excludedSeconds;
+                            }
+                        }
+                        const currentAvail = calcAvailability(currentHourRun, currentHourExcluded, totalHourSecs);
+                        availabilityArray[shiftIndex] = parseFloat(currentAvail.toFixed(2));
+                    }
+                } catch (e) {
+                    console.error("⚠️ [Graph2] Live Avail Calc Error:", e.message);
+                }
+            }
+
             let cycleTimeActual = [];
             let cycleTimeTarget = [];
             let availabilityActual = availabilityArray;
             let availabilityTarget = [];
 
             const targetCTValue = outputTargetDB ? outputTargetDB.cycle_time_target : 0;
-            const targetAvailValue = outputTargetDB ? outputTargetDB.eff_target : 0;
+            const availConf = getAvailabilityTargetConfig(machine_name);
+            const targetAvailValue = typeof availConf === "number" ? availConf : (outputTargetDB ? outputTargetDB.eff_target : 0);
 
             for (const h of SHIFT_HOURS) {
                 // CT Actual

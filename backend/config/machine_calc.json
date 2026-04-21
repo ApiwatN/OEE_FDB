@@ -44,6 +44,15 @@
     },
     "target_deduct_excluded": {
         "default": false,
-        "ABR": true
+        "ABR": false
+    },
+
+    "_availability_target_options": {
+        "eff_target": "ใช้ค่าตามช่อง Eff ที่กรอกไว้ในหน้า Production Planning",
+        "fixed_<number>": "Fix เป้าหมายเป็นตัวเลขตายตัว (เช่น ABR ไม่คำนึงถึง Eff ที่กรอก ให้ยึด 85 เป็นเป้าหมายตายตัวสำหรับกราฟ Availability)"
+    },
+    "availability_targets": {
+        "default": "eff_target",
+        "ABR": 85
     }
 }

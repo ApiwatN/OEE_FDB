@@ -100,6 +100,23 @@ function getTargetDeductMode(machineName) {
 }
 
 /**
+ * Get Availability Target Config
+ * "eff_target" = ใช้ค่าที่กรอกมากับ Plan, number = ใช้ค่า Fix ตัวเลขตาม Config
+ */
+function getAvailabilityTargetConfig(machineName) {
+    if (!machineCalcConfig) {
+        getMachineRunTimeMode(machineName); // force load config
+    }
+    const availMap = machineCalcConfig.availability_targets || {};
+    for (const prefix of Object.keys(availMap)) {
+        if (prefix !== 'default' && machineName.startsWith(prefix)) {
+            return availMap[prefix];
+        }
+    }
+    return availMap.default ?? "eff_target";
+}
+
+/**
  * Calculate run time and excluded time from MC Status records for a given shift period.
  *
  * @param {Array<{Datetime: Date, MCStatus: string}>} records - sorted by Datetime ASC
@@ -335,5 +352,6 @@ module.exports = {
     getCTCalcMode,
     getNgMode,
     getTargetDeductMode,
+    getAvailabilityTargetConfig,
     recalculateAPQForDay
 };
