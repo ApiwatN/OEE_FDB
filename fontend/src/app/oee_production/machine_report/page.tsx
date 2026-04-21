@@ -324,9 +324,16 @@ function MachineReportPage() {
                         if (val !== undefined && val !== null && val !== "" && val !== "-") {
                             const num = Number(val);
                             if (!isNaN(num)) {
-                                sum += num;
+                                const mHasProd = !isDayEmpty(m.daily_data, d, selectedMonth);
+                                
+                                if (key === "output_target" && !mHasProd) {
+                                    // Skip adding output_target if machine has no production that day
+                                } else {
+                                    sum += num;
+                                }
+
                                 totalCount++;
-                                if (!isDayEmpty(m.daily_data, d, selectedMonth)) {
+                                if (mHasProd) {
                                     countForAverage++;
                                     dayData.has_production = true;
                                 }
@@ -580,11 +587,17 @@ function MachineReportPage() {
             if (val !== undefined && val !== null && val !== "" && val !== "-") {
                 const num = Number(val);
                 if (!isNaN(num)) {
+                    const noProd = isDayEmpty(daily_data, day, selectedMonth);
+
+                    if (key === "output_target" && noProd) {
+                        return; // Skip adding output_target if no production
+                    }
+
                     if (key.includes("target") && key !== "output_target") {
                         if (num > 0) latestTarget = num;
                     } else {
                         sum += num;
-                        if (data.has_production || num > 0) {
+                        if (!noProd || num > 0) {
                             count++;
                         }
                     }
