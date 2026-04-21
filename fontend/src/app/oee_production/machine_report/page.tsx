@@ -245,12 +245,15 @@ function MachineReportPage() {
     // ==========================
     const handleAreaChange = async (area: string) => {
         setSelectedArea(area);
-        setSelectedType("all");
         localStorage.setItem("report_filter_area", area);
-        localStorage.setItem("report_filter_type", "all");
 
-        await fetchTypes(area);
-        await fetchReport(selectedMonth, area, "all");
+        const fetchedTypes = await fetchTypes(area);
+        const newType = fetchedTypes.length > 0 ? fetchedTypes[0] : "";
+
+        setSelectedType(newType);
+        localStorage.setItem("report_filter_type", newType);
+
+        await fetchReport(selectedMonth, area, newType);
     };
 
     const handleTypeChange = async (type: string) => {
