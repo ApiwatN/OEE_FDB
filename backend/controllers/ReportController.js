@@ -6,6 +6,12 @@ const path = require("path");
 
 const { getNgMode } = require("../services/oeeCalcService");
 
+// ✅ Same shift-hour order used by cronService & OeeDashboardController
+const SHIFT_HOURS = [
+    "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18",
+    "19", "20", "21", "22", "23", "00", "01", "02", "03", "04", "05", "06",
+];
+
 module.exports = {
     getMachineReport: async (req, res) => {
         try {
@@ -86,9 +92,11 @@ module.exports = {
                 // For now, let's pick the latest one or distinct.
                 const latestTarget = mTargets.sort((a, b) => b.date - a.date)[0];
 
-                // ✅ model_name = actual model produced (from tb_output_actual / InfluxDB only)
+                // ✅ model_name = actual model produced — exclude '--' placeholder rows
                 const modelNamesSet = new Set();
-                actuals.filter(a => a.machine_name === mName).forEach(a => { if (a.model_name) modelNamesSet.add(a.model_name); });
+                actuals
+                    .filter(a => a.machine_name === mName && a.model_name && a.model_name !== "--")
+                    .forEach(a => modelNamesSet.add(a.model_name));
 
                 const allModelNames = [...modelNamesSet];
 
@@ -115,20 +123,38 @@ module.exports = {
                     dailyData[key].cycle_target = t.cycle_time_target || 0;
                 });
 
-                // --- Actual Output ---
-                actuals.filter(a => a.machine_name === mName).forEach(a => {
+                // --- Actual Output (per-hour fallback — same logic as OeeDashboardController) ---
+                // 🔧 Fix Bug #1: สะสม rows ต่อ date ก่อน แล้วทำ per-hour fallback
+                // Rule: ถ้าชั่วโมงมี real model → SUM real only; ถ้ามีแค่ '--' → ใช้ '--' แทน
+                // วิธีนี้ป้องกัน double-count ในวันที่มีทั้ง real model row และ '--' row
+                const mActualRows = actuals.filter(a => a.machine_name === mName);
+
+                // Group rows by date key
+                const actualRowsByDate = {};
+                mActualRows.forEach(a => {
                     const key = getDateKey(a.date);
+                    if (!actualRowsByDate[key]) actualRowsByDate[key] = [];
+                    actualRowsByDate[key].push(a);
+                });
+
+                // Apply per-hour fallback per date
+                Object.keys(actualRowsByDate).forEach(key => {
                     if (!dailyData[key]) dailyData[key] = {};
-                    // Calculate total actual from hourly fields if accum not present or reliable
-                    // But let's assume we sum hourly fields for accuracy if needed, or use a summary field if exists.
-                    // Looking at schema, there is no accum_actual in tb_output_actual, only hourly.
-                    // So we must sum them.
-                    const totalActual = [
-                        a.actual_07, a.actual_08, a.actual_09, a.actual_10, a.actual_11, a.actual_12,
-                        a.actual_13, a.actual_14, a.actual_15, a.actual_16, a.actual_17, a.actual_18,
-                        a.actual_19, a.actual_20, a.actual_21, a.actual_22, a.actual_23, a.actual_00,
-                        a.actual_01, a.actual_02, a.actual_03, a.actual_04, a.actual_05, a.actual_06
-                    ].reduce((sum, val) => sum + (val || 0), 0);
+                    const rows = actualRowsByDate[key];
+                    let totalActual = 0;
+
+                    for (const h of SHIFT_HOURS) {
+                        // Real model rows that have output in this hour
+                        const realForHour = rows.filter(r => r.model_name !== "--" && (r[`actual_${h}`] || 0) > 0);
+                        if (realForHour.length > 0) {
+                            // Real model exists → SUM real only (ignore '--')
+                            totalActual += realForHour.reduce((acc, r) => acc + (r[`actual_${h}`] || 0), 0);
+                        } else {
+                            // No real model → use '--' as fallback
+                            const dashRow = rows.find(r => r.model_name === "--");
+                            totalActual += dashRow ? (dashRow[`actual_${h}`] || 0) : 0;
+                        }
+                    }
 
                     dailyData[key].machine_output_actual = totalActual;
                     dailyData[key].output_actual = totalActual;
@@ -151,15 +177,19 @@ module.exports = {
                     });
                 }
 
-                // --- Availability & Efficiency Actual Priority Read ---
-                // Try from tb_availability_actual first
+                // --- Availability: tb_availability_actual (primary) + tb_efficiency_actual (legacy fallback) ---
+                // 🔧 Fix Bug #2: ใช้ avail_actual จาก tb_availability_actual เป็น source หลัก
+                // เพราะ Cron Worker เขียนทุกชั่วโมง และตรงกับที่ machine_working ใช้
                 avails.filter(a => a.machine_name === mName).forEach(a => {
                     const key = getDateKey(a.date);
                     if (!dailyData[key]) dailyData[key] = {};
-                    dailyData[key].eff_actual = a.avail_actual || 0; // mapping to eff_actual for UI compatibility
+                    // eff_actual → แสดงเป็น "Availability (Target)" column ใน UI
+                    dailyData[key].eff_actual = a.avail_actual || 0;
+                    // availability → แสดงเป็น "Availability" column (ใช้ค่าเดียวกัน เป็น primary source)
+                    dailyData[key].availability = a.avail_actual || 0;
                 });
 
-                // Fallback to tb_efficiency_actual if availability is 0 or empty (for older legacy data)
+                // Legacy fallback: tb_efficiency_actual สำหรับวันเก่าที่ยังไม่มีใน tb_availability_actual
                 effs.filter(e => e.machine_name === mName).forEach(e => {
                     const key = getDateKey(e.date);
                     if (!dailyData[key]) dailyData[key] = {};
@@ -175,14 +205,20 @@ module.exports = {
                     dailyData[key].cycle_actual = c.cycle_time || 0;
                 });
 
-                // --- OEE ---
+                // --- OEE: tb_oee เป็น source ของ performance, quality, oee, ng_qty ---
+                // 🔧 Fix Bug #2: availability ถูก set จาก tb_availability_actual แล้วด้านบน
+                // tb_oee ให้แค่ performance, quality, oee_value, ng_qty เท่านั้น
+                // ถ้ายังไม่มี availability จาก tb_availability_actual → fallback ใช้ o.availability จาก tb_oee
                 oees.filter(o => o.machine_name === mName).forEach(o => {
                     const key = getDateKey(o.date);
                     if (!dailyData[key]) dailyData[key] = {};
                     if (ngMode !== "over_reject") {
-                        dailyData[key].ng_qty = o.ng_qty || 0; // Only use Visual NG for non ABR machines
+                        dailyData[key].ng_qty = o.ng_qty || 0;
                     }
-                    dailyData[key].availability = o.availability || 0;
+                    // Fallback availability ถ้า tb_availability_actual ยังไม่มีข้อมูลวันนี้
+                    if (!dailyData[key].availability) {
+                        dailyData[key].availability = o.availability || 0;
+                    }
                     dailyData[key].performance = o.performance || 0;
                     dailyData[key].quality = o.quality || 0;
                     dailyData[key].oee = o.oee_value || 0;
