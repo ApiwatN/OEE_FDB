@@ -37,10 +37,6 @@ async function main() {
             await cronService.upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetDateObj, statusMachines);
         }
         
-        console.log("\nSince handleLateData automatically does this now, we will simply force handleLateData to run!");
-        console.log("⏳ Forcing handleLateData()...");
-        await cronService.handleLateData();
-        
         console.log("✅ Recovery complete! You can reload the web dashboard now.");
     } catch (e) {
         console.error("❌ Recovery Error:", e);

@@ -71,6 +71,11 @@ const releaseLock = () => {
 // Track last processed time per machine for late data detection
 const lastProcessedTime = {};
 
+// 🆕 Bug #1 Fix: Debounce runtime recalc trigger — prevent hammering upsertRuntimeAndAvailabilityForHour
+// every 15 min when network is unstable and statusRecovered stays true continuously.
+let lastStatusRecoveredAt = 0;
+const STATUS_RECOVERED_DEBOUNCE_MS = 30 * 60 * 1000; // 30 min
+const LATE_DATA_MAX_HOURS = 6; // max backfill window (hours) — 12h is overkill for normal late-data scenarios
 
 /**
  * Start all cron jobs
@@ -962,21 +967,32 @@ async function handleLateData() {
             console.error("❌ Late data event sync failed:", e.message);
         }
 
-        // 🆕 If late status events were recovered, force runtime recalc for status_based machines
+        // 🆕 Bug #1 Fix: Debounce — prevent runtime recalc loop from running every 15 min
+        //   when network is unstable and statusRecovered stays true continuously.
+        //   Only run if last recalc was > STATUS_RECOVERED_DEBOUNCE_MS ago.
         if (recoveredEvents && recoveredEvents.statusRecovered) {
-             const statusMachines = activeMachines.filter(m => getMachineRunTimeMode(m) !== "output_based");
-             if (statusMachines.length > 0) {
-                 console.log(`⏳ Triggering full runtime recalculation for past 12 hours due to recovered events...`);
-                 for (let h = 1; h <= 12; h++) {
-                     const pastDate = new Date(now.getTime() - (h * 60 * 60 * 1000));
-                     const { dateStr, thColumn, start, end } = getCurrentHourBoundaries(pastDate);
-                     const targetDateObj = new Date(dateStr + "T00:00:00.000Z");
-                     
-                     // Run single-hour upsert for status-based machines
-                     await upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetDateObj, statusMachines);
-                 }
-                 console.log(`✅ Completed runtime recalculation.`);
-             }
+            const now2 = Date.now();
+            if (now2 - lastStatusRecoveredAt > STATUS_RECOVERED_DEBOUNCE_MS) {
+                lastStatusRecoveredAt = now2;
+                const activeMachinesRaw = await prisma.tbm_machine.findMany({ where: { status: 'active' }, select: { machine_name: true } });
+                const activeMachines = activeMachinesRaw.map(m => m.machine_name);
+                const statusMachines = activeMachines.filter(m => getMachineRunTimeMode(m) !== "output_based");
+                if (statusMachines.length > 0) {
+                    console.log(`⏳ Triggering runtime recalculation for past ${LATE_DATA_MAX_HOURS} hours due to recovered events...`);
+                    for (let h = 1; h <= LATE_DATA_MAX_HOURS; h++) {
+                        const pastDate = new Date(now.getTime() - (h * 60 * 60 * 1000));
+                        const { dateStr, thColumn, start, end } = getCurrentHourBoundaries(pastDate);
+                        const targetDateObj = new Date(dateStr + "T00:00:00.000Z");
+                        await upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetDateObj, statusMachines);
+                        // Yield between hours so other cron jobs can interleave
+                        await yieldEventLoop();
+                    }
+                    console.log(`✅ Completed runtime recalculation (${LATE_DATA_MAX_HOURS}h window).`);
+                }
+            } else {
+                const remainSec = Math.round((STATUS_RECOVERED_DEBOUNCE_MS - (now2 - lastStatusRecoveredAt)) / 1000);
+                console.log(`⏩ [handleLateData] Runtime recalc skipped (debounced — ${remainSec}s remaining)`);
+            }
         }
 
         if (totalUpdated > 0 || totalCreated > 0) {
@@ -1989,15 +2005,10 @@ async function syncEventsFromInfluxDb(startUTC, endUTC) {
     let statusRecovered = 0;
     let alarmRecovered = 0;
 
-    const getThaiTime = (utcDate) => {
-        let ms = utcDate.getTime();
-        // If it's true UTC (ABR), it's close to Date.now (or past).
-        // If it's already Thai time (AHV), influx parsed it as future (+7 hours).
-        if (ms - Date.now() < 3 * 3600 * 1000) {
-            ms += TH_OFFSET_MS;
-        }
-        return new Date(ms);
-    };
+    // InfluxDB status_tb / alarm_tb always stores UTC timestamps (RFC3339).
+    // MSSQL tb_MCStatus.Datetime stores Thai local time physically.
+    // → Always add +7h. No conditional guessing needed.
+    const getThaiTime = (utcDate) => new Date(utcDate.getTime() + TH_OFFSET_MS);
 
     if (statusData.length > 0) {
         const existingStatus = await prisma.tb_MCStatus.findMany({
