@@ -427,18 +427,15 @@ async function upsertHourlyField(tableName, machineName, date, fieldName, value,
 async function upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetDate, machineNames, influxHourData = null) {
     if (!machineNames || machineNames.length === 0) return;
 
-    // Auto-fetch InfluxDB data for output_based machines if not provided by caller
+    // Always query InfluxDB:
+    //  - output_based: runtime = output × avgCT
+    //  - status_based with no MCStatus: fallback to output × avgCT (machine was clearly running)
     let resolvedInfluxData = influxHourData;
     if (!resolvedInfluxData) {
-        const hasOutputBased = machineNames.some(m => getMachineRunTimeMode(m) === "output_based");
-        if (hasOutputBased) {
-            try {
-                resolvedInfluxData = await influxService.queryAllMachinesForHour(start, end);
-            } catch (e) {
-                console.error("   ⚠️ [Phase 6] InfluxDB query for output_based failed:", e.message);
-                resolvedInfluxData = {};
-            }
-        } else {
+        try {
+            resolvedInfluxData = await influxService.queryAllMachinesForHour(start, end);
+        } catch (e) {
+            console.error("   ⚠️ [Phase 6] InfluxDB query failed:", e.message);
             resolvedInfluxData = {};
         }
     }
@@ -499,14 +496,31 @@ async function upsertRuntimeAndAvailabilityForHour(thColumn, start, end, targetD
 
             let { runTimeSeconds, excludedSeconds } = calcMcStatusDurations(mcRecords, startTH, endTH);
 
-            // 🆕 output_based override: คำนวณ runtime จาก output x avgCT แทน MCStatus
+            // 🔧 output_based override: คำนวณ runtime จาก output x avgCT แทน MCStatus
             const modeRunTime = getMachineRunTimeMode(machineName);
             if (modeRunTime === "output_based") {
                 const hourData = (resolvedInfluxData[machineName]) || {};
                 const hourOutput = hourData.output_count || 0;
                 const hourAvgCt = hourData.avg_cycle_time || 0;
                 runTimeSeconds = hourOutput * hourAvgCt;
-                excludedSeconds = 0; // output-based machines ไม่มี excluded time
+                excludedSeconds = 0;
+            }
+
+            // 🆕 Long-term Fallback: status_based machine มี output แต่ไม่มี MCStatus records ในชั่วโมงนี้
+            //   → เครื่องผลิตสินค้าชัดเจนว่าทำงานอยู่ แต่ IoT status_tb ไม่ได้ส่งข้อมูล
+            //   → ใช้ output × avgCT เป็น estimated runtime แทนการรายงาน 0%
+            //   หมายเหตุ: mcRecords มี carry-over ซึ่ง Datetime=startTH เสมอ (จาก carryOverRows)
+            //             ดังนั้น "ไม่มีข้อมูลจริง" = filter เอาเฉพาะ records ที่ >= startTH จริงๆ
+            const actualMcInWindow = mcRecords.filter(r => r.Datetime >= startTH && r.Datetime < endTH).length;
+            if (modeRunTime !== "output_based" && actualMcInWindow === 0 && runTimeSeconds === 0) {
+                const hourData = (resolvedInfluxData[machineName]) || {};
+                const hourOutput = hourData.output_count || 0;
+                const hourAvgCt = hourData.avg_cycle_time || 0;
+                if (hourOutput > 0 && hourAvgCt > 0) {
+                    runTimeSeconds = hourOutput * hourAvgCt;
+                    excludedSeconds = 0;
+                    console.log(`   ⚠️ [Phase 6] ${machineName} ${thColumn}: No MCStatus in window → output-based fallback (output=${hourOutput}, ct=${hourAvgCt.toFixed(2)}, runtime=${runTimeSeconds.toFixed(0)}s)`);
+                }
             }
 
             // Availability = runTime / (total - excluded) × 100
