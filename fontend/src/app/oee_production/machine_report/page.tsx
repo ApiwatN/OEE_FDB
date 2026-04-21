@@ -142,9 +142,18 @@ function MachineReportPage() {
 
                     const updatedDailyData = { ...machine.daily_data };
                     const existing = updatedDailyData[shiftDate] || {};
+                    
+                    let newMachineOut = socketData.daily.totalOutput;
+                    let newOutActual = newMachineOut;
+                    
+                    if (existing.over_reject_qty !== undefined) {
+                        newOutActual = Math.max(0, newMachineOut - existing.over_reject_qty);
+                    }
+
                     updatedDailyData[shiftDate] = {
                         ...existing,
-                        output_actual: socketData.daily.totalOutput,
+                        machine_output_actual: newMachineOut,
+                        output_actual: newOutActual,
                         eff_actual: socketData.daily.overallEfficiency,
                         cycle_actual: socketData.daily.avgCycleTime,
                         // ✅ ถอด availability แบบเดียวกับหน้า machine_working
