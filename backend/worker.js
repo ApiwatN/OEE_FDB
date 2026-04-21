@@ -43,8 +43,10 @@ const {
     scheduleResync,
 } = require("./services/mqttService");
 
-// Debounce flag: ป้องกัน cache_reload ที่มาถี่เกินไปจาก cron worker startup
+// Debounce flag + accumulated reasons: รอให้ hydrateFromMSSQL สจิระก่อน fire
+// เก็บ reasons ทุกตัวที่มาในช่วง debounce เพื่อสรุปละว่าต้อง reloadAvail/reloadNg ด้วยไหม
 let cacheReloadPending = false;
+const cacheReloadReasons = new Set(); // เก็บ reasons ที่มาถึงระหว่าง debounce (ไม่ทิ้ง)
 
 // ── Startup Sequence ───────────────────────────────────
 async function startup() {
@@ -139,25 +141,37 @@ parentPort.on("message", async (msg) => {
     }
 
     // 🆕 Cache Reload: Cron Worker แจ้งว่า MSSQL อัปเดตแล้ว
-    // ใช้ Debounce 3 วิ ป้องกัน hydrateFromMSSQL() ถูกเรียกซ้ำหลายครั้งจาก cron startup
+    // Debounce 3วิ: เพื่อป้องกัน hydrateFromMSSQL() ถูกเรียกซ้ำคืน cron startup
+    // เก็บทุก reason สะสมไว้ใน Set — ไม่ทิ้ง reason ใดเลย
     if (msg.type === "cache_reload") {
+        // เพิ่ม reason เข้า Set
+        if (msg.reason) cacheReloadReasons.add(msg.reason);
+
         if (!cacheReloadPending) {
             cacheReloadPending = true;
             setTimeout(async () => {
+                // สำเนา reasons ที่สะสมไว้ทั้งหมด แล้วล้าง Set
+                const reasons = new Set(cacheReloadReasons);
+                cacheReloadReasons.clear();
+
                 try {
-                    const { hydrateFromMSSQL: reload, hydrateAvailabilityFromMSSQL: reloadAvail,
-                            hydrateNgFromMSSQL: reloadNg } = require("./services/cacheService");
-                    await reload();
-                    // hydrateAvail เฉพาะ reason ที่เกี่ยวข้องกับ MCStatus
-                    if (msg.reason === "hourly_done" || msg.reason === "oee_hourly_done"
-                        || msg.reason === "oee_startup_done" || msg.reason === "oee_backfill_done") {
-                        await reloadAvail();
+                    const cacheServiceModule = require("./services/cacheService");
+                    await cacheServiceModule.hydrateFromMSSQL();
+
+                    // reloadAvail ถ้ามี reason ที่เกี่ยวกับ MCStatus/OEE
+                    const needsAvail = ["hourly_done", "oee_hourly_done", "oee_startup_done",
+                                        "oee_backfill_done", "backfill_startup_done", "daily_sync_done"];
+                    if ([...reasons].some(r => needsAvail.includes(r))) {
+                        await cacheServiceModule.hydrateAvailabilityFromMSSQL();
                     }
-                    // hydrateNg เฉพาะ reason ที่เกี่ยวข้องกับ NG
-                    if (msg.reason === "ng_hourly_done" || msg.reason === "backfill_ng_done") {
-                        await reloadNg();
+
+                    // reloadNg ถ้ามี reason ที่เกี่ยวกับ NG
+                    const needsNg = ["ng_hourly_done", "backfill_ng_done", "daily_sync_done"];
+                    if ([...reasons].some(r => needsNg.includes(r))) {
+                        await cacheServiceModule.hydrateNgFromMSSQL();
                     }
-                    console.log(`[Worker] ✅ Cache reloaded (reason: ${msg.reason || "unknown"})`);
+
+                    console.log(`[Worker] ✅ Cache reloaded (reasons: ${[...reasons].join(", ")})`);
                 } catch (e) {
                     console.error("[Worker] Cache reload failed:", e.message);
                 } finally {
@@ -165,7 +179,7 @@ parentPort.on("message", async (msg) => {
                 }
             }, 3000); // Debounce 3 วิ
         } else {
-            console.log(`[Worker] Cache reload debounced (reason: ${msg.reason})`);
+            console.log(`[Worker] Cache reload queued (reason: ${msg.reason}) — debounce active`);
         }
     }
 

@@ -8,7 +8,8 @@ const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const influxService = require("./influxService");
 const cacheService = require("./cacheService");
-const { getMachineStateMem } = require("./mqttService");
+// 🔹 getMachineStateMem: lazy-required ใน flushMqttMemoryToDb() แทน เพื่อป้องกัน cron thread
+// ที่ไม่ได้ init mqttService เรียก getMachineStateMem แล้วได้ empty Map
 const {
     SHIFT_HOURS,
     utcHourToThColumn,
@@ -70,9 +71,7 @@ const releaseLock = () => {
 // Track last processed time per machine for late data detection
 const lastProcessedTime = {};
 
-/**
- * Start all cron jobs
- */
+
 /**
  * Start all cron jobs
  * @param {Function|null} onSyncComplete - callback(reason) เรียกเมื่อ job หนักเสร็จ
@@ -196,6 +195,8 @@ function startCronJobs(onSyncComplete = null) {
 async function flushMqttMemoryToDb() {
     const BATCH_SIZE = 10;
     try {
+        // 🔹 Lazy require: ใช้ require ภายใน function เพื่อให้ cron thread ไม่พังเมื่อ module load
+        const { getMachineStateMem } = require("./mqttService");
         const mem = getMachineStateMem();
         if (mem.size === 0) return;
 
