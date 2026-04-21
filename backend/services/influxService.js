@@ -66,7 +66,7 @@ async function queryAllMachinesForHour(startUTC, endUTC) {
                MEAN("cycle_time") AS "avg_cycle_time"
         FROM "${measurement}"
         WHERE time >= '${startISO}' AND time < '${endISO}'
-        GROUP BY "machine_name"
+        GROUP BY "machine_name", "Model"
     `;
 
     try {
@@ -75,12 +75,37 @@ async function queryAllMachinesForHour(startUTC, endUTC) {
 
         for (const row of results) {
             const machineName = row.machine_name || row.tags?.machine_name;
+            // 🔧 Fix: row.Model is a direct property when Model is a Tag (GROUP BY "Model")
+            //   Empty string ("") = data written before Telegraf used Model as Tag → treat as "--"
+            const rawModel = row.Model ?? row.tags?.Model;
+            const modelName = (rawModel != null && rawModel !== "") ? rawModel : "--";
+            
             if (machineName) {
-                machineData[machineName] = {
-                    output_count: row.output_count || 0,
-                    avg_cycle_time: row.avg_cycle_time || 0,
+                if (!machineData[machineName]) {
+                    machineData[machineName] = {
+                        output_count: 0,
+                        sum_cycle_time: 0,
+                        avg_cycle_time: 0,
+                        models: {}
+                    };
+                }
+                
+                const count = row.output_count || 0;
+                const ct = row.avg_cycle_time || 0;
+                
+                machineData[machineName].models[modelName] = {
+                    output_count: count,
+                    avg_cycle_time: ct
                 };
+                
+                machineData[machineName].output_count += count;
+                machineData[machineName].sum_cycle_time += (count * ct);
             }
+        }
+        
+        // Calculate root average
+        for (const m of Object.values(machineData)) {
+            m.avg_cycle_time = m.output_count > 0 ? (m.sum_cycle_time / m.output_count) : 0;
         }
 
         return machineData;
@@ -139,7 +164,7 @@ async function queryHoursRange(startUTC, endUTC) {
                MEAN("cycle_time") AS "avg_cycle_time"
         FROM "${measurement}"
         WHERE time >= '${startISO}' AND time < '${endISO}'
-        GROUP BY "machine_name", time(1h)
+        GROUP BY "machine_name", "Model", time(1h)
     `;
 
     try {
@@ -148,15 +173,42 @@ async function queryHoursRange(startUTC, endUTC) {
 
         for (const row of results) {
             const machineName = row.machine_name || row.tags?.machine_name;
+            // 🔧 Fix: row.Model is a direct property when Model is a Tag (GROUP BY "Model")
+            //   Empty string ("") = data written before Telegraf used Model as Tag → treat as "--"
+            const rawModel = row.Model ?? row.tags?.Model;
+            const modelName = (rawModel != null && rawModel !== "") ? rawModel : "--";
             if (!machineName) continue;
 
             if (!machineHourData[machineName]) machineHourData[machineName] = {};
 
             const hourKey = new Date(row.time).toISOString().slice(0, 13); // "YYYY-MM-DDTHH"
-            machineHourData[machineName][hourKey] = {
-                output_count: row.output_count || 0,
-                avg_cycle_time: row.avg_cycle_time || 0,
+            
+            if (!machineHourData[machineName][hourKey]) {
+                machineHourData[machineName][hourKey] = {
+                    output_count: 0,
+                    avg_cycle_time: 0,
+                    sum_cycle_time: 0,
+                    models: {}
+                };
+            }
+            
+            const count = row.output_count || 0;
+            const ct = row.avg_cycle_time || 0;
+            
+            machineHourData[machineName][hourKey].models[modelName] = {
+                output_count: count,
+                avg_cycle_time: ct
             };
+            
+            machineHourData[machineName][hourKey].output_count += count;
+            machineHourData[machineName][hourKey].sum_cycle_time += (count * ct);
+        }
+        
+        // Recalculate root averages
+        for (const machineObj of Object.values(machineHourData)) {
+            for (const hourObj of Object.values(machineObj)) {
+                hourObj.avg_cycle_time = hourObj.output_count > 0 ? (hourObj.sum_cycle_time / hourObj.output_count) : 0;
+            }
         }
 
         return machineHourData;
