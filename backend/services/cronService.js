@@ -593,11 +593,19 @@ async function recalcRuntimeAndAvailTotals(targetDate, machineNames) {
     for (let i = 0; i < availRows.length; i += CHUNK_SIZE) {
         const chunk = availRows.slice(i, i + CHUNK_SIZE);
         await Promise.all(chunk.map(async (row) => {
-            const values = HOURS.map(h => row[`avail_${h}`] || 0).filter(v => v > 0);
-            const avgAvail = values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+            // 🔧 Fix Bug: "Average of Averages" is mathematically flawed for availability.
+            // Using average of hourly averages ignores 0% hours completely and heavily skews the daily number.
+            // To ensure 100% consistency with tb_oee.availability, we simply fetch the true calculated OEE availability
+            // and sync it to avail_actual, because tb_oee uses the accurate (Total Run Time / Total Active Time) formula.
+            const oeeRow = await prisma.tb_oee.findFirst({
+                where: { machine_name: row.machine_name, date: targetDate },
+                select: { availability: true }
+            });
+            const trueAvail = oeeRow?.availability || 0;
+            
             await prisma.tb_availability_actual.update({
                 where: { id: row.id },
-                data: { avail_actual: parseFloat(avgAvail.toFixed(2)) },
+                data: { avail_actual: trueAvail },
             });
         }));
         await yieldEventLoop();
@@ -770,10 +778,15 @@ async function handleLateData() {
                 const efficiency = theoreticalMax > 0 ? (output_count / theoreticalMax) * 100 : 0;
 
                 if (!dateGroups[dateStr]) dateGroups[dateStr] = {};
-                if (!dateGroups[dateStr][machineName]) dateGroups[dateStr][machineName] = { output: {}, models: {}, ct: {}, eff: {} };
+                if (!dateGroups[dateStr][machineName]) dateGroups[dateStr][machineName] = { output: {}, models: {}, ct: {}, eff: {}, avail: {} };
 
                 dateGroups[dateStr][machineName].ct[`cycle_${thColumn}`] = parseFloat(avg_cycle_time.toFixed(2));
                 dateGroups[dateStr][machineName].eff[`eff_${thColumn}`] = parseFloat(efficiency.toFixed(2));
+
+                const { getMachineRunTimeMode } = require("./oeeCalcService");
+                if (getMachineRunTimeMode(machineName) === "output_based") {
+                    dateGroups[dateStr][machineName].avail[`avail_${thColumn}`] = parseFloat(efficiency.toFixed(2));
+                }
 
                 if (models && Object.keys(models).length > 0) {
                     for (const [mName, mData] of Object.entries(models)) {
@@ -805,11 +818,12 @@ async function handleLateData() {
             const targetDate = new Date(dateStr);
             const machineChanges = dateGroups[dateStr];
 
-            // Load existing rows (3 queries per date — instead of N per machine)
-            const [dbOutputRows, dbCtRows, dbEffRows] = await Promise.all([
+            // Load existing rows (4 queries per date — instead of N per machine)
+            const [dbOutputRows, dbCtRows, dbEffRows, dbAvailRows] = await Promise.all([
                 prisma.tb_output_actual.findMany({ where: { date: targetDate } }),
                 prisma.tb_cycle_time_actual.findMany({ where: { date: targetDate } }),
                 prisma.tb_efficiency_actual.findMany({ where: { date: targetDate } }),
+                prisma.tb_availability_actual.findMany({ where: { date: targetDate } }),
             ]);
 
             // 🆕 Auto-discard "--" model when real model exists in MSSQL
@@ -852,6 +866,8 @@ async function handleLateData() {
             for (const row of dbCtRows) ctMap[row.machine_name] = row;
             const effMap = {};
             for (const row of dbEffRows) effMap[row.machine_name] = row;
+            const availMap = {};
+            for (const row of dbAvailRows) availMap[row.machine_name] = row;
 
             // Collect pending DB operations
             const pendingOps = [];
@@ -901,6 +917,21 @@ async function handleLateData() {
                     } else {
                         pendingOps.push(prisma.tb_efficiency_actual.create({
                             data: { machine_name: machineName, date: targetDate, ...changes.eff },
+                        }));
+                        totalCreated++;
+                    }
+                }
+                // Availability (Output-based override)
+                if (changes.avail && Object.keys(changes.avail).length > 0) {
+                    if (availMap[machineName]) {
+                        pendingOps.push(prisma.tb_availability_actual.update({
+                            where: { id: availMap[machineName].id },
+                            data: changes.avail,
+                        }));
+                        totalUpdated++;
+                    } else {
+                        pendingOps.push(prisma.tb_availability_actual.create({
+                            data: { machine_name: machineName, date: targetDate, ...changes.avail },
                         }));
                         totalCreated++;
                     }
