@@ -202,7 +202,10 @@ async function fastPollAndEmit() {
             let currentHourExcluded = 0;
             const mcRecords = sharedMcRecordsCache[machineName] || [];
             if (mcRecords.length > 0) {
-                const { excludedSeconds } = calcMcStatusDurations(mcRecords, new Date(start), now);
+                const TH_OFFSET = 7 * 3600000;
+                const startTH = new Date(new Date(start).getTime() + TH_OFFSET);
+                const nowTH = new Date(now.getTime() + TH_OFFSET);
+                const { excludedSeconds } = calcMcStatusDurations(mcRecords, startTH, nowTH);
                 currentHourExcluded = excludedSeconds;
             }
             const adjustedElapsedSeconds = Math.max(0, elapsedSeconds - currentHourExcluded);
@@ -310,7 +313,8 @@ async function fastPollAndEmit() {
                     if (i < currentShiftIndex) {
                         // ชั่วโมงที่ผ่านมาแล้ว → คำนวณ excluded ต่อชั่วโมง (ถ้า config = true)
                         if (shouldDeductTarget && mcRecords.length > 0) {
-                            const hourStart = new Date(shiftDayStart.getTime() + i * 3600000);
+                            const TH_OFFSET = 7 * 3600000;
+                            const hourStart = new Date(shiftDayStart.getTime() + i * 3600000 + TH_OFFSET);
                             const hourEnd = new Date(hourStart.getTime() + 3600000);
                             const { excludedSeconds: hourExcluded } = calcMcStatusDurations(mcRecords, hourStart, hourEnd);
                             const ratio = hourExcluded > 0 ? Math.max(0, 3600 - hourExcluded) / 3600 : 1;
@@ -340,7 +344,10 @@ async function fastPollAndEmit() {
             } else {
                 const mcRecords = sharedMcRecordsCache[machineName] || [];
                 if (mcRecords.length > 0) {
-                    const { runTimeSeconds } = calcMcStatusDurations(mcRecords, new Date(start), now);
+                    const TH_OFFSET = 7 * 3600000;
+                    const startTH = new Date(new Date(start).getTime() + TH_OFFSET);
+                    const nowTH = new Date(now.getTime() + TH_OFFSET);
+                    const { runTimeSeconds } = calcMcStatusDurations(mcRecords, startTH, nowTH);
                     currentHourRun = runTimeSeconds;
                 }
             }

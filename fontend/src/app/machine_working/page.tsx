@@ -261,7 +261,8 @@ function MachineWorkingInner() {
                     prev.outputTarget === newOutputTarget &&
                     prev.achieve === newAchieve &&
                     prev.ctActual === daily.avgCycleTime &&
-                    prev.effActual === daily.overallEfficiency
+                    prev.effActual === daily.overallEfficiency &&
+                    (daily.availability === undefined || prev.availabilityActual === daily.availability)
                 ) {
                     return prev;
                 }
@@ -273,6 +274,7 @@ function MachineWorkingInner() {
                     achieve: newAchieve,
                     ctActual: daily.avgCycleTime,
                     effActual: daily.overallEfficiency,
+                    ...(daily.availability !== undefined && { availabilityActual: daily.availability }),
                     liveStatus: currentHour.live_status || "Offline", // 🆕 Update from real-time
                     liveAlarm: currentHour.live_alarm || null, // 🆕 Update from real-time
                 };

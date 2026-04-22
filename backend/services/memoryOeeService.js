@@ -311,7 +311,9 @@ function getShiftDateFromThai(thaiDate) {
 function getShiftStartFromDate(shiftDate) {
     if (!shiftDate) return new Date(0);
     const [year, month, day] = shiftDate.split('-').map(Number);
-    // จำลอง Local Thai Time (07:00) ให้อยู่ในร่าง UTC
+    // nowThai ใน getDurationsNow() ถูก represent เป็น "Thai time ในร่าง UTC object"
+    // เช่น 09:43 TH → new Date("2026-04-20T09:43:00Z")
+    // ดังนั้น shift start 07:00 TH ต้องเป็น new Date("2026-04-20T07:00:00Z") ✅
     return new Date(Date.UTC(year, month - 1, day, 7, 0, 0));
 }
 

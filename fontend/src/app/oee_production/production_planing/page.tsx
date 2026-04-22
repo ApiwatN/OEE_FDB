@@ -300,11 +300,18 @@ function ProductionPlanningPage() {
 
     const handleSave = async () => {
         if (!formData.eff_target || !formData.cycle_time_target) { Swal.fire("Warning", "Please input Eff and Cycle Time", "warning"); return; }
+        
+        const existingConfig = allConfigs.get(editingMachine);
+        
         try {
             await axios.post(`${config.apiServer}/api/planConfig/upsert`, {
-                machine_name: editingMachine, eff_target: Number(formData.eff_target),
+                machine_name: editingMachine, 
+                eff_target: Number(formData.eff_target),
                 cycle_time_target: Number(formData.cycle_time_target),
-                process_name: formData.process_name || null, active_hours: formData.active_hours,
+                process_name: formData.process_name || null, 
+                model_name: existingConfig?.model_name || null,
+                model_type: existingConfig?.model_type || null,
+                active_hours: formData.active_hours,
             });
             Swal.fire({ icon: "success", title: "Save Successful", text: `Config saved + All existing plans updated`, showConfirmButton: false, timer: 2000 });
             hideModal("modalConfig");
@@ -350,20 +357,37 @@ function ProductionPlanningPage() {
                 didOpen: () => { Swal.showLoading(); }
             });
 
+            // 1. Save source machine
+            const existingSource = allConfigs.get(editingMachine);
             await axios.post(`${config.apiServer}/api/planConfig/upsert`, {
-                machine_name: editingMachine, eff_target: Number(formData.eff_target),
+                machine_name: editingMachine, 
+                eff_target: Number(formData.eff_target),
                 cycle_time_target: Number(formData.cycle_time_target),
-                process_name: formData.process_name || null, active_hours: formData.active_hours,
+                process_name: formData.process_name || null, 
+                model_name: existingSource?.model_name || null,
+                model_type: existingSource?.model_type || null,
+                active_hours: formData.active_hours,
             });
 
-            const promises = sameTypeMachines.map((m: any) => 
-                axios.post(`${config.apiServer}/api/planConfig/upsert`, {
-                    machine_name: m.name, eff_target: Number(formData.eff_target),
+            // 2. Loop and save other machines sequentially to prevent DB locking
+            const total = sameTypeMachines.length;
+            let currentCount = 0;
+
+            for (const m of sameTypeMachines) {
+                currentCount++;
+                Swal.update({ html: `Saving configuration to <b>${m.name}</b>...<br/><br/><div style="font-size: 0.95rem; color: #555;">Progress: <b>${currentCount} / ${total}</b> machines</div>` });
+                
+                const existingDest = allConfigs.get(m.name);
+                await axios.post(`${config.apiServer}/api/planConfig/upsert`, {
+                    machine_name: m.name, 
+                    eff_target: Number(formData.eff_target),
                     cycle_time_target: Number(formData.cycle_time_target),
-                    process_name: formData.process_name || null, active_hours: formData.active_hours,
-                })
-            );
-            await Promise.all(promises);
+                    process_name: formData.process_name || null, 
+                    model_name: existingDest?.model_name || null,
+                    model_type: existingDest?.model_type || null,
+                    active_hours: formData.active_hours,
+                });
+            }
 
             await fetchAllConfigs();
             

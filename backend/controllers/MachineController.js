@@ -349,7 +349,17 @@ module.exports = {
       });
       const actualModelMap = {};
       for (const r of actualModelRows) {
-        if (r.model_name) actualModelMap[r.machine_name] = r.model_name;
+        if (r.model_name && r.model_name !== "--") {
+            if (!actualModelMap[r.machine_name]) {
+                actualModelMap[r.machine_name] = [];
+            }
+            if (!actualModelMap[r.machine_name].includes(r.model_name)) {
+                actualModelMap[r.machine_name].push(r.model_name);
+            }
+        }
+      }
+      for (const [mn, models] of Object.entries(actualModelMap)) {
+          actualModelMap[mn] = models.join(", ");
       }
 
       // 2c. Layer 1: ดึง model ล่าสุดจาก InfluxDB (Actual production, วันนี้เท่านั้น)
@@ -412,7 +422,7 @@ module.exports = {
           for (const h of SHIFT_HOURS) {
             totalOutput += (o[`actual_${h}`] || 0);
           }
-          outputMap[o.machine_name] = totalOutput;
+          outputMap[o.machine_name] = (outputMap[o.machine_name] || 0) + totalOutput;
         }
         for (const c of cycleTimes) { cycleMap[c.machine_name] = c.cycle_time; }
 

@@ -53,6 +53,6 @@
     },
     "availability_targets": {
         "default": "eff_target",
-        "ABR": 85
+        "ABR": 100
     }
 }

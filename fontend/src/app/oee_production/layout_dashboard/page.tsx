@@ -358,7 +358,6 @@ export default function LayoutDashboard() {
                 }}
                 style={{
                     backgroundColor: (() => {
-                        if (machineAlarms[machine.name]) return '#ffebee'; // Fixed to light red if alarm
                         const status = machineStatuses[machine.name];
                         if (status === 'Plan_Stop' || status === 'Break_Time') return '#d5d5d5'; // เทาเข้ม (body)
                         if (status === 'Run_Time') return '#e8f5e9'; // Light Green
@@ -366,7 +365,6 @@ export default function LayoutDashboard() {
                         return '#f5f5f5'; // No Data — เทาอ่อน (body)
                     })(),
                     border: `1px solid ${(() => {
-                        if (machineAlarms[machine.name]) return '#c62828';
                         const status = machineStatuses[machine.name];
                         if (status === 'Plan_Stop' || status === 'Break_Time') return '#424242'; // เทาเข้ม (border)
                         if (status === 'Run_Time') return '#2e7d32'; // Dark Green
@@ -385,7 +383,7 @@ export default function LayoutDashboard() {
                     fontSize: '6px',
                     lineHeight: 1.15,
                     boxSizing: 'border-box',
-                    animation: machineAlarms[machine.name] ? 'blink 2s infinite' : 'none'
+                    animation: 'none'
                 }}
                 onMouseEnter={(e) => {
                     e.currentTarget.style.transform = 'scale(1.05)';
@@ -402,7 +400,6 @@ export default function LayoutDashboard() {
                 <div style={{
                     fontWeight: 'bold',
                     backgroundColor: (() => {
-                        if (machineAlarms[machine.name]) return '#c62828'; // Red if alarm
                         const status = machineStatuses[machine.name];
                         if (status === 'Plan_Stop' || status === 'Break_Time') return '#424242'; // เทาเข้ม (header)
                         if (status === 'Run_Time') return '#2e7d32';

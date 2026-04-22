@@ -10,8 +10,8 @@ from datetime import datetime, timezone, timedelta
 socket.setdefaulttimeout(3.0)
 
 
-BASE_DIR = r"c:\Project\OEE_FDB\ABR_Data"
-JSON_PATH = os.path.join(BASE_DIR, "ABR-003.config.json")
+BASE_DIR = r"C:\Users\Administrator\Documents\ABR_Data"
+JSON_PATH = os.path.join(BASE_DIR, "ABR.config.json")
 
 def get_utc_date_str():
     """คืนค่า string วันที่ UTC ปัจจุบัน เช่น '2026_03_30'"""
@@ -38,24 +38,54 @@ def load_tags_from_json():
     with open(JSON_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
+def load_state(machine_name):
+    state_path = os.path.join(BASE_DIR, machine_name, "state.json")
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_state(machine_name, state_dict):
+    state_path = os.path.join(BASE_DIR, machine_name, "state.json")
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    try:
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state_dict, f, indent=4)
+    except Exception:
+        pass
+
 def run_plc_thread(plc_config, tags):
     """ฟังก์ชันสำหรับแต่ละ Thread ของ PLC (ทำงานคูขนานกัน 1 เครื่อง ต่อ 1 Thread)"""
     machine_name = plc_config.get("name", "Unknown_Machine")
     plc_ip = plc_config.get("ip")
     plc_port = plc_config.get("port")
     
-    # === สร้างตัวแปร State เอาไว้นอกสุด (เหนือ Loop Reconnect) ===
-    # จุดนี้คือคำตอบว่า "ถ้ายกเลิก/หลุดไป แล้วกลับมาทำงานใหม่" ค่าจะไม่สูญหาย!
-    # เพราะตัวแปร Tracking เดิม เช่น ชิ้นงานครั้งล่าสุุด (prev_total) จะถูกจำเอาไว้ตลอด 
-    prev_model = None
-    prev_total = None
-    prev_ok = None
-    prev_ng = None
+    # === โหลด State ล่าสุดจากไฟล์ เพื่อกันข้อมูลหายตอนคอมดับ ===
+    loaded_state = load_state(machine_name)
+    
+    prev_model = loaded_state.get("prev_model", None)
+    prev_total = loaded_state.get("prev_total", None)
+    prev_ok = loaded_state.get("prev_ok", None)
+    prev_ng = loaded_state.get("prev_ng", None)
+    last_logged_status = loaded_state.get("last_logged_status", "")
+    last_logged_alarm = loaded_state.get("last_logged_alarm", "")
+    ct_stats = loaded_state.get("ct_stats", {})       # เก็บสถิติแยกตามจำนวนชิ้น เช่น "1": {"avg": 10.0, "count": 5}
+
     prev_status = {}
     prev_alarm = {}
     prev_station_ng = {dev: 0 for dev in tags["station_ng"].values()}
     pending_stations = {dev: False for dev in tags["station_ng"].values()}
-    event_id = 0
+    prev_output_time = None  # ไม่บันทึกลง state (reset ทุก connect ใหม่)
+    
+    last_saved_state = {
+        "prev_model": prev_model, "prev_total": prev_total,
+        "prev_ok": prev_ok, "prev_ng": prev_ng,
+        "last_logged_status": last_logged_status, "last_logged_alarm": last_logged_alarm,
+        "ct_stats": ct_stats
+    }
 
     while True: # ลูปนอกสำหรับจัดการ Reconnect หรือ Auto-Recovery
         pymc3e = pymcprotocol.Type3E()
@@ -64,6 +94,14 @@ def run_plc_thread(plc_config, tags):
             pymc3e.connect(plc_ip, plc_port)
             print(f"[{machine_name}] เชื่อมต่อสำเร็จ! เริ่มดึงข้อมูลตามปกติ ✅")
             just_reconnected = True
+            # ---------------------------------------------------------
+            # [เพิ่มโค้ดส่วนนี้] บังคับให้ส่ง Status ล่าสุดทันทีเมื่อเริ่มรันหรือเชื่อมต่อใหม่
+            prev_status.clear()
+            last_logged_status = ""
+            
+            # (Option) หากต้องการให้ส่ง Alarm ปัจจุบันด้วย ให้เอาคอมเมนต์ 2 บรรทัดล่างออก
+            # prev_alarm.clear() 
+            # last_logged_alarm = ""
             
             while True: # ลูปในสำหรับดึงข้อมูลปกติทุกๆ 1 วินาที
                 has_error = False
@@ -80,6 +118,10 @@ def run_plc_thread(plc_config, tags):
                                 log_to_dat(machine_name, "model", f"{current_model}")
                                 print(f"[{machine_name}] [MODEL CHANGED] {current_model}")
                             prev_model = current_model
+                            
+                            if prev_model != last_saved_state.get("prev_model"):
+                                last_saved_state["prev_model"] = prev_model
+                                save_state(machine_name, last_saved_state)
                     except Exception as e:
                         has_error = True
 
@@ -124,8 +166,6 @@ def run_plc_thread(plc_config, tags):
                                     total_diff = curr_t - prev_total
                                     
                                 if total_diff > 0:
-                                    event_id += 1
-                                    
                                     ok_diff = curr_ok - (prev_ok if prev_ok is not None else 0)
                                     ng_diff = curr_ng - (prev_ng if prev_ng is not None else 0)
                                     
@@ -140,23 +180,58 @@ def run_plc_thread(plc_config, tags):
                                         # Limit NG to total diff just in case
                                         if ng_needed > total_diff: ng_needed = total_diff
                                         
+                                    ok_needed = total_diff - ng_needed
+                                    running_ok = curr_ok - ok_needed
+                                    running_ng = curr_ng - ng_needed
+                                        
                                     model_val = prev_model if prev_model is not None else "-"
                                     
-                                    # อ่าน Cycle Time
-                                    ct_val = "-"
-                                    if tags.get("cycle_time"):
-                                        val_ct = pymc3e.batchread_wordunits(headdevice=tags["cycle_time"], readsize=1)
-                                        if val_ct is not None and len(val_ct) > 0:
-                                            raw_ct = str(val_ct[0])
-                                            if len(raw_ct) == 1:
-                                                ct_val = f"{raw_ct}.00"
-                                            elif len(raw_ct) == 2:
-                                                ct_val = f"{raw_ct[0]}.{raw_ct[1]}"
-                                            else:
-                                                ct_val = f"{raw_ct[:-2]}.{raw_ct[-2:]}"
-                                                
+                                    # คำนวณ Cycle Time จาก Timestamp ระหว่าง 2 รอบที่ Total เปลี่ยน
                                     base_utc = datetime.now(timezone.utc)
                                     base_loc = datetime.now()
+
+                                    ct_val = "-"
+                                    diff_key = str(total_diff)
+                                    if diff_key not in ct_stats:
+                                        ct_stats[diff_key] = {"avg": None, "count": 0}
+                                        
+                                    stat = ct_stats[diff_key]
+                                    current_avg = stat.get("avg")
+
+                                    if prev_output_time is not None and not is_gap_recovery:
+                                        elapsed = (base_utc - prev_output_time).total_seconds()
+                                        if elapsed > 0:
+                                            ct_per_unit = elapsed / total_diff
+                                            
+                                            is_downtime = False
+                                            if current_avg is not None:
+                                                # ถ้า CT ที่ได้ มากกว่า 2 เท่าของค่าเฉลี่ยของกรณีนี้ -> มี Downtime ปน
+                                                if ct_per_unit > (2 * current_avg):
+                                                    is_downtime = True
+                                                    
+                                            if not is_downtime:
+                                                ct_val = f"{ct_per_unit:.2f}"
+                                                # อัปเดต Cumulative Moving Average แยกตามจำนวนชิ้นที่ออก
+                                                if current_avg is None:
+                                                    stat["avg"] = ct_per_unit
+                                                else:
+                                                    stat["avg"] = ((current_avg * stat["count"]) + ct_per_unit) / (stat["count"] + 1)
+                                                stat["count"] += 1
+                                                
+                                                last_saved_state.update({"ct_stats": ct_stats})
+                                                save_state(machine_name, last_saved_state)
+                                            else:
+                                                # พบ Downtime, แจ้งเตือนและใช้ค่าเฉลี่ย
+                                                print(f"[{machine_name}] ⚠️ มีแนวโน้ม Downtime (Total+{total_diff}) ช่วง {elapsed:.1f}s | CT เกินลิมิต (ได้ {ct_per_unit:.1f} > Max {current_avg*2:.1f})")
+                                                if current_avg is not None:
+                                                    ct_val = f"{current_avg:.2f}"
+                                    else:
+                                        # ไม่มี prev_output_time, gap_recovery 
+                                        if current_avg is not None:
+                                            ct_val = f"{current_avg:.2f}"
+                                    
+                                    # สร้างตัวเลข Timestamp โดยยึดเอา base_utc ของรอบนั้นๆ มาเป็น ID เพื่อให้ของผลิตพร้อมกันได้เลขเดียวกัน
+                                    batch_timestamp_id = int(base_utc.timestamp() * 1000)
                                     
                                     for i in range(total_diff):
                                         # Determine if this unit is NG
@@ -164,6 +239,9 @@ def run_plc_thread(plc_config, tags):
                                         if ng_needed > 0:
                                             is_ng_unit = True
                                             ng_needed -= 1
+                                            running_ng += 1
+                                        else:
+                                            running_ok += 1
                                             
                                         sta_val = "OK"
                                         stb_val = "OK"
@@ -174,16 +252,26 @@ def run_plc_thread(plc_config, tags):
                                                 if c.upper().endswith("B") and pending_stations.get(dev):
                                                     stb_val = "NG"
                                         
-                                        # Calculate Staggered Time (100ms apart)
-                                        utc_time = base_utc + timedelta(milliseconds=100*i)
-                                        loc_time = base_loc + timedelta(milliseconds=100*i)
+                                        # --- แก้ไขการเติมเวลา: ใช้ Cycle Time เฉลี่ยแบบนับถอยหลัง ---
+                                        # 1. ดึงค่าเฉลี่ยมาใช้ (ถ้าโปรแกรมเพิ่งรันครั้งแรก ยังไม่มีค่าเฉลี่ย ให้ใช้ 1.0 วินาทีเป็นค่าเริ่มต้น)
+                                        ct_interval = current_avg if current_avg is not None else 2.5
+
+                                        # 2. คำนวณเวลาย้อนหลัง (เพื่อให้ชิ้นสุดท้าย = เวลาปัจจุบันพอดี)
+                                        # ตัวอย่าง: ขาด 3 ชิ้น (total_diff=3), CT=10วิ
+                                        # i=0 (ชิ้นแรก): ลบ 20 วิ
+                                        # i=1 (ชิ้นสอง): ลบ 10 วิ
+                                        # i=2 (ชิ้นสาม): ลบ 0 วิ (เวลาปัจจุบัน)
+                                        seconds_to_subtract = ct_interval * (total_diff - 1 - i)
+
+                                        utc_time = base_utc - timedelta(seconds=seconds_to_subtract)
+                                        loc_time = base_loc - timedelta(seconds=seconds_to_subtract)
                                         
                                         utc_str = utc_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                                         loc_str = loc_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                                         
                                         # จำลองเลข Total ให้ค่อยๆ วิ่งทีละ 1 ตามลำดับ
                                         calc_t = curr_t - total_diff + i + 1
-                                        message_data = f"{model_val};{calc_t};{curr_ok};{curr_ng};{sta_val};{stb_val};{ct_val};{event_id}"
+                                        message_data = f"{model_val};{calc_t};{running_ok};{running_ng};{sta_val};{stb_val};{ct_val};{batch_timestamp_id}"
                                         
                                         log_to_dat(machine_name, "output", message_data, custom_utc=utc_str, custom_local=loc_str)
                                         print(f"[{machine_name}] [OUTPUT] {utc_str};{loc_str};{message_data}")
@@ -191,11 +279,21 @@ def run_plc_thread(plc_config, tags):
                                 # รีเซ็ต pending หลังเก็บบันทึก
                                 for k in pending_stations:
                                     pending_stations[k] = False
+                                prev_output_time = datetime.now(timezone.utc)  # อัปเดตเวลาสำหรับคำนวณ CT รอบถัดไป
                                     
                             prev_total = curr_t
                             prev_ok = curr_ok
                             prev_ng = curr_ng
                             just_reconnected = False
+                            
+                            # Save state ถ้าตัวแปรมีการเปลี่ยนแปลง (ป้องกันการบันทึกลงไฟล์รัวๆ)
+                            if prev_total != last_saved_state.get("prev_total"):
+                                last_saved_state.update({
+                                    "prev_total": prev_total,
+                                    "prev_ok": prev_ok,
+                                    "prev_ng": prev_ng
+                                })
+                                save_state(machine_name, last_saved_state)
                     except Exception as e:
                         has_error = True
 
@@ -207,8 +305,15 @@ def run_plc_thread(plc_config, tags):
                             if val is not None and len(val) > 0:
                                 current_val = val[0]
                                 if current_val == 1 and prev_status.get(tag["device"], 0) == 0:
-                                    log_to_dat(machine_name, "machine_status", f"{tag['comment']}")
-                                    print(f"[{machine_name}] [STATUS] {tag['comment']}")
+                                    status_str = f"{tag['comment']}"
+                                    if status_str != last_logged_status:
+                                        log_to_dat(machine_name, "machine_status", status_str)
+                                        print(f"[{machine_name}] [STATUS] {status_str}")
+                                        last_logged_status = status_str
+                                        
+                                        if last_logged_status != last_saved_state.get("last_logged_status"):
+                                            last_saved_state["last_logged_status"] = last_logged_status
+                                            save_state(machine_name, last_saved_state)
                                 prev_status[tag["device"]] = current_val
                         except Exception as e:
                             has_error = True
@@ -222,10 +327,17 @@ def run_plc_thread(plc_config, tags):
                             if val is not None and len(val) > 0:
                                 current_val = val[0]
                                 if current_val == 1 and prev_alarm.get(tag["device"], 0) == 0:
-                                    log_to_dat(machine_name, "machine_alarm", f"{tag['comment']};{tag['device']}")
+                                    alarm_str = f"{tag['comment']};{tag['device']}"
+                                    
+                                    log_to_dat(machine_name, "machine_alarm", alarm_str)
                                     
                                     if tag['comment'] != "-":
                                         print(f"[{machine_name}] [ALARM] {tag['comment']}")
+                                        
+                                    last_logged_alarm = alarm_str
+                                    if last_logged_alarm != last_saved_state.get("last_logged_alarm"):
+                                        last_saved_state["last_logged_alarm"] = last_logged_alarm
+                                        save_state(machine_name, last_saved_state)
                                 prev_alarm[tag["device"]] = current_val
                         except Exception as e:
                             has_error = True

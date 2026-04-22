@@ -38,6 +38,9 @@ function OverallMachineContent() {
     // ─── Type list for type-switching dropdown ───
     const [availableTypes, setAvailableTypes] = useState<{type: string, fullName: string}[]>([]);
 
+    // ─── Area list for area-switching dropdown ───
+    const [availableAreas, setAvailableAreas] = useState<string[]>([]);
+
     // ─── Items per page ──────────────────────────
     const [itemsPerPage, setItemsPerPage] = useState<number>(() => {
         if (typeof window !== "undefined") {
@@ -137,6 +140,7 @@ function OverallMachineContent() {
 
         fetchMachines();
         fetchAvailableTypes();
+        fetchAvailableAreas();
 
         const socket = getSocket();
         socket.emit("joinRoom", "dashboard");
@@ -151,6 +155,13 @@ function OverallMachineContent() {
             socket.off("server_time");
         };
     }, [area, type, date]);
+
+    // ─── Save current type to localStorage for the current area ──
+    useEffect(() => {
+        if (area && type) {
+            localStorage.setItem(`overallMachine_lastTypeFor_${area}`, type);
+        }
+    }, [area, type]);
 
     // ─── Load saved filter from localStorage after machines loaded ──
     useEffect(() => {
@@ -281,6 +292,18 @@ function OverallMachineContent() {
         }
     };
 
+    // ─── fetchAvailableAreas ─────────────────────
+    const fetchAvailableAreas = async () => {
+        try {
+            const res = await axios.get(`${config.apiServer}/api/machine/listArea`);
+            if (res.data?.results) {
+                setAvailableAreas(res.data.results.map((r: any) => r.machine_area));
+            }
+        } catch (error) {
+            console.error("Error fetching areas:", error);
+        }
+    };
+
     // ─── Filter helpers ──────────────────────────
     const saveFilter = (newIds: Set<number>) => {
         localStorage.setItem(filterKey(area, type), JSON.stringify([...newIds]));
@@ -317,10 +340,31 @@ function OverallMachineContent() {
         // Reset filter when type changes
         if (area && type) {
             localStorage.removeItem(filterKey(area, type));
+            localStorage.setItem(`overallMachine_lastTypeFor_${area}`, newType);
         }
         setSelectedMachineIds(null);
         setCurrentPage(1);
         router.replace(`/overall_machine_working?area=${area}&type=${newType}&date=${date}`);
+    };
+
+    // ─── Area switching ──────────────────────────
+    const handleAreaChange = async (newArea: string) => {
+        try {
+            const res = await axios.get(`${config.apiServer}/api/machine/listTypeWithMachines/${newArea}`);
+            const types = res.data?.results || [];
+            if (types.length === 0) {
+                router.replace(`/overall_machine_working?area=${newArea}&type=&date=${date}`);
+                return;
+            }
+            const storedType = localStorage.getItem(`overallMachine_lastTypeFor_${newArea}`);
+            let nextType = types[0].machine_type;
+            if (storedType && types.some((t: any) => t.machine_type === storedType)) {
+                nextType = storedType;
+            }
+            router.replace(`/overall_machine_working?area=${newArea}&type=${nextType}&date=${date}`);
+        } catch (error) {
+            console.error("Error fetching types for new area:", error);
+        }
     };
 
     // ─── Multi-machine Login (SweetAlert2) ───────
@@ -667,7 +711,22 @@ function OverallMachineContent() {
                 <div className="d-flex align-items-center gap-2">
                     {/* ✅ Moved Area to Top Left */}
                     <h4 className="fw-bold text-dark m-0 d-flex align-items-center">Area:</h4>
-                    <span className="text-primary fw-bold fs-5 me-2 d-flex align-items-center">{area}</span>
+                    {availableAreas.length > 1 ? (
+                        <div className="d-flex align-items-center me-2">
+                            <select
+                                className="form-select form-select-sm fw-bold text-primary border-primary"
+                                style={{ width: "auto", minWidth: "100px" }}
+                                value={area || ""}
+                                onChange={(e) => handleAreaChange(e.target.value)}
+                            >
+                                {availableAreas.map(a => (
+                                    <option key={a} value={a}>{a}</option>
+                                ))}
+                            </select>
+                        </div>
+                    ) : (
+                        <span className="text-primary fw-bold fs-5 me-2 d-flex align-items-center">{area}</span>
+                    )}
                     
                     <h4 className="fw-bold text-dark m-0 d-flex align-items-center">Machine Type:</h4>
                     {availableTypes.length > 1 ? (

@@ -22,20 +22,21 @@
         "NG_station_A": "L501",
         "NG_station_B": "L503"
     },
-    "status": [
-        {"device": "M5500", "comment": "Run_Time"},
-        {"device": "M5501", "comment": "Pick NG"},
-        {"device": "M5502", "comment": "Wait MM"},
-        {"device": "M5504", "comment": "Preventive"},
-        {"device": "M5505", "comment": "MM"},
-        {"device": "M5506", "comment": "MCerror"},
-        {"device": "M5507", "comment": "Plan Stop"},
-        {"device": "M5508", "comment": "Wait Part"},
-        {"device": "M5509", "comment": "Wait QC"},
-        {"device": "M5510", "comment": "QC Time"},
-        {"device": "M5511", "comment": "Check Master"},
-        {"device": "M5512", "comment": "Setter"}
-    ],
+        "status": [
+            {"device": "M5500", "comment": "Run_Time"},
+            {"device": "M5501", "comment": "Pick_NG"},
+            {"device": "M5502", "comment": "Wait_MM"},
+            {"device": "M5504", "comment": "Preventive"},
+            {"device": "M5505", "comment": "MM_Repair"},
+            {"device": "M5506", "comment": "MC_Error"},
+            {"device": "M5507", "comment": "Plan_Stop"},
+            {"device": "M5508", "comment": "Wait_Part"},
+            {"device": "M5509", "comment": "Wait_QC"},
+            {"device": "M5510", "comment": "QC_Quality"},
+            {"device": "M5511", "comment": "QC_Check_Master"},
+            {"device": "M5512", "comment": "Setter_Adjust"},
+            {"device": "L99", "comment": "MC_Alarm"}
+        ],
     "alarm": [
         {"device": "TS901", "comment": "LDIN Support Tray Load Close : X54,X56"},
         {"device": "TS902", "comment": "LDIN Support Tray Load Open : X55,X57"},
