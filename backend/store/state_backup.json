@@ -1,21 +1,21 @@
 {
-  "timestamp": "2026-04-22T06:37:11.539Z",
+  "timestamp": "2026-04-22T06:47:11.542Z",
   "mqttMem": {
     "ABR-003": {
       "machine_name": "ABR-003",
-      "current_hour_actual": 722,
-      "current_hour_ng": 8,
+      "current_hour_actual": 927,
+      "current_hour_ng": 9,
       "current_hour_station_ng": {
-        "St#1 Station A": 1,
+        "St#1 Station A": 2,
         "St#2 Station B": 7,
-        "True_NG": 8
+        "True_NG": 9
       },
-      "last_cycle_time": 2.763282548476428,
-      "sum_cycle_time": 1995.089999999981,
-      "last_update": "2026-04-22T06:36:46.770Z",
+      "last_cycle_time": 2.785307443365681,
+      "sum_cycle_time": 2581.9799999999864,
+      "last_update": "2026-04-22T06:47:10.858Z",
       "current_hour_label": "13",
-      "live_status": "Pick_NG",
-      "live_alarm": "LDOUT Tray Lifter Clamp : X2F"
+      "live_status": "Run_Time",
+      "live_alarm": "TFIN RETRY PICK"
     },
     "AHV-001": {
       "machine_name": "AHV-001",
@@ -38,97 +38,97 @@
     },
     "AHV-002": {
       "machine_name": "AHV-002",
-      "current_hour_actual": 524,
-      "current_hour_ng": 118,
+      "current_hour_actual": 671,
+      "current_hour_ng": 151,
       "current_hour_station_ng": {
-        "St#3 Bottom Hub ECM & OD Sleeve": 12,
-        "St#5 ID Bottom": 18,
-        "St#7 ID Top": 26,
-        "St#9 ECM Conical Groove Top & Bottom": 77,
-        "St#11 Top HUB & OD Hub": 6,
-        "True_NG": 125
+        "St#3 Bottom Hub ECM & OD Sleeve": 17,
+        "St#5 ID Bottom": 23,
+        "St#7 ID Top": 28,
+        "St#9 ECM Conical Groove Top & Bottom": 96,
+        "St#11 Top HUB & OD Hub": 11,
+        "True_NG": 158
       },
-      "last_cycle_time": 4.064866412213749,
-      "sum_cycle_time": 2129.9900000000043,
-      "last_update": "2026-04-22T06:37:09.542Z",
+      "last_cycle_time": 4.066467958271241,
+      "sum_cycle_time": 2728.600000000003,
+      "last_update": "2026-04-22T06:47:09.085Z",
       "current_hour_label": "13",
       "live_status": "Run_Time",
       "live_alarm": null
     },
     "AHV-003": {
       "machine_name": "AHV-003",
-      "current_hour_actual": 323,
-      "current_hour_ng": 75,
+      "current_hour_actual": 464,
+      "current_hour_ng": 119,
       "current_hour_station_ng": {
         "St#3 Bottom Hub ECM & OD Sleeve": 1,
-        "St#5 ID Bottom": 12,
-        "St#7 ID Top": 21,
-        "St#9 ECM Conical Groove Top & Bottom": 57,
-        "St#11 Top HUB & OD Hub": 3,
-        "True_NG": 87
+        "St#5 ID Bottom": 22,
+        "St#7 ID Top": 33,
+        "St#9 ECM Conical Groove Top & Bottom": 81,
+        "St#11 Top HUB & OD Hub": 4,
+        "True_NG": 131
       },
-      "last_cycle_time": 4.025386996904027,
-      "sum_cycle_time": 1300.2000000000007,
-      "last_update": "2026-04-22T06:37:09.385Z",
+      "last_cycle_time": 4.022349137931036,
+      "sum_cycle_time": 1866.3700000000003,
+      "last_update": "2026-04-22T06:47:11.415Z",
       "current_hour_label": "13",
       "live_status": "Run_Time",
       "live_alarm": null
     },
     "AHV-004": {
       "machine_name": "AHV-004",
-      "current_hour_actual": 528,
-      "current_hour_ng": 102,
+      "current_hour_actual": 589,
+      "current_hour_ng": 126,
       "current_hour_station_ng": {
         "St#3 Bottom Hub ECM & OD Sleeve": 1,
-        "St#5 ID Bottom": 26,
-        "St#7 ID Top": 20,
-        "St#9 ECM Conical Groove Top & Bottom": 62,
-        "St#11 Top HUB & OD Hub": 15,
-        "True_NG": 107
+        "St#5 ID Bottom": 29,
+        "St#7 ID Top": 39,
+        "St#9 ECM Conical Groove Top & Bottom": 67,
+        "St#11 Top HUB & OD Hub": 17,
+        "True_NG": 131
       },
-      "last_cycle_time": 4.097045454545449,
-      "sum_cycle_time": 2163.239999999997,
-      "last_update": "2026-04-22T06:37:08.024Z",
+      "last_cycle_time": 4.099592529711372,
+      "sum_cycle_time": 2414.659999999998,
+      "last_update": "2026-04-22T06:47:11.530Z",
       "current_hour_label": "13",
-      "live_status": "Run_Time",
+      "live_status": "MC_Stop",
       "live_alarm": null
     },
     "AHV-005": {
       "machine_name": "AHV-005",
-      "current_hour_actual": 510,
-      "current_hour_ng": 53,
+      "current_hour_actual": 655,
+      "current_hour_ng": 75,
       "current_hour_station_ng": {
-        "St#3 Bottom Hub ECM & OD Sleeve": 4,
-        "St#5 ID Bottom": 24,
+        "St#3 Bottom Hub ECM & OD Sleeve": 6,
+        "St#5 ID Bottom": 35,
         "St#7 ID Top": 10,
-        "St#9 ECM Conical Groove Top & Bottom": 22,
-        "St#11 Top HUB & OD Hub": 0,
-        "True_NG": 55
+        "St#9 ECM Conical Groove Top & Bottom": 33,
+        "St#11 Top HUB & OD Hub": 1,
+        "True_NG": 77
       },
-      "last_cycle_time": 3.972901960784303,
-      "sum_cycle_time": 2026.1799999999946,
-      "last_update": "2026-04-22T06:37:10.598Z",
+      "last_cycle_time": 3.975251908396942,
+      "sum_cycle_time": 2603.7899999999972,
+      "last_update": "2026-04-22T06:47:09.736Z",
       "current_hour_label": "13",
       "live_status": "Run_Time",
       "live_alarm": null
     },
     "AHV-006": {
       "machine_name": "AHV-006",
-      "current_hour_actual": 386,
-      "current_hour_ng": 94,
+      "current_hour_actual": 540,
+      "current_hour_ng": 139,
       "current_hour_station_ng": {
         "St#3 Bottom Hub ECM & OD Sleeve": 0,
         "St#5 ID Bottom": 6,
-        "St#7 ID Top": 87,
-        "St#9 ECM Conical Groove Top & Bottom": 11,
-        "St#11 Top HUB & OD Hub": 2,
-        "True_NG": 101
+        "St#7 ID Top": 130,
+        "St#9 ECM Conical Groove Top & Bottom": 13,
+        "St#11 Top HUB & OD Hub": 3,
+        "True_NG": 146
       },
-      "last_cycle_time": 3.8719430051813335,
-      "sum_cycle_time": 1494.5699999999947,
-      "last_update": "2026-04-22T06:37:10.575Z",
+      "last_cycle_time": 3.880907407407384,
+      "sum_cycle_time": 2095.6899999999873,
+      "last_update": "2026-04-22T06:47:11.339Z",
       "current_hour_label": "13",
-      "live_status": "QC_Check_Master",
+      "live_status": "Run_Time",
       "live_alarm": null
     },
     "ACR-001": {
@@ -2134,10 +2134,10 @@
   },
   "oeeState": {
     "ABR-003": {
-      "runTimeSec": 7568,
+      "runTimeSec": 7574,
       "excludedSec": 2394,
-      "lastStatus": "Pick_NG",
-      "lastStatusTime": "2026-04-22T13:36:41.000Z",
+      "lastStatus": "Run_Time",
+      "lastStatusTime": "2026-04-22T13:37:25.000Z",
       "shiftDate": "2026-04-22",
       "manualNgQty": 0
     },

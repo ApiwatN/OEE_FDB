@@ -372,26 +372,37 @@ function ProductionPlanningPage() {
             // 2. Loop and save other machines sequentially to prevent DB locking
             const total = sameTypeMachines.length;
             let currentCount = 0;
+            let successCount = 0;
+            const failedMachines: string[] = [];
 
             for (const m of sameTypeMachines) {
                 currentCount++;
                 Swal.update({ html: `Saving configuration to <b>${m.name}</b>...<br/><br/><div style="font-size: 0.95rem; color: #555;">Progress: <b>${currentCount} / ${total}</b> machines</div>` });
                 
                 const existingDest = allConfigs.get(m.name);
-                await axios.post(`${config.apiServer}/api/planConfig/upsert`, {
-                    machine_name: m.name, 
-                    eff_target: Number(formData.eff_target),
-                    cycle_time_target: Number(formData.cycle_time_target),
-                    process_name: formData.process_name || null, 
-                    model_name: existingDest?.model_name || null,
-                    model_type: existingDest?.model_type || null,
-                    active_hours: formData.active_hours,
-                });
+                try {
+                    await axios.post(`${config.apiServer}/api/planConfig/upsert`, {
+                        machine_name: m.name, 
+                        eff_target: Number(formData.eff_target),
+                        cycle_time_target: Number(formData.cycle_time_target),
+                        process_name: formData.process_name || null, 
+                        model_name: existingDest?.model_name || null,
+                        model_type: existingDest?.model_type || null,
+                        active_hours: formData.active_hours,
+                    });
+                    successCount++;
+                } catch (err) {
+                    console.error(`[CopyConfig] Failed to copy to ${m.name}:`, err);
+                    failedMachines.push(m.name);
+                }
             }
 
             await fetchAllConfigs();
-            
-            Swal.fire({ icon: "success", title: "Success", text: `Configuration copied to ${sameTypeMachines.length} machines.`, timer: 2000, showConfirmButton: false });
+
+            const failMsg = failedMachines.length > 0
+                ? `<br/><small style="color:#c0392b;">⚠️ Failed: ${failedMachines.join(", ")}</small>`
+                : "";
+            Swal.fire({ icon: failedMachines.length === 0 ? "success" : "warning", title: "Done", html: `Copied to <b>${successCount}</b> machine${successCount !== 1 ? "s" : ""}.${failMsg}`, timer: 3000, showConfirmButton: false });
             hideModal("modalConfig");
         } catch (e) { console.error(e); Swal.fire("Error", "Failed to copy config", "error"); }
     };

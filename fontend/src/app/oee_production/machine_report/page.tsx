@@ -185,13 +185,14 @@ function MachineReportPage() {
                     const existing = updatedDailyData[shiftDate] || {};
                     updatedDailyData[shiftDate] = {
                         ...existing,
-                        availability: socketData.daily.availability,
-                        performance: socketData.daily.performance,
+                        // ✅ Guard: อย่าเขียนทับด้วย 0/undefined — ป้องกัน slow poll ทับค่าที่ fast poll เพิ่งอัปเดต
+                        ...(socketData.daily.availability > 0 && { availability: socketData.daily.availability }),
+                        ...(socketData.daily.performance !== undefined && socketData.daily.performance !== null && { performance: socketData.daily.performance }),
                         ...(isAuto ? {
                             ng_qty: socketData.daily.ngQty ?? 0,
                             over_reject_qty: socketData.daily.over_reject_qty,
-                            quality: socketData.daily.quality,
-                            oee: socketData.daily.oee,
+                            ...(socketData.daily.quality !== undefined && { quality: socketData.daily.quality }),
+                            ...(socketData.daily.oee > 0 && { oee: socketData.daily.oee }),
                         } : {}),
                     };
 
@@ -597,7 +598,8 @@ function MachineReportPage() {
                         if (num > 0) latestTarget = num;
                     } else {
                         sum += num;
-                        if (!noProd || num > 0) {
+                        // ✅ นับเข้า denominator เฉพาะวันที่มีการผลิตจริง (วันหยุดไม่นับ)
+                        if (!noProd) {
                             count++;
                         }
                     }
