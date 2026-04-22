@@ -312,6 +312,66 @@ function ProductionPlanningPage() {
         } catch (e) { console.error(e); Swal.fire("Error", "Save Failed", "error"); }
     };
 
+    const handleCopyToType = async () => {
+        if (!formData.eff_target || !formData.cycle_time_target) { Swal.fire("Warning", "Please input Eff and Cycle Time", "warning"); return; }
+        
+        let targetM = machines.find((m: any) => m.machine_name === editingMachine);
+        const currentType = targetM?.machine_type || selectedType;
+
+        if (!currentType || currentType === "all") {
+            Swal.fire("Error", "Could not determine machine type.", "error"); return;
+        }
+
+        try {
+            const r = await axios.get(`${config.apiServer}/api/machine/listAllMachinesByArea`);
+            const allMachines = r.data.results.flatMap((g: any) => g.machines);
+            const sameTypeMachines = allMachines.filter((m: any) => m.type === currentType && m.name !== editingMachine);
+
+            if (sameTypeMachines.length === 0) {
+                Swal.fire("Info", `No other machines found with type '${currentType}'`, "info"); return;
+            }
+
+            const confirm = await Swal.fire({
+                title: `Copy to ${sameTypeMachines.length} Machines?`,
+                html: `This will copy the configuration from <b>${editingMachine}</b> to all other machines of type <b>${currentType}</b>.<br><br><small>This action will take a few seconds as it recalculates production plans.</small>`,
+                icon: "warning",
+                showCancelButton: true,
+                confirmButtonColor: "#1565c0",
+                confirmButtonText: "Yes, Copy & Save All",
+                cancelButtonText: "Cancel"
+            });
+
+            if (!confirm.isConfirmed) return;
+
+            Swal.fire({
+                title: "Processing...",
+                html: "Applying configuration to machines...",
+                allowOutsideClick: false,
+                didOpen: () => { Swal.showLoading(); }
+            });
+
+            await axios.post(`${config.apiServer}/api/planConfig/upsert`, {
+                machine_name: editingMachine, eff_target: Number(formData.eff_target),
+                cycle_time_target: Number(formData.cycle_time_target),
+                process_name: formData.process_name || null, active_hours: formData.active_hours,
+            });
+
+            const promises = sameTypeMachines.map((m: any) => 
+                axios.post(`${config.apiServer}/api/planConfig/upsert`, {
+                    machine_name: m.name, eff_target: Number(formData.eff_target),
+                    cycle_time_target: Number(formData.cycle_time_target),
+                    process_name: formData.process_name || null, active_hours: formData.active_hours,
+                })
+            );
+            await Promise.all(promises);
+
+            await fetchAllConfigs();
+            
+            Swal.fire({ icon: "success", title: "Success", text: `Configuration copied to ${sameTypeMachines.length} machines.`, timer: 2000, showConfirmButton: false });
+            hideModal("modalConfig");
+        } catch (e) { console.error(e); Swal.fire("Error", "Failed to copy config", "error"); }
+    };
+
     const handleToggleShift = (shiftHours: string[]) => {
         const hasOff = shiftHours.some(h => formData.active_hours[h] === false);
         setFormData(prev => ({ ...prev, active_hours: { ...prev.active_hours, ...Object.fromEntries(shiftHours.map(h => [h, hasOff])) } }));
@@ -660,7 +720,14 @@ function ProductionPlanningPage() {
                             <span className="fw-bold">Save Config will be updated all existing plans</span>
                         </div>
                     </div>
-                    <div className="text-end mt-3"><button className="btn btn-primary px-4" onClick={handleSave}><i className="fa fa-check me-2"></i>Save Config</button></div>
+                    <div className="d-flex justify-content-between mt-3">
+                        <button className="btn btn-outline-primary px-3 fw-bold" onClick={handleCopyToType} type="button">
+                            <i className="fa fa-copy me-2"></i>Copy to All in Same Type
+                        </button>
+                        <button className="btn btn-primary px-4 fw-bold" onClick={handleSave} type="button">
+                            <i className="fa fa-check me-2"></i>Save Config
+                        </button>
+                    </div>
                 </div>
             </MyModal>
 
