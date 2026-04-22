@@ -64,7 +64,6 @@ const {
 
 const {
     startCronJobs,
-    runDailySync,
     backfillStartup,
     backfillNgStartup,
     backfillEventsStartup,
@@ -111,16 +110,10 @@ async function startup() {
         log("🔄 [CronWorker] Starting backfillOeeStartup...");
         await backfillOeeStartup();
         notifyCacheReload("oee_backfill_done"); // 📡
+        // หมายเหตุ: steps 3-8 ครอบคลุม 5 วัน รวมถึงวันนี้+เมื่อวาน
+        // ไม่จำเป็นต้อง runDailySync(1) ซ้ำอีกครั้ง (ซ้อนทับ — ข้อมูลเดิม)
 
-        // 9. 🔄 Daily Sync — ซ่อมแซมข้อมูลวันนี้+เมื่อวานให้ตรงกับ InfluxDB
-        //    เหมือนกับ dailySyncExpr cron job (07:15 TH) ทุกประการ
-        //    ใช้ days=1 เพราะ step 3-8 ทำ backfill 5 วันไปแล้ว
-        //    runDailySync จะ recalc output/ct/ng/oee/events ให้ล่าสุดก่อน startCronJobs
-        log("🔄 [CronWorker] Running startup daily-sync (recalc today+yesterday)...");
-        await runDailySync(1);
-        notifyCacheReload("startup_daily_sync_done"); // 📡
-
-        // 10. เริ่ม Cron Jobs พร้อม callback
+        // 9. เริ่ม Cron Jobs พร้อม callback
         startCronJobs(onCronJobDone);
 
         log("✅ [CronWorker] Cron worker startup completed!");
