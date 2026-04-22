@@ -259,7 +259,6 @@ function MachineWorkingInner() {
                     prev.outputTarget === newOutputTarget &&
                     prev.achieve === newAchieve &&
                     prev.ctActual === daily.avgCycleTime &&
-                    prev.effActual === daily.overallEfficiency &&
                     (daily.availability === undefined || prev.availabilityActual === daily.availability)
                 ) {
                     return prev;
