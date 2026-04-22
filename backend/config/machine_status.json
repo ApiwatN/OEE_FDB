@@ -4,9 +4,7 @@
       "statuses": [
         { "key": "Run_Time",            "label": "Run Time",           "color": "#2ca02c", "group": "running"  },
         { "key": "Plan_Stop",           "label": "Plan Stop",          "color": "#aec7e8", "group": "excluded" },
-        { "key": "Break_Time",          "label": "Break Time",         "color": "#ffbb78", "group": "excluded" },
-        { "key": "Preventive",          "label": "Preventive",         "color": "#e377c2", "group": "excluded" },
-        { "key": "MM_Repair",           "label": "MM Repair",          "color": "#d62728", "group": "downtime" },
+        { "key": "Break_Time",          "label": "Break Time",         "color": "#ffbb78", "group": "excluded" },        { "key": "MM_Repair",           "label": "MM Repair",          "color": "#d62728", "group": "downtime" },
         { "key": "MM_Check_Master",     "label": "MM Check Master",    "color": "#ff7f0e", "group": "downtime" },
         { "key": "MM_Preventive",       "label": "MM Preventive",      "color": "#e377c2", "group": "downtime" },
         { "key": "Setter_Adjust",       "label": "Setter Adjust",      "color": "#9467bd", "group": "downtime" },
@@ -27,7 +25,7 @@
       "statuses": [
         { "key": "Run_Time",    "label": "Run Time",    "color": "#2ca02c", "group": "running"  },
         { "key": "Plan_Stop",   "label": "Plan Stop",   "color": "#aec7e8", "group": "excluded" },
-        { "key": "Preventive",  "label": "Preventive",  "color": "#e377c2", "group": "excluded" },
+        { "key": "MM_Preventive",  "label": "MM Preventive",  "color": "#e377c2", "group": "excluded" },
         { "key": "Pick_NG",     "label": "Pick NG",     "color": "#e6194b", "group": "downtime" },
         { "key": "Wait_MM",     "label": "Wait MM",     "color": "#f58231", "group": "downtime" },
         { "key": "MM_Repair",   "label": "MM Repair",   "color": "#d62728", "group": "downtime" },

@@ -365,6 +365,23 @@ module.exports = {
                     const { runTimeSec, excludedSec, totalSec } = memoryOeeService.getDurationsNow(machine_name, calculationTime);
                     availabilityActual = calcAvailability(runTimeSec, excludedSec, totalSec);
 
+                    // ✅ Fallback: ถ้า memoryOeeService คืน 0 (เพราะ Main Thread แยก RAM จาก Worker Thread)
+                    // ให้ดึง availability ล่าสุดจาก tb_oee ที่ Cron เขียนทุกชั่วโมง
+                    if (availabilityActual === 0) {
+                        const latestOee = await prisma.tb_oee.findFirst({
+                            where: {
+                                machine_name,
+                                date: { gte: targetDate, lt: new Date(targetDate.getTime() + 86400000) },
+                                availability: { gt: 0 }
+                            },
+                            orderBy: { date: 'desc' },
+                            select: { availability: true }
+                        });
+                        if (latestOee?.availability > 0) {
+                            availabilityActual = latestOee.availability;
+                        }
+                    }
+
                     // ✅ หัก Excluded Time ออกจาก Target ตาม config
                     if (shouldDeductTarget && validSeconds > 0 && excludedSec > 0) {
                         const ratio = Math.max(0, validSeconds - excludedSec) / validSeconds;
@@ -391,6 +408,23 @@ module.exports = {
                     });
                     if (effActualDB && effActualDB.eff_actual != null) {
                         availabilityActual = effActualDB.eff_actual;
+                    }
+                }
+
+                // ✅ Fallback สุดท้าย: ถ้าตาราง tb_availability/efficiency ยังไม่มีข้อมูล
+                // ให้ดึง availability จาก tb_oee ที่ Cron เขียนทุกวัน (historical)
+                if (availabilityActual === 0) {
+                    const latestOee = await prisma.tb_oee.findFirst({
+                        where: {
+                            machine_name,
+                            date: { gte: targetDate, lt: new Date(targetDate.getTime() + 86400000) },
+                            availability: { gt: 0 }
+                        },
+                        orderBy: { date: 'desc' },
+                        select: { availability: true }
+                    });
+                    if (latestOee?.availability > 0) {
+                        availabilityActual = latestOee.availability;
                     }
                 }
 

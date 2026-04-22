@@ -109,9 +109,7 @@ function MachineWorkingInner() {
         outputTarget: 0,
         ctActual: 0,
         ctTarget: 0,
-        effActual: 0,
-        effTarget: 0,
-        availabilityActual: 0,   // ✅ ค่า Availability จริงจาก memoryOeeService
+        availabilityActual: 0,   // ✅ ค่า Availability จริง (status_based: จาก memoryOeeService หรือ tb_oee fallback)
         availabilityTarget: 0,   // ✅ เป้าหมาย
         operators: [] as any[], // ✅ Store list of operators
         liveStatus: "Offline", // 🆕
@@ -618,8 +616,6 @@ function MachineWorkingInner() {
                 outputTarget: tableDataRaw.outputTarget || 0,
                 ctActual: tableDataRaw.cycleTimeActual || 0,
                 ctTarget: tableDataRaw.cycleTimeTarget || 0,
-                effActual: tableDataRaw.availabilityActual || 0,
-                effTarget: tableDataRaw.availabilityTarget || 0,
                 availabilityActual: tableDataRaw.availabilityActual || 0,
                 availabilityTarget: tableDataRaw.availabilityTarget || 0,
                 liveStatus: isToday ? (latestAllStatus[machine] || "Offline") : "Offline",

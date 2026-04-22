@@ -1,121 +1,115 @@
 {
-  "timestamp": "2026-04-22T00:11:28.756Z",
+  "timestamp": "2026-04-22T06:01:02.098Z",
   "mqttMem": {
     "ABR-003": {
       "machine_name": "ABR-003",
-      "current_hour_actual": 247,
+      "current_hour_actual": 19,
       "current_hour_ng": 0,
       "current_hour_station_ng": {},
-      "last_cycle_time": 2.7282995951417024,
-      "sum_cycle_time": 673.8900000000004,
-      "last_update": "2026-04-22T00:11:22.050Z",
-      "current_hour_label": "07",
-      "live_status": "MC_Error",
-      "live_alarm": "LDIN Support Tray Load Close : X54,X56"
+      "last_cycle_time": 2.703157894736843,
+      "sum_cycle_time": 51.360000000000014,
+      "last_update": "2026-04-22T06:00:55.764Z",
+      "current_hour_label": "13",
+      "live_status": "Run_Time",
+      "live_alarm": "LDOUT Tray Lifter Clamp : X2F"
     },
     "AHV-001": {
       "machine_name": "AHV-001",
-      "current_hour_actual": 146,
-      "current_hour_ng": 35,
+      "current_hour_actual": 2,
+      "current_hour_ng": 1,
       "current_hour_station_ng": {
-        "St#9 ECM Conical Groove Top & Bottom": 23,
-        "True_NG": 35,
-        "St#7 ID Top": 11,
-        "St#3 Bottom Hub ECM & OD Sleeve": 5,
-        "St#5 ID Bottom": 1
+        "St#7 ID Top": 1,
+        "True_NG": 1
       },
-      "last_cycle_time": 4.307739726027392,
-      "sum_cycle_time": 628.9299999999992,
-      "last_update": "2026-04-22T00:11:19.874Z",
-      "current_hour_label": "07",
+      "last_cycle_time": 4.295,
+      "sum_cycle_time": 8.59,
+      "last_update": "2026-04-22T06:00:57.764Z",
+      "current_hour_label": "13",
       "live_status": "Run_Time",
       "live_alarm": null
     },
     "AHV-002": {
       "machine_name": "AHV-002",
-      "current_hour_actual": 166,
-      "current_hour_ng": 38,
+      "current_hour_actual": 7,
+      "current_hour_ng": 4,
       "current_hour_station_ng": {
-        "St#5 ID Bottom": 8,
-        "True_NG": 38,
-        "St#9 ECM Conical Groove Top & Bottom": 20,
-        "St#11 Top HUB & OD Hub": 15,
+        "St#9 ECM Conical Groove Top & Bottom": 3,
+        "True_NG": 4,
         "St#7 ID Top": 1
       },
-      "last_cycle_time": 4.045361445783135,
-      "sum_cycle_time": 671.5300000000003,
-      "last_update": "2026-04-22T00:11:26.693Z",
-      "current_hour_label": "07",
+      "last_cycle_time": 3.757142857142857,
+      "sum_cycle_time": 26.3,
+      "last_update": "2026-04-22T06:01:01.259Z",
+      "current_hour_label": "13",
       "live_status": "Run_Time",
       "live_alarm": null
     },
     "AHV-003": {
       "machine_name": "AHV-003",
-      "current_hour_actual": 100,
-      "current_hour_ng": 18,
+      "current_hour_actual": 16,
+      "current_hour_ng": 6,
       "current_hour_station_ng": {
-        "St#9 ECM Conical Groove Top & Bottom": 10,
-        "True_NG": 18,
         "St#5 ID Bottom": 3,
-        "St#7 ID Top": 5
+        "True_NG": 6,
+        "St#9 ECM Conical Groove Top & Bottom": 3
       },
-      "last_cycle_time": 4.038399999999998,
-      "sum_cycle_time": 403.83999999999986,
-      "last_update": "2026-04-22T00:07:11.373Z",
-      "current_hour_label": "07",
+      "last_cycle_time": 3.9331250000000004,
+      "sum_cycle_time": 62.93000000000001,
+      "last_update": "2026-04-22T06:00:59.799Z",
+      "current_hour_label": "13",
       "live_status": "Run_Time",
       "live_alarm": null
     },
     "AHV-004": {
       "machine_name": "AHV-004",
-      "current_hour_actual": 503,
-      "current_hour_ng": 62,
+      "current_hour_actual": 7,
+      "current_hour_ng": 1,
       "current_hour_station_ng": {
-        "St#3 Bottom Hub ECM & OD Sleeve": 82,
-        "St#5 ID Bottom": 11,
-        "St#7 ID Top": 43,
-        "St#9 ECM Conical Groove Top & Bottom": 44,
-        "St#11 Top HUB & OD Hub": 5,
-        "True_NG": 158
+        "St#9 ECM Conical Groove Top & Bottom": 1,
+        "True_NG": 1
       },
-      "last_cycle_time": 4.147852882703778,
-      "sum_cycle_time": 2086.3700000000003,
-      "last_update": "2026-04-22T00:01:28.824Z",
-      "current_hour_label": "06",
+      "last_cycle_time": 4.058571428571428,
+      "sum_cycle_time": 28.409999999999997,
+      "last_update": "2026-04-22T06:00:59.797Z",
+      "current_hour_label": "13",
       "live_status": "Run_Time",
       "live_alarm": null
     },
     "AHV-005": {
       "machine_name": "AHV-005",
-      "current_hour_actual": 665,
-      "current_hour_ng": 188,
+      "current_hour_actual": 730,
+      "current_hour_ng": 142,
       "current_hour_station_ng": {
-        "St#5 ID Bottom": 45,
-        "St#7 ID Top": 52,
-        "St#9 ECM Conical Groove Top & Bottom": 119,
-        "True_NG": 188,
-        "St#3 Bottom Hub ECM & OD Sleeve": 4
+        "St#5 ID Bottom": 31,
+        "True_NG": 142,
+        "St#9 ECM Conical Groove Top & Bottom": 103,
+        "St#7 ID Top": 21,
+        "St#3 Bottom Hub ECM & OD Sleeve": 2,
+        "St#11 Top HUB & OD Hub": 1
       },
-      "last_cycle_time": 3.9187067669172864,
-      "sum_cycle_time": 2605.9399999999955,
-      "last_update": "2026-04-21T23:56:28.828Z",
-      "current_hour_label": "04",
+      "last_cycle_time": 3.937671232876697,
+      "sum_cycle_time": 2874.4999999999886,
+      "last_update": "2026-04-22T05:59:59.057Z",
+      "current_hour_label": "12",
       "live_status": "Run_Time",
       "live_alarm": null
     },
     "AHV-006": {
       "machine_name": "AHV-006",
-      "current_hour_actual": 68,
-      "current_hour_ng": 17,
+      "current_hour_actual": 114,
+      "current_hour_ng": 36,
       "current_hour_station_ng": {
-        "St#7 ID Top": 17,
-        "True_NG": 17
+        "St#7 ID Top": 31,
+        "True_NG": 36,
+        "St#11 Top HUB & OD Hub": 2,
+        "St#3 Bottom Hub ECM & OD Sleeve": 2,
+        "St#5 ID Bottom": 1
       },
-      "last_cycle_time": 3.85058823529412,
-      "sum_cycle_time": 261.84000000000015,
-      "last_update": "2026-04-22T00:11:27.540Z",
-      "current_hour_label": "07",
-      "live_status": "Run_Time",
+      "last_cycle_time": 3.840175438596489,
+      "sum_cycle_time": 437.77999999999975,
+      "last_update": "2026-04-22T05:11:02.205Z",
+      "current_hour_label": "12",
+      "live_status": "Setter_Adjust",
       "live_alarm": null
     },
     "ACR-001": {
@@ -2121,59 +2115,59 @@
   },
   "oeeState": {
     "ABR-003": {
-      "runTimeSec": 0,
-      "excludedSec": 0,
-      "lastStatus": "MC_Error",
-      "lastStatusTime": "2026-04-22T06:36:44.000Z",
+      "runTimeSec": 4406,
+      "excludedSec": 2394,
+      "lastStatus": "Run_Time",
+      "lastStatusTime": "2026-04-22T12:40:44.000Z",
       "shiftDate": "2026-04-22",
       "manualNgQty": 0
     },
     "AHV-001": {
-      "runTimeSec": 70850,
+      "runTimeSec": 15452,
       "excludedSec": 0,
       "lastStatus": "Run_Time",
-      "lastStatusTime": "2026-04-22T06:07:36.000Z",
-      "shiftDate": "2026-04-21",
+      "lastStatusTime": "2026-04-22T11:22:01.000Z",
+      "shiftDate": "2026-04-22",
       "manualNgQty": 0
     },
     "AHV-002": {
-      "runTimeSec": 79752,
+      "runTimeSec": 16348,
       "excludedSec": 0,
       "lastStatus": "Run_Time",
-      "lastStatusTime": "2026-04-22T06:03:05.000Z",
-      "shiftDate": "2026-04-21",
+      "lastStatusTime": "2026-04-22T11:41:04.000Z",
+      "shiftDate": "2026-04-22",
       "manualNgQty": 0
     },
     "AHV-003": {
-      "runTimeSec": 75811,
+      "runTimeSec": 15717,
       "excludedSec": 0,
       "lastStatus": "Run_Time",
-      "lastStatusTime": "2026-04-22T05:57:44.000Z",
-      "shiftDate": "2026-04-21",
+      "lastStatusTime": "2026-04-22T11:37:23.000Z",
+      "shiftDate": "2026-04-22",
       "manualNgQty": 0
     },
     "AHV-004": {
-      "runTimeSec": 76320,
+      "runTimeSec": 15067,
       "excludedSec": 0,
       "lastStatus": "Run_Time",
-      "lastStatusTime": "2026-04-22T06:00:32.000Z",
-      "shiftDate": "2026-04-21",
+      "lastStatusTime": "2026-04-22T11:27:36.000Z",
+      "shiftDate": "2026-04-22",
       "manualNgQty": 0
     },
     "AHV-005": {
-      "runTimeSec": 71982,
+      "runTimeSec": 16150,
       "excludedSec": 0,
       "lastStatus": "Run_Time",
-      "lastStatusTime": "2026-04-22T06:04:22.000Z",
-      "shiftDate": "2026-04-21",
+      "lastStatusTime": "2026-04-22T11:44:28.000Z",
+      "shiftDate": "2026-04-22",
       "manualNgQty": 0
     },
     "AHV-006": {
-      "runTimeSec": 60988,
+      "runTimeSec": 10521,
       "excludedSec": 0,
-      "lastStatus": "MC_Stop",
-      "lastStatusTime": "2026-04-22T06:18:35.000Z",
-      "shiftDate": "2026-04-21",
+      "lastStatus": "Run_Time",
+      "lastStatusTime": "2026-04-22T11:23:23.000Z",
+      "shiftDate": "2026-04-22",
       "manualNgQty": 0
     }
   }
