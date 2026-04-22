@@ -161,11 +161,7 @@ function startCronJobs(onSyncComplete = null) {
         if (!(await acquireLock("dailySyncInfluxToMssql"))) return;
         try {
             console.log(`🔄 [Cron] Daily Influx to MSSQL Sync starting at ${new Date().toISOString()}`);
-            await backfillStartup(3);
-            await backfillNgStartup(3);
-            await backfillOeeStartup(3);
-            await backfillEventsStartup(3); // 🆕 Sync Status and Alarms
-            console.log(`✅ [Cron] Daily Influx to MSSQL Sync completed.`);
+            await runDailySync(3);
             // 🆕 Notify realtime thread
             if (onSyncComplete) onSyncComplete("daily_sync_done");
         } finally { releaseLock(); }
@@ -2137,8 +2133,24 @@ async function pollMssqlStatusForWeb() {
     }
 }
 
+/**
+ * runDailySync — sync InfluxDB → MSSQL สำหรับ N วันย้อนหลัง
+ * Logic เดียวกับ dailySyncExpr cron job (07:15 TH)
+ * เรียกได้ทั้งจาก cron และจาก startup เพื่อซ่อมแซมข้อมูลให้สอดคล้องกัน
+ * @param {number} days - จำนวนวันที่ต้องการ backfill (default 3)
+ */
+async function runDailySync(days = 3) {
+    console.log(`🔄 [DailySync] Starting InfluxDB → MSSQL sync for last ${days} day(s)...`);
+    await backfillStartup(days);
+    await backfillNgStartup(days);
+    await backfillOeeStartup(days);
+    await backfillEventsStartup(days);
+    console.log(`✅ [DailySync] Completed (${days} day(s) synced).`);
+}
+
 module.exports = {
     startCronJobs,
+    runDailySync,
     summarizeLastHour,
     summarizeNgHourly,
     handleLateData,
