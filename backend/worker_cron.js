@@ -67,6 +67,7 @@ const {
     backfillStartup,
     backfillNgStartup,
     backfillEventsStartup,
+    backfillRuntimeAvailStartup,
     upsertOeeHourly,
     backfillOeeStartup,
 } = require("./services/cronService");
@@ -96,6 +97,10 @@ async function startup() {
         // 5. Backfill Status & Alarm from InfluxDB → MSSQL
         log("🔄 [CronWorker] Starting backfillEventsStartup...");
         await backfillEventsStartup();
+
+        // 5.5 Recalculate runtime/availability per hour
+        log("🔄 [CronWorker] Starting backfillRuntimeAvailStartup...");
+        await backfillRuntimeAvailStartup();
 
         // 6. Hydrate Availability + Runtime สำหรับ cron thread's internal use
         await hydrateAvailabilityFromMSSQL();
