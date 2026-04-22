@@ -379,8 +379,8 @@ function ProductionPlanningPage() {
                 currentCount++;
                 Swal.update({ html: `Saving configuration to <b>${m.name}</b>...<br/><br/><div style="font-size: 0.95rem; color: #555;">Progress: <b>${currentCount} / ${total}</b> machines</div>` });
                 
-                const existingDest = allConfigs.get(m.name);
                 try {
+                    const existingDest = allConfigs.get(m.name);
                     await axios.post(`${config.apiServer}/api/planConfig/upsert`, {
                         machine_name: m.name, 
                         eff_target: Number(formData.eff_target),
@@ -392,17 +392,24 @@ function ProductionPlanningPage() {
                     });
                     successCount++;
                 } catch (err) {
+                    // ✅ Bug #3 Fix: ไม่หยุด loop เมื่อ 1 เครื่องล้มเหลว
                     console.error(`[CopyConfig] Failed to copy to ${m.name}:`, err);
                     failedMachines.push(m.name);
                 }
             }
 
             await fetchAllConfigs();
-
-            const failMsg = failedMachines.length > 0
-                ? `<br/><small style="color:#c0392b;">⚠️ Failed: ${failedMachines.join(", ")}</small>`
+            
+            const failNote = failedMachines.length > 0 
+                ? `\n⚠️ Failed (${failedMachines.length}): ${failedMachines.join(", ")}` 
                 : "";
-            Swal.fire({ icon: failedMachines.length === 0 ? "success" : "warning", title: "Done", html: `Copied to <b>${successCount}</b> machine${successCount !== 1 ? "s" : ""}.${failMsg}`, timer: 3000, showConfirmButton: false });
+            Swal.fire({ 
+                icon: failedMachines.length > 0 ? "warning" : "success", 
+                title: "Done", 
+                text: `Copied to ${successCount} of ${total} machines.${failNote}`, 
+                timer: 3000, 
+                showConfirmButton: false 
+            });
             hideModal("modalConfig");
         } catch (e) { console.error(e); Swal.fire("Error", "Failed to copy config", "error"); }
     };

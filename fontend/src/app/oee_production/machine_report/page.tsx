@@ -185,13 +185,14 @@ function MachineReportPage() {
                     const existing = updatedDailyData[shiftDate] || {};
                     updatedDailyData[shiftDate] = {
                         ...existing,
-                        // ✅ Guard: อย่าเขียนทับด้วย 0/undefined — ป้องกัน slow poll ทับค่าที่ fast poll เพิ่งอัปเดต
+                        // ✅ Bug #1 Fix: Guard ไม่เขียนทับด้วย 0/undefined จาก slow poll
+                        // ถ้า realtime_output (fast) บันทึกค่าถูกไว้แล้ว จะไม่ถูกทับด้วยค่า 0 จากตัวนี้
                         ...(socketData.daily.availability > 0 && { availability: socketData.daily.availability }),
-                        ...(socketData.daily.performance !== undefined && socketData.daily.performance !== null && { performance: socketData.daily.performance }),
+                        ...(socketData.daily.performance !== undefined && socketData.daily.performance > 0 && { performance: socketData.daily.performance }),
                         ...(isAuto ? {
                             ng_qty: socketData.daily.ngQty ?? 0,
                             over_reject_qty: socketData.daily.over_reject_qty,
-                            ...(socketData.daily.quality !== undefined && { quality: socketData.daily.quality }),
+                            ...(socketData.daily.quality > 0 && { quality: socketData.daily.quality }),
                             ...(socketData.daily.oee > 0 && { oee: socketData.daily.oee }),
                         } : {}),
                     };
@@ -598,7 +599,8 @@ function MachineReportPage() {
                         if (num > 0) latestTarget = num;
                     } else {
                         sum += num;
-                        // ✅ นับเข้า denominator เฉพาะวันที่มีการผลิตจริง (วันหยุดไม่นับ)
+                        // ✅ Bug #2 Fix: นับเข้า denominator เฉพาะวันที่มีการผลิตจริงเท่านั้น
+                        // (noProd=false คือ วันทำงาน) ไม่นับวันหยุดที่บังเอิญมีค่า > 0 เข้า average
                         if (!noProd) {
                             count++;
                         }
