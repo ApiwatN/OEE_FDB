@@ -13,6 +13,7 @@ const cacheService = require("./cacheService");
 const {
     SHIFT_HOURS,
     utcHourToThColumn,
+    thColumnToUtcHour,
     getPreviousHourBoundaries,
     getShiftDateUTC,
     getHourBoundariesUTC,
@@ -2134,17 +2135,91 @@ async function pollMssqlStatusForWeb() {
 }
 
 /**
+ * backfillRuntimeAvailStartup — Recalculate tb_mc_runtime_hourly + tb_availability_actual
+ * สำหรับทุกชั่วโมงที่ผ่านมาแล้วในช่วง N วัน
+ *
+ * เรียกหลัง backfillEventsStartup เสมอ เพราะต้องการ MCStatus ที่ sync ล่าสุดแล้ว
+ * @param {number} days - จำนวนวันย้อนหลัง (default 3)
+ */
+async function backfillRuntimeAvailStartup(days = 3) {
+    console.log(`🔄 [RuntimeAvailBackfill] Starting for last ${days} day(s)...`);
+
+    const now = new Date();
+    // ชั่วโมง UTC ที่กำลังดำเนินอยู่ตอนนี้ (ยังไม่จบ → skip)
+    const currentHourStart = new Date(now);
+    currentHourStart.setUTCMinutes(0, 0, 0);
+    currentHourStart.setUTCSeconds(0, 0);
+
+    let totalHoursProcessed = 0;
+
+    for (let i = days; i >= 0; i--) {
+        const shiftDate = new Date(now);
+        shiftDate.setUTCDate(shiftDate.getUTCDate() - i);
+        const dateStr = shiftDate.toISOString().split("T")[0];
+        const targetDate = new Date(dateStr);
+
+        // ดึงรายชื่อเครื่องที่มีข้อมูลในวันนั้น
+        const outputRows = await prisma.tb_output_actual.findMany({
+            where: { date: targetDate },
+            select: { machine_name: true },
+        });
+        const machineNames = [...new Set(outputRows.map(r => r.machine_name))];
+
+        if (machineNames.length === 0) {
+            console.log(`   📅 ${dateStr}: No machines — skip`);
+            continue;
+        }
+
+        console.log(`   📅 ${dateStr}: Recalculating ${SHIFT_HOURS.length} hours × ${machineNames.length} machines...`);
+        let hoursProcessed = 0;
+
+        for (const thCol of SHIFT_HOURS) {
+            const utcHour = thColumnToUtcHour(thCol);
+            const { start: startUTC, end: endUTC } = getHourBoundariesUTC(dateStr, utcHour);
+
+            // Skip ชั่วโมงที่ยังดำเนินอยู่ (summarizeLastHour จะจัดการเอง)
+            if (startUTC >= currentHourStart) continue;
+
+            try {
+                await upsertRuntimeAndAvailabilityForHour(thCol, startUTC, endUTC, targetDate, machineNames, null);
+                hoursProcessed++;
+            } catch (e) {
+                console.error(`   ⚠️ [RuntimeAvailBackfill] ${dateStr} hour ${thCol}:`, e.message);
+            }
+
+            // Yield ทุกชั่วโมง เพื่อไม่บล็อก event loop
+            await yieldEventLoop();
+        }
+
+        console.log(`   ✅ ${dateStr}: ${hoursProcessed} hours recalculated`);
+        totalHoursProcessed += hoursProcessed;
+        await yieldEventLoop();
+    }
+
+    console.log(`✅ [RuntimeAvailBackfill] Done — ${totalHoursProcessed} hour-slots recalculated across ${days + 1} day(s).`);
+}
+
+/**
  * runDailySync — sync InfluxDB → MSSQL สำหรับ N วันย้อนหลัง
  * Logic เดียวกับ dailySyncExpr cron job (07:15 TH)
  * เรียกได้ทั้งจาก cron และจาก startup เพื่อซ่อมแซมข้อมูลให้สอดคล้องกัน
+ *
+ * ลำดับที่ถูกต้อง:
+ *   1. backfillStartup        — sync output/ct/eff จาก InfluxDB data_tb
+ *   2. backfillNgStartup      — sync NG จาก InfluxDB ng_tb
+ *   3. backfillEventsStartup  — sync MCStatus/Alarm จาก InfluxDB status_tb/alarm_tb (ก่อน OEE!)
+ *   4. backfillRuntimeAvailStartup — recalc runtime + avail ต่อชั่วโมง ด้วย MCStatus ล่าสุด
+ *   5. backfillOeeStartup     — คำนวณ OEE โดยใช้ runtime/avail ที่ถูกต้องแล้ว
+ *
  * @param {number} days - จำนวนวันที่ต้องการ backfill (default 3)
  */
 async function runDailySync(days = 3) {
     console.log(`🔄 [DailySync] Starting InfluxDB → MSSQL sync for last ${days} day(s)...`);
-    await backfillStartup(days);
-    await backfillNgStartup(days);
-    await backfillOeeStartup(days);
-    await backfillEventsStartup(days);
+    await backfillStartup(days);              // 1. output/ct/eff
+    await backfillNgStartup(days);            // 2. NG
+    await backfillEventsStartup(days);        // 3. MCStatus/Alarm ← sync ก่อน OEE
+    await backfillRuntimeAvailStartup(days);  // 4. Recalc runtime/avail ต่อชั่วโมง ← ใหม่
+    await backfillOeeStartup(days);           // 5. OEE ← ใช้ MCStatus + runtime ที่ถูกต้องแล้ว
     console.log(`✅ [DailySync] Completed (${days} day(s) synced).`);
 }
 
@@ -2158,6 +2233,7 @@ module.exports = {
     backfillStartup,
     backfillNgStartup,
     backfillEventsStartup,
+    backfillRuntimeAvailStartup,
     upsertOeeHourly,
     backfillOeeStartup,
     autoPlanDaily,
@@ -2165,3 +2241,4 @@ module.exports = {
     pollMssqlStatusForWeb,
     upsertRuntimeAndAvailabilityForHour
 };
+
