@@ -1,15 +1,59 @@
 "use client";
-import React, { Suspense, useEffect, useState, useRef, useMemo } from "react";
-import { useSearchParams } from "next/navigation";
+import React, { Suspense, useCallback, useEffect, useState, useMemo } from "react";
 import axios from "axios";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc";
 dayjs.extend(utc);
 import * as XLSX from "xlsx-js-style";
-import { io as socketIO } from "socket.io-client";
+import { useDashboardSocket } from "@/app/hooks/useDashboardSocket";
 import config from "@/app/config";
 import LoadingSpinner from "@/app/components/LoadingSpinner";
 
+type CellValue = string | number | boolean | null | undefined;
+type MachineDailyData = Record<string, CellValue> & {
+    has_production?: boolean;
+};
+type ModelInfo = {
+    model_type?: string;
+    model_name?: string;
+    process_name?: string;
+};
+type MachineReport = {
+    machine_name: string;
+    machine_type?: string;
+    oee_mode?: string;
+    ng_mode?: string;
+    model_info: ModelInfo;
+    daily_data: Record<string, MachineDailyData>;
+    holidays?: string[];
+};
+type MachineGroup = {
+    type: string;
+    machines: MachineReport[];
+    summaryData: Record<string, MachineDailyData>;
+    modelTypes: Set<string>;
+    modelNames: Set<string>;
+    processes: Set<string>;
+    modelTypesArr?: string;
+    modelNamesArr?: string;
+    processesArr?: string;
+    ng_mode?: string;
+};
+type RealtimeDailyPayload = {
+    totalOutput?: number;
+    overallEfficiency?: number;
+    avgCycleTime?: number;
+    availability?: number;
+    performance?: number;
+    quality?: number;
+    oee?: number;
+    ngQty?: number;
+    over_reject_qty?: number;
+};
+type RealtimePayload = {
+    shiftDate?: string;
+    machines?: Record<string, { daily?: RealtimeDailyPayload }>;
+};
 export default function Page() {
     return (
         <Suspense fallback={<LoadingSpinner message="Loading Report..." />}>
@@ -32,188 +76,138 @@ export default function Page() {
 }
 
 function MachineReportPage() {
-    const searchParams = useSearchParams();
-
-    // ==========================
-    // 🔹 State & Filters
-    // ==========================
     const [areas, setAreas] = useState<string[]>([]);
     const [types, setTypes] = useState<string[]>([]);
-
-    // Default Month: Current Month
     const [selectedMonth, setSelectedMonth] = useState(dayjs().format("YYYY-MM"));
-
     const [selectedArea, setSelectedArea] = useState("all");
     const [selectedType, setSelectedType] = useState("all");
-
-    const [reportData, setReportData] = useState<any[]>([]);
+    const [reportData, setReportData] = useState<MachineReport[]>([]);
     const [loading, setLoading] = useState(false);
-    const [countdown, setCountdown] = useState(5 * 60); // 5 minutes in seconds
-    const [serverTimeStr, setServerTimeStr] = useState("");
-    const [socketConnected, setSocketConnected] = useState(false);
+    const [countdown, setCountdown] = useState(5 * 60);
 
-
-    // ==========================
-    // 🔸 Init
-    // ==========================
     useEffect(() => {
         const init = async () => {
             const fetchedAreas = await fetchAreas();
             if (!fetchedAreas || fetchedAreas.length === 0) return;
 
-            // Load Filters from LocalStorage
             const localArea = localStorage.getItem("report_filter_area");
-            const targetArea = localArea && localArea !== "all" && fetchedAreas.includes(localArea) 
-                             ? localArea : fetchedAreas[0];
+            const targetArea = localArea && localArea !== "all" && fetchedAreas.includes(localArea)
+                ? localArea
+                : fetchedAreas[0];
 
             setSelectedArea(targetArea);
 
             const fetchedTypes = await fetchTypes(targetArea);
             const localType = localStorage.getItem("report_filter_type");
-            const targetType = localType && localType !== "all" && fetchedTypes.includes(localType) 
-                             ? localType : (fetchedTypes.length > 0 ? fetchedTypes[0] : "all");
+            const targetType = localType && localType !== "all" && fetchedTypes.includes(localType)
+                ? localType
+                : (fetchedTypes.length > 0 ? fetchedTypes[0] : "all");
 
             setSelectedType(targetType);
-
-            // Fetch Report
-            await fetchReport(selectedMonth, targetArea, targetType);
+            await fetchReport(dayjs().format("YYYY-MM"), targetArea, targetType);
         };
         init();
     }, []);
 
-    // ==========================
-    // 🔸 Auto Refresh (every 5 minutes) with Countdown
-    // ==========================
     useEffect(() => {
-        const REFRESH_INTERVAL = 5 * 60; // 5 minutes in seconds
-        setCountdown(REFRESH_INTERVAL); // Reset countdown when filters change
+        const REFRESH_INTERVAL = 5 * 60;
+        setCountdown(REFRESH_INTERVAL);
 
-        // Countdown timer (every 1 second)
         const countdownId = setInterval(() => {
             setCountdown(prev => {
                 if (prev <= 1) {
-                    // Time to refresh — silent merge to avoid blink
-                    console.log("[Auto Refresh] Silent merge refresh...");
                     fetchReportSilent(selectedMonth, selectedArea, selectedType);
-                    return REFRESH_INTERVAL; // Reset countdown
+                    return REFRESH_INTERVAL;
                 }
                 return prev - 1;
             });
         }, 1000);
 
-        // Cleanup interval on unmount
         return () => clearInterval(countdownId);
     }, [selectedMonth, selectedArea, selectedType]);
 
-    // ==========================
-    // 🔸 Socket.IO Real-time (output, eff, ct, availability, performance)
-    // ==========================
-    useEffect(() => {
-        const socket = socketIO(config.apiServer, { transports: ["websocket", "polling"] });
+    const handleRealtimeOutput = useCallback((data: RealtimePayload) => {
+        const isCurrentMonth = dayjs(selectedMonth).format("YYYY-MM") === dayjs().format("YYYY-MM");
+        if (!isCurrentMonth) return;
 
-        socket.on("connect", () => {
-            setSocketConnected(true);
-            // 🏠 Join dashboard room (ดูทุกเครื่อง)
-            socket.emit("joinRoom", "dashboard");
-        });
-        socket.on("disconnect", () => setSocketConnected(false));
+        const shiftDate = data?.shiftDate;
+        const socketMachines = data?.machines;
+        if (!shiftDate || !socketMachines) return;
 
-        // Clock
-        socket.on("server_time", (isoStr: string) => {
-            const t = new Date(isoStr);
-            setServerTimeStr(t.toLocaleTimeString("en-GB", { hour12: false, timeZone: "Asia/Bangkok" }));
-        });
+        setReportData(prev => {
+            if (prev.length === 0) return prev;
+            return prev.map(machine => {
+                const socketData = socketMachines[machine.machine_name];
+                if (!socketData?.daily) return machine;
 
-        // Fast production update ทุก 2 วินาที — Output, Eff, CT
-        // ✅ Fix #5: Delta merge — only update machines included in payload
-        socket.on("realtime_output", (data: any) => {
-            const isCurrentMonth = dayjs(selectedMonth).format("YYYY-MM") === dayjs().format("YYYY-MM");
-            if (!isCurrentMonth) return;
+                const updatedDailyData = { ...machine.daily_data };
+                const existing = updatedDailyData[shiftDate] || {};
+                const newMachineOut = socketData.daily.totalOutput || 0;
+                let newOutActual = newMachineOut;
 
-            const shiftDate = data?.shiftDate;
-            const socketMachines = data?.machines;
-            if (!shiftDate || !socketMachines) return;
+                if (existing.over_reject_qty !== undefined) {
+                    newOutActual = Math.max(0, newMachineOut - Number(existing.over_reject_qty || 0));
+                }
 
-            setReportData(prev => {
-                if (prev.length === 0) return prev;
-                return prev.map(machine => {
-                    const socketData = socketMachines[machine.machine_name];
-                    if (!socketData?.daily) return machine; // Not in delta → keep as-is
+                updatedDailyData[shiftDate] = {
+                    ...existing,
+                    machine_output_actual: newMachineOut,
+                    output_actual: newOutActual,
+                    eff_actual: socketData.daily.overallEfficiency,
+                    cycle_actual: socketData.daily.avgCycleTime,
+                    ...(socketData.daily.availability !== undefined && { availability: socketData.daily.availability }),
+                };
 
-                    const updatedDailyData = { ...machine.daily_data };
-                    const existing = updatedDailyData[shiftDate] || {};
-                    
-                    let newMachineOut = socketData.daily.totalOutput;
-                    let newOutActual = newMachineOut;
-                    
-                    if (existing.over_reject_qty !== undefined) {
-                        newOutActual = Math.max(0, newMachineOut - existing.over_reject_qty);
-                    }
-
-                    updatedDailyData[shiftDate] = {
-                        ...existing,
-                        machine_output_actual: newMachineOut,
-                        output_actual: newOutActual,
-                        eff_actual: socketData.daily.overallEfficiency,
-                        cycle_actual: socketData.daily.avgCycleTime,
-                        // ✅ ถอด availability แบบเดียวกับหน้า machine_working
-                        ...(socketData.daily.availability !== undefined && { availability: socketData.daily.availability }),
-                    };
-
-                    return { ...machine, daily_data: updatedDailyData };
-                });
+                return { ...machine, daily_data: updatedDailyData };
             });
         });
-
-        // Slow status update ทุก 5 นาที — Availability, Performance, Quality, OEE (จาก MCStatus)
-        socket.on("realtime_update", (data: any) => {
-            const isCurrentMonth = dayjs(selectedMonth).format("YYYY-MM") === dayjs().format("YYYY-MM");
-            if (!isCurrentMonth) return;
-
-            const shiftDate = data?.shiftDate;
-            const socketMachines = data?.machines;
-            if (!shiftDate || !socketMachines) return;
-
-            setReportData(prev => {
-                if (prev.length === 0) return prev;
-                return prev.map(machine => {
-                    const socketData = socketMachines[machine.machine_name];
-                    if (!socketData?.daily) return machine;
-
-                    const isAuto = machine.oee_mode === "auto";
-                    const updatedDailyData = { ...machine.daily_data };
-                    const existing = updatedDailyData[shiftDate] || {};
-                    updatedDailyData[shiftDate] = {
-                        ...existing,
-                        // ✅ Bug #1 Fix: Guard ไม่เขียนทับด้วย 0/undefined จาก slow poll
-                        // ถ้า realtime_output (fast) บันทึกค่าถูกไว้แล้ว จะไม่ถูกทับด้วยค่า 0 จากตัวนี้
-                        ...(socketData.daily.availability > 0 && { availability: socketData.daily.availability }),
-                        ...(socketData.daily.performance !== undefined && socketData.daily.performance > 0 && { performance: socketData.daily.performance }),
-                        ...(isAuto ? {
-                            ng_qty: socketData.daily.ngQty ?? 0,
-                            over_reject_qty: socketData.daily.over_reject_qty,
-                            ...(socketData.daily.quality > 0 && { quality: socketData.daily.quality }),
-                            ...(socketData.daily.oee > 0 && { oee: socketData.daily.oee }),
-                        } : {}),
-                    };
-
-                    return { ...machine, daily_data: updatedDailyData };
-                });
-            });
-        });
-
-        return () => {
-            socket.off("realtime_update");
-            socket.off("realtime_output");
-            socket.disconnect();
-        };
     }, [selectedMonth]);
+
+    const handleRealtimeUpdate = useCallback((data: RealtimePayload) => {
+        const isCurrentMonth = dayjs(selectedMonth).format("YYYY-MM") === dayjs().format("YYYY-MM");
+        if (!isCurrentMonth) return;
+
+        const shiftDate = data?.shiftDate;
+        const socketMachines = data?.machines;
+        if (!shiftDate || !socketMachines) return;
+
+        setReportData(prev => {
+            if (prev.length === 0) return prev;
+            return prev.map(machine => {
+                const socketData = socketMachines[machine.machine_name];
+                if (!socketData?.daily) return machine;
+
+                const isAuto = machine.oee_mode === "auto";
+                const updatedDailyData = { ...machine.daily_data };
+                const existing = updatedDailyData[shiftDate] || {};
+                updatedDailyData[shiftDate] = {
+                    ...existing,
+                    ...((socketData.daily.availability || 0) > 0 && { availability: socketData.daily.availability }),
+                    ...(socketData.daily.performance !== undefined && socketData.daily.performance > 0 && { performance: socketData.daily.performance }),
+                    ...(isAuto ? {
+                        ng_qty: socketData.daily.ngQty ?? 0,
+                        over_reject_qty: socketData.daily.over_reject_qty,
+                        ...((socketData.daily.quality || 0) > 0 && { quality: socketData.daily.quality }),
+                        ...((socketData.daily.oee || 0) > 0 && { oee: socketData.daily.oee }),
+                    } : {}),
+                };
+
+                return { ...machine, daily_data: updatedDailyData };
+            });
+        });
+    }, [selectedMonth]);
+
+    const dashboardEvents = useMemo(() => [
+        { event: "realtime_output", handler: handleRealtimeOutput },
+        { event: "realtime_update", handler: handleRealtimeUpdate },
+    ], [handleRealtimeOutput, handleRealtimeUpdate]);
+    const { socketConnected, serverTimeStr } = useDashboardSocket<RealtimePayload>({ events: dashboardEvents });
 
     // ==========================
     // 🔸 API Calls
     // ==========================
     const fetchAreas = async () => {
-        try { const res = await axios.get(`${config.apiServer}/api/machine/listArea`); const arr = res.data.results.map((r: any) => r.machine_area); setAreas(arr); return arr; } catch (e) { console.error(e); return []; }
+        try { const res = await axios.get<{ results: { machine_area: string }[] }>(`${config.apiServer}/api/machine/listArea`); const arr = res.data.results.map((r) => r.machine_area); setAreas(arr); return arr; } catch (e) { console.error(e); return []; }
     };
     const fetchTypes = async (area: string) => {
         try { if (area === "all" || !area) { setTypes([]); return []; } const res = await axios.get(`${config.apiServer}/api/machine/listType/${area}`); const arr = res.data.results; setTypes(arr); return arr; } catch (e) { console.error(e); return []; }
@@ -239,8 +233,8 @@ function MachineReportPage() {
             const res = await axios.get(`${config.apiServer}/api/report/machine-report`, {
                 params: { month, area, type }
             });
-            const fresh: any[] = res.data.results || [];
-            const freshMap = new Map(fresh.map((m: any) => [m.machine_name, m]));
+            const fresh: MachineReport[] = res.data.results || [];
+            const freshMap = new Map(fresh.map((m) => [m.machine_name, m]));
             setReportData(prev => prev.map(machine => {
                 const updated = freshMap.get(machine.machine_name);
                 if (!updated) return machine;
@@ -281,25 +275,27 @@ function MachineReportPage() {
     // ==========================
     // 🔸 Data Grouping (By Machine Type)
     // ==========================
-    const isDayEmpty = (dailyData: Record<string, any>, day: number, month: string): boolean => {
+    const isDayEmpty = (dailyData: Record<string, MachineDailyData>, day: number, month: string): boolean => {
         const dateKey = `${month}-${String(day).padStart(2, '0')}`;
         const data = dailyData[dateKey];
         if (!data) return true;
-        const isEmpty = (val: any) => val === undefined || val === null || val === 0 || val === '';
+        const isEmpty = (val: CellValue) => val === undefined || val === null || val === 0 || val === '';
         return isEmpty(data.output_actual) && isEmpty(data.eff_actual) && isEmpty(data.cycle_actual);
     };
 
     const groupedReportData = useMemo(() => {
-        const groups: any[] = [];
-        const typeMap = new Map();
+        const groups: MachineGroup[] = [];
+        const typeMap = new Map<string, MachineGroup>();
 
         reportData.forEach(machine => {
             const type = machine.machine_type || "Unknown";
             if (!typeMap.has(type)) {
-                typeMap.set(type, { type, machines: [], modelTypes: new Set(), modelNames: new Set(), processes: new Set() });
-                groups.push(typeMap.get(type));
+                const group: MachineGroup = { type, machines: [], summaryData: {}, modelTypes: new Set(), modelNames: new Set(), processes: new Set() };
+                typeMap.set(type, group);
+                groups.push(group);
             }
             const g = typeMap.get(type);
+            if (!g) return;
             g.machines.push(machine);
             if (machine.model_info?.model_type && machine.model_info.model_type !== "-") g.modelTypes.add(machine.model_info.model_type);
             
@@ -311,15 +307,15 @@ function MachineReportPage() {
 
         groups.forEach(g => {
             g.ng_mode = g.machines[0]?.ng_mode || "visual_ng";
-            const summaryData: any = {};
+            const summaryData: Record<string, MachineDailyData> = {};
             for (let d = 1; d <= 31; d++) {
                 const dateKey = `${selectedMonth}-${String(d).padStart(2, '0')}`;
-                const dayData: any = { has_production: false };
+                const dayData: MachineDailyData = { has_production: false };
                 
                 const rowsKeys = ["output_target", "machine_output_actual", "output_actual", "eff_target", "eff_actual", "cycle_target", "cycle_actual", "over_reject_qty", "ng_qty", "availability", "performance", "quality", "oee"];
                 rowsKeys.forEach(key => {
                     let sum = 0, countForAverage = 0, totalCount = 0;
-                    g.machines.forEach((m: any) => {
+                    g.machines.forEach((m) => {
                         const data = m.daily_data[dateKey];
                         if (!data) return;
                         const val = data[key];
@@ -365,7 +361,7 @@ function MachineReportPage() {
         if (!reportData || reportData.length === 0) return;
 
         const wb = XLSX.utils.book_new();
-        const wsData: any[][] = [];
+        const wsData: unknown[][] = [];
         const merges: XLSX.Range[] = [];
 
         // 0. Summary Rows (4 rows) - Topic in Col 1, Value in Col 2
@@ -417,7 +413,7 @@ function MachineReportPage() {
             ];
 
             // Render individual machines
-            group.machines.forEach((machine: any) => {
+            group.machines.forEach((machine) => {
                 const { machine_name, model_info, daily_data } = machine;
 
                 const startRow = currentRowIndex;
@@ -427,7 +423,7 @@ function MachineReportPage() {
                 }
 
                 rowsTemplate.forEach((r) => {
-                    const rowData: any[] = [
+                    const rowData: unknown[] = [
                         machine_name,
                         model_info?.model_type || "-",
                         model_info?.model_name || "-",
@@ -457,7 +453,7 @@ function MachineReportPage() {
             }
 
             rowsTemplate.forEach((r) => {
-                const rowData: any[] = [
+                const rowData: unknown[] = [
                     `${group.type}-ALL`,
                     group.modelTypesArr,
                     group.modelNamesArr,
@@ -575,7 +571,7 @@ function MachineReportPage() {
     // ==========================
     // 🔸 Row Total Calculator
     // ==========================
-    const getRowTotal = (daily_data: any, key: string) => {
+    const getRowTotal = (daily_data: Record<string, MachineDailyData>, key: string) => {
         let sum = 0;
         let count = 0;
         let latestTarget = 0;
@@ -638,12 +634,12 @@ function MachineReportPage() {
     };
 
     // Helper: Check if a specific day is a holiday for a machine
-    const isHoliday = (machine: any, day: number): boolean => {
+    const isHoliday = (machine: Pick<MachineReport, "holidays">, day: number): boolean => {
         const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
         return machine.holidays?.includes(dateKey) || false;
     };
 
-    const renderCell = (val: any, isPercent: boolean = false, showZero: boolean = false) => {
+    const renderCell = (val: CellValue, isPercent: boolean = false, showZero: boolean = false) => {
         if (val === undefined || val === null) return "\u00A0";
         if (val === "-") return "-";
         if (val === 0 && !showZero) return "\u00A0";
@@ -757,7 +753,7 @@ function MachineReportPage() {
                                     return (
                                         <React.Fragment key={`group-${group.type}-${gIdx}`}>
                                             {/* Machines in Group */}
-                                            {group.machines.map((machine: any, mIdx: number) => {
+                                            {group.machines.map((machine) => {
                                                 const { machine_name, model_info, daily_data } = machine;
                                                 return rows.map((row, rIdx) => {
                                                     const isLastRow = rIdx === rows.length - 1;
@@ -804,7 +800,7 @@ function MachineReportPage() {
                                                                 } else if (hideOeeFields) {
                                                                     cellContent = "-";
                                                                 } else if (holiday) {
-                                                                    if (row.key === "output_actual" && val && val > 0) {
+                                                                    if (row.key === "output_actual" && Number(val || 0) > 0) {
                                                                         cellContent = renderCell(val, row.isPercent);
                                                                     } else {
                                                                         cellContent = "-";

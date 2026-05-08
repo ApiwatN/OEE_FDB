@@ -5,6 +5,7 @@
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const { SHIFT_HOURS, utcHourToThColumn, getShiftDateUTC, getShiftIndex } = require("../utils/timeUtils");
+const { groupActualRowsByMachineAndDate, sumActualByHour } = require("./actualOutputService");
 
 // ==================== Cache Storage ====================
 
@@ -316,32 +317,16 @@ async function hydrateFromMSSQL() {
             targetCache[mn].target = row; // Store the whole row (contains target_07, target_08...)
         }
 
-        // Fill cache from MSSQL data using per-hour fallback:
-        // Pass 1: bucket all rows into { real: sum, dash: value } per machine per hour
-        // Pass 2: for each hour, use real model sum if > 0, else fallback to "--" value
-        const machineHourBucket = {}; // { mn: { h: { real: 0, dash: 0 } } }
-        for (const row of outputs) {
-            const mn = row.machine_name;
-            const isDash = row.model_name === "--";
-            if (!machineHourBucket[mn]) machineHourBucket[mn] = {};
-            for (const h of SHIFT_HOURS) {
-                const val = row[`actual_${h}`];
-                if (val != null && val > 0) {
-                    if (!machineHourBucket[mn][h]) machineHourBucket[mn][h] = { real: 0, dash: 0 };
-                    if (isDash) {
-                        machineHourBucket[mn][h].dash += val;
-                    } else {
-                        machineHourBucket[mn][h].real += val;
-                    }
-                }
-            }
-        }
-        // Apply per-hour fallback to cache
-        for (const [mn, hourBuckets] of Object.entries(machineHourBucket)) {
+        const actualRowsByMachineDate = groupActualRowsByMachineAndDate(
+            outputs,
+            (date) => date.toISOString().split("T")[0]
+        );
+        for (const [mn, rowsByDate] of Object.entries(actualRowsByMachineDate)) {
+            const rows = rowsByDate[dateStr] || [];
+            const actualByHour = sumActualByHour(rows, SHIFT_HOURS);
             initMachineCache(mn, dateStr);
-            for (const [h, bucket] of Object.entries(hourBuckets)) {
-                // If real model produced output this hour → use real; else fallback to "--"
-                const val = bucket.real > 0 ? bucket.real : bucket.dash;
+            for (const h of SHIFT_HOURS) {
+                const val = actualByHour[`actual_${h}`] || 0;
                 if (val > 0) {
                     machineCache[mn].output[`actual_${h}`] = val;
                 }

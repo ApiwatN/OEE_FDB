@@ -4,7 +4,14 @@ const dayjs = require("dayjs");
 const fs = require("fs");
 const path = require("path");
 
-const { getNgMode, getAvailabilityTargetConfig } = require("../services/oeeCalcService");
+const {
+    getNgMode,
+    getAvailabilityTargetConfig,
+    sumHourlyFields,
+    calcRejectSummary,
+    calcOeeValue,
+} = require("../services/oeeCalcService");
+const { groupActualRowsByMachineAndDate, sumActualTotal } = require("../services/actualOutputService");
 
 // ✅ Same shift-hour order used by cronService & OeeDashboardController
 const SHIFT_HOURS = [
@@ -71,6 +78,10 @@ module.exports = {
                 prisma.tb_availability_actual.findMany({ where: whereClause }),
             ]);
             const modeMap = new Map(configs.map(c => [c.machine_name, c.oee_mode || "manual"]));
+            const actualRowsByMachineDate = groupActualRowsByMachineAndDate(
+                actuals,
+                (date) => dayjs(date).format("YYYY-MM-DD")
+            );
 
             // 3. Aggregate Data
             const reportData = machines.map((machine) => {
@@ -113,12 +124,7 @@ module.exports = {
                     if (!dailyData[key]) dailyData[key] = {};
 
                     // Sum hourly targets (07:00 - 06:00)
-                    const totalTarget = [
-                        t.target_07, t.target_08, t.target_09, t.target_10, t.target_11, t.target_12,
-                        t.target_13, t.target_14, t.target_15, t.target_16, t.target_17, t.target_18,
-                        t.target_19, t.target_20, t.target_21, t.target_22, t.target_23, t.target_00,
-                        t.target_01, t.target_02, t.target_03, t.target_04, t.target_05, t.target_06
-                    ].reduce((sum, val) => sum + (val || 0), 0);
+                    const totalTarget = sumHourlyFields(t, "target", SHIFT_HOURS);
 
                     dailyData[key].output_target = totalTarget;
                     dailyData[key].eff_target = typeof availConf === "number" ? availConf : (t.eff_target || 0);
@@ -129,34 +135,12 @@ module.exports = {
                 // 🔧 Fix Bug #1: สะสม rows ต่อ date ก่อน แล้วทำ per-hour fallback
                 // Rule: ถ้าชั่วโมงมี real model → SUM real only; ถ้ามีแค่ '--' → ใช้ '--' แทน
                 // วิธีนี้ป้องกัน double-count ในวันที่มีทั้ง real model row และ '--' row
-                const mActualRows = actuals.filter(a => a.machine_name === mName);
-
-                // Group rows by date key
-                const actualRowsByDate = {};
-                mActualRows.forEach(a => {
-                    const key = getDateKey(a.date);
-                    if (!actualRowsByDate[key]) actualRowsByDate[key] = [];
-                    actualRowsByDate[key].push(a);
-                });
-
                 // Apply per-hour fallback per date
+                const actualRowsByDate = actualRowsByMachineDate[mName] || {};
                 Object.keys(actualRowsByDate).forEach(key => {
                     if (!dailyData[key]) dailyData[key] = {};
                     const rows = actualRowsByDate[key];
-                    let totalActual = 0;
-
-                    for (const h of SHIFT_HOURS) {
-                        // Real model rows that have output in this hour
-                        const realForHour = rows.filter(r => r.model_name !== "--" && (r[`actual_${h}`] || 0) > 0);
-                        if (realForHour.length > 0) {
-                            // Real model exists → SUM real only (ignore '--')
-                            totalActual += realForHour.reduce((acc, r) => acc + (r[`actual_${h}`] || 0), 0);
-                        } else {
-                            // No real model → use '--' as fallback
-                            const dashRow = rows.find(r => r.model_name === "--");
-                            totalActual += dashRow ? (dashRow[`actual_${h}`] || 0) : 0;
-                        }
-                    }
+                    const totalActual = sumActualTotal(rows, SHIFT_HOURS);
 
                     dailyData[key].machine_output_actual = totalActual;
                     dailyData[key].output_actual = totalActual;
@@ -167,12 +151,7 @@ module.exports = {
                 if (ngMode === "over_reject") {
                     ngs.filter(ng => ng.machine_name === mName && ng.station_id === 0).forEach(ng => {
                         const key = getDateKey(ng.date);
-                        const totalNg = [
-                            ng.ng_07, ng.ng_08, ng.ng_09, ng.ng_10, ng.ng_11, ng.ng_12,
-                            ng.ng_13, ng.ng_14, ng.ng_15, ng.ng_16, ng.ng_17, ng.ng_18,
-                            ng.ng_19, ng.ng_20, ng.ng_21, ng.ng_22, ng.ng_23, ng.ng_00,
-                            ng.ng_01, ng.ng_02, ng.ng_03, ng.ng_04, ng.ng_05, ng.ng_06
-                        ].reduce((sum, val) => sum + (val || 0), 0);
+                        const totalNg = sumHourlyFields(ng, "ng", SHIFT_HOURS);
                         
                         if (!dailyNgTotals[key]) dailyNgTotals[key] = 0;
                         dailyNgTotals[key] += totalNg;
@@ -229,16 +208,23 @@ module.exports = {
                 // --- Calculate Over_Reject & Override Totals ---
                 Object.keys(dailyData).forEach(key => {
                     if (ngMode === "over_reject") {
-                        const overReject = dailyNgTotals[key] || 0;
+                        const { rejectQty: overReject, totalOutput } = calcRejectSummary(
+                            dailyData[key].machine_output_actual || 0,
+                            dailyNgTotals[key] || 0
+                        );
                         dailyData[key].over_reject_qty = overReject;
                         dailyData[key].ng_qty = 0; // Force NG Qty to 0
                         const machineOut = dailyData[key].machine_output_actual || 0;
-                        dailyData[key].output_actual = Math.max(0, machineOut - overReject);
+                        dailyData[key].output_actual = totalOutput;
                         
                         // Force Quality to 100 if there's output
                         if (machineOut > 0) {
                             dailyData[key].quality = 100;
-                            dailyData[key].oee = ((dailyData[key].availability || 0) * (dailyData[key].performance || 0) * 100) / 10000;
+                            dailyData[key].oee = calcOeeValue(
+                                dailyData[key].availability || 0,
+                                dailyData[key].performance || 0,
+                                100
+                            );
                         } else {
                             dailyData[key].quality = 0;
                             dailyData[key].oee = 0;

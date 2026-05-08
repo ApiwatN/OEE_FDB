@@ -4,7 +4,7 @@ const dayjs = require("dayjs");
 const fs = require("fs");
 const path = require("path");
 
-const { getNgMode } = require("../services/oeeCalcService");
+const { getNgMode, sumHourlyFields, calcRejectSummary } = require("../services/oeeCalcService");
 
 module.exports = {
     getMachineNgReport: async (req, res) => {
@@ -138,12 +138,7 @@ module.exports = {
                     const key = getDateKey(ng.date);
                     if (!dailyData[key]) return;
 
-                    const totalStationNg = [
-                        ng.ng_07, ng.ng_08, ng.ng_09, ng.ng_10, ng.ng_11, ng.ng_12,
-                        ng.ng_13, ng.ng_14, ng.ng_15, ng.ng_16, ng.ng_17, ng.ng_18,
-                        ng.ng_19, ng.ng_20, ng.ng_21, ng.ng_22, ng.ng_23, ng.ng_00,
-                        ng.ng_01, ng.ng_02, ng.ng_03, ng.ng_04, ng.ng_05, ng.ng_06
-                    ].reduce((sum, val) => sum + (val || 0), 0);
+                    const totalStationNg = sumHourlyFields(ng, "ng");
 
                     if (ng.station_id === 0) {
                         // ✅ This is the special record holding "True NG Parts"
@@ -173,13 +168,10 @@ module.exports = {
                         const d = dailyData[key];
                         if (!d.has_production) continue;
                         const machineOut = d.Machine_Output !== "-" ? Number(d.Machine_Output) : 0;
-                        const overReject = d.All || 0;
-                        const totalOut = Math.max(0, machineOut - overReject);
+                        const { rejectQty: overReject, totalOutput: totalOut, rejectPercent } = calcRejectSummary(machineOut, d.All || 0);
                         d.Over_Reject = overReject;
                         d.Total_Output = totalOut;
-                        d.Over_Reject_Percent = machineOut > 0
-                            ? parseFloat(((overReject / machineOut) * 100).toFixed(2))
-                            : 0;
+                        d.Over_Reject_Percent = rejectPercent;
                         // Visual_NG is not applicable for ABR — leave as null
                         d.Visual_NG = null;
                     }
@@ -202,11 +194,7 @@ module.exports = {
                                     dailyData[key].Over_Reject = overReject;
 
                                     const totalOutput = dailyData[key].Total_Output !== "-" ? dailyData[key].Total_Output : 0;
-                                    if (totalOutput > 0) {
-                                        dailyData[key].Over_Reject_Percent = parseFloat(((overReject / totalOutput) * 100).toFixed(2));
-                                    } else {
-                                        dailyData[key].Over_Reject_Percent = 0;
-                                    }
+                                    dailyData[key].Over_Reject_Percent = calcRejectSummary(totalOutput, overReject).rejectPercent;
                                     // Machine_Output = Total_Output for visual_ng mode
                                     dailyData[key].Machine_Output = dailyData[key].Total_Output;
                                 }

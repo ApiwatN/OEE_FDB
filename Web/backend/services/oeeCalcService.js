@@ -23,7 +23,31 @@ const path = require('path');
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const { SHIFT_HOURS } = require("../utils/timeUtils");
+const { sumActualByHour } = require("./actualOutputService");
 let machineCalcConfig = null;
+
+function roundMetric(value, digits = 2) {
+    return parseFloat((Number(value) || 0).toFixed(digits));
+}
+
+function sumHourlyFields(row, prefix, hours = SHIFT_HOURS) {
+    if (!row) return 0;
+    return hours.reduce((sum, h) => sum + (row[`${prefix}_${h}`] || 0), 0);
+}
+
+function sumHourlyRows(rows, prefix, hours = SHIFT_HOURS) {
+    return (rows || []).reduce((sum, row) => sum + sumHourlyFields(row, prefix, hours), 0);
+}
+
+function calcRejectSummary(machineOutput, rejectQty) {
+    const output = Number(machineOutput) || 0;
+    const reject = Number(rejectQty) || 0;
+    return {
+        rejectQty: reject,
+        totalOutput: Math.max(0, output - reject),
+        rejectPercent: output > 0 ? roundMetric((reject / output) * 100) : 0,
+    };
+}
 
 function getMachineRunTimeMode(machineName) {
     if (!machineCalcConfig) {
@@ -186,7 +210,8 @@ function calcMcStatusDurationsPerHour(records, shiftStart, shiftHours = 24) {
 function calcAvailability(runTimeSeconds, excludedSeconds, totalSeconds) {
     const operatingTime = totalSeconds - excludedSeconds;
     if (operatingTime <= 0) return 0;
-    return (runTimeSeconds / operatingTime) * 100;
+    const a = (runTimeSeconds / operatingTime) * 100;
+    return Math.min(100, Math.max(0, a));
 }
 
 /**
@@ -200,7 +225,48 @@ function calcAvailability(runTimeSeconds, excludedSeconds, totalSeconds) {
  */
 function calcPerformance(totalOutput, idealCT, runTimeSeconds) {
     if (runTimeSeconds <= 0 || idealCT <= 0) return 0;
-    return (totalOutput * idealCT) / runTimeSeconds * 100;
+    const p = (totalOutput * idealCT) / runTimeSeconds * 100;
+    // Cap at 150% to prevent extreme metric spikes, but allow some breathing room above 100%
+    return Math.min(150, Math.max(0, p));
+}
+
+function calcVisualQuality(totalOutput, ngQty) {
+    const output = Number(totalOutput) || 0;
+    const ng = Number(ngQty) || 0;
+    if (output <= 0) return 0;
+    return Math.max(0, ((output - ng) / output) * 100);
+}
+
+function calcOeeValue(availability, performance, quality, fallbackValue = 0) {
+    if (availability > 0 && performance > 0 && quality > 0) {
+        return (availability / 100) * (performance / 100) * (quality / 100) * 100;
+    }
+    return fallbackValue || 0;
+}
+
+function calcManualNgMetrics(totalOutput, ngQty, availability, performance) {
+    const quality = calcVisualQuality(totalOutput, ngQty);
+    const oeeValue = calcOeeValue(availability, performance, quality);
+    return {
+        quality: roundMetric(quality),
+        oeeValue: roundMetric(oeeValue),
+    };
+}
+
+function calcAutoOeeMetrics({ totalOutput, ngQty, availability, idealCT, runTimeSeconds, ngMode, fallbackOeeValue = 0 }) {
+    const outputForOee = ngMode === "over_reject"
+        ? Math.max(0, (Number(totalOutput) || 0) - (Number(ngQty) || 0))
+        : (Number(totalOutput) || 0);
+    const performance = calcPerformance(outputForOee, idealCT, runTimeSeconds);
+    const quality = ngMode === "over_reject" ? 100 : calcVisualQuality(totalOutput, ngQty);
+    const oeeValue = calcOeeValue(availability, performance, quality, fallbackOeeValue);
+
+    return {
+        outputForOee,
+        performance: roundMetric(performance),
+        quality: roundMetric(quality),
+        oeeValue: roundMetric(oeeValue),
+    };
 }
 
 /**
@@ -251,16 +317,7 @@ async function recalculateAPQForDay(machineName, targetDate) {
         ]);
 
         // ✅ Pre-compute SUM per hour: per-hour fallback (Option B)
-        const outputSumPerHour = {};
-        for (const h of SHIFT_HOURS) {
-            const realRows = outputRows.filter(r => r.model_name !== "--" && (r[`actual_${h}`] || 0) > 0);
-            if (realRows.length > 0) {
-                outputSumPerHour[h] = realRows.reduce((acc, r) => acc + (r[`actual_${h}`] || 0), 0);
-            } else {
-                const dashRow = outputRows.find(r => r.model_name === "--");
-                outputSumPerHour[h] = dashRow ? (dashRow[`actual_${h}`] || 0) : 0;
-            }
-        }
+        const outputSumPerHour = sumActualByHour(outputRows, SHIFT_HOURS);
 
         let runTimeSeconds = 0;
         let excludedSeconds = 0;
@@ -272,7 +329,7 @@ async function recalculateAPQForDay(machineName, targetDate) {
             const isActive = !targetRow || (targetRow[`target_${h}`] > 0);
             
             if (isActive) {
-                totalOutput += (outputSumPerHour[h] || 0);
+                totalOutput += (outputSumPerHour[`actual_${h}`] || 0);
 
                 const hStart = new Date(shiftStart.getTime() + i * 3600000);
                 const hEnd = new Date(hStart.getTime() + 3600000);
@@ -290,7 +347,7 @@ async function recalculateAPQForDay(machineName, targetDate) {
             let totalOutputForCt = 0;
             for (let i = 0; i < SHIFT_HOURS.length; i++) {
                 const h = SHIFT_HOURS[i];
-                const out = outputSumPerHour[h] || 0;
+                const out = outputSumPerHour[`actual_${h}`] || 0;
                 const ct  = ctRow ? (ctRow[`cycle_${h}`] || 0) : 0;
                 if (out > 0 && ct > 0) {
                     sumCtWeighted += ct * out;
@@ -309,11 +366,8 @@ async function recalculateAPQForDay(machineName, targetDate) {
 
         const existingOee = await prisma.tb_oee.findFirst({ where: { machine_name: machineName, date: targetDate } });
         const finalNgQty = existingOee?.ng_qty || 0;
-        const quality = totalOutput > 0 ? ((totalOutput - finalNgQty) / totalOutput) * 100 : 0;
-
-        const oeeValue = (availability > 0 && performance > 0 && quality > 0)
-            ? (availability / 100) * (performance / 100) * (quality / 100) * 100
-            : 0;
+        const quality = calcVisualQuality(totalOutput, finalNgQty);
+        const oeeValue = calcOeeValue(availability, performance, quality);
 
         const dataToWrite = {
             availability: parseFloat(availability.toFixed(2)),
@@ -348,6 +402,14 @@ module.exports = {
     calcMcStatusDurationsPerHour,
     calcAvailability,
     calcPerformance,
+    calcVisualQuality,
+    calcOeeValue,
+    calcManualNgMetrics,
+    calcAutoOeeMetrics,
+    calcRejectSummary,
+    roundMetric,
+    sumHourlyFields,
+    sumHourlyRows,
     getMachineRunTimeMode,
     getCTCalcMode,
     getNgMode,

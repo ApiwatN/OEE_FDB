@@ -2,6 +2,7 @@ const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const cacheService = require("../services/cacheService");
 const influxService = require("../services/influxService");
+const { groupActualRowsByMachineAndDate, sumActualByHour } = require("../services/actualOutputService");
 const { getShiftDateUTC, SHIFT_HOURS, getCurrentHourBoundaries } = require("../utils/timeUtils");
 
 module.exports = {
@@ -417,12 +418,14 @@ module.exports = {
           }),
         ]);
 
-        for (const o of outputs) {
-          let totalOutput = 0;
-          for (const h of SHIFT_HOURS) {
-            totalOutput += (o[`actual_${h}`] || 0);
-          }
-          outputMap[o.machine_name] = (outputMap[o.machine_name] || 0) + totalOutput;
+        const rowsByMachineDate = groupActualRowsByMachineAndDate(
+          outputs,
+          (date) => date.toISOString().split("T")[0]
+        );
+        for (const [machineName, rowsByDate] of Object.entries(rowsByMachineDate)) {
+          const rows = rowsByDate[dateISO] || [];
+          const actualByHour = sumActualByHour(rows, SHIFT_HOURS);
+          outputMap[machineName] = SHIFT_HOURS.reduce((sum, h) => sum + (actualByHour[`actual_${h}`] || 0), 0);
         }
         for (const c of cycleTimes) { cycleMap[c.machine_name] = c.cycle_time; }
 
@@ -431,12 +434,17 @@ module.exports = {
         if (isToday) {
           try {
             const now = new Date();
-            const { start } = getCurrentHourBoundaries(now);
+            const { start, thColumn } = getCurrentHourBoundaries(now);
             const influxData = await influxService.queryAllMachinesForHour(start, now);
             for (const [mn, data] of Object.entries(influxData)) {
               const currentHourOutput = data.output_count || 0;
               if (currentHourOutput > 0) {
-                outputMap[mn] = (outputMap[mn] || 0) + currentHourOutput;
+                const rows = rowsByMachineDate[mn]?.[dateISO] || [];
+                const actualByHour = sumActualByHour(rows, SHIFT_HOURS);
+                const totalWithoutCurrentHour = SHIFT_HOURS
+                  .filter((h) => h !== thColumn)
+                  .reduce((sum, h) => sum + (actualByHour[`actual_${h}`] || 0), 0);
+                outputMap[mn] = totalWithoutCurrentHour + currentHourOutput;
               }
             }
           } catch (influxErr) {

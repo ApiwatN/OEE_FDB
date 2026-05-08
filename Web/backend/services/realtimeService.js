@@ -9,7 +9,14 @@ const prisma = new PrismaClient();
 const influxService = require("./influxService");
 const cacheService = require("./cacheService");
 const { getMachineStateMem } = require("./mqttService"); // 🆕 Use MQTT Memory
-const { getMachineRunTimeMode, calcMcStatusDurations, calcAvailability, calcPerformance, getTargetDeductMode } = require("./oeeCalcService");
+const {
+    getMachineRunTimeMode,
+    calcMcStatusDurations,
+    calcAvailability,
+    calcPerformance,
+    calcAutoOeeMetrics,
+    getTargetDeductMode,
+} = require("./oeeCalcService");
 const {
     SHIFT_HOURS,
     utcHourToThColumn,
@@ -147,7 +154,16 @@ async function fastPollAndEmit() {
         if (now.getTime() - autoNgCache.lastFetch > 10000) {
             autoNgCache.lastFetch = now.getTime();
             influxService.queryAllMachinesNgCount(start, now) // start = currentHourStart
-                .then(data => { autoNgCache.data = data; })
+                .then(data => {
+                    // 🆕 Override raw InfluxDB count with True_NG from MQTT memory (which correctly filters unused stations)
+                    const mem = getMachineStateMem();
+                    for (const [machineName, state] of mem.entries()) {
+                        if (state && state.current_hour_station_ng && state.current_hour_station_ng['True_NG'] !== undefined) {
+                            data[machineName] = state.current_hour_station_ng['True_NG'];
+                        }
+                    }
+                    autoNgCache.data = data;
+                })
                 .catch(e => console.error("Fast poll NG sync failed:", e.message));
         }
 
@@ -271,7 +287,13 @@ async function fastPollAndEmit() {
                 }
             }
 
-            const overallAvgCt = totalOutputForCt > 0 ? sumCtWeighted / totalOutputForCt : 0;
+            const targetCtOverall = targets.cycle_time_target || 0;
+            // 🆕 Fallback priority: 1. Real-time calculated -> 2. DB's Overall Daily Avg -> 3. Target CT
+            // We prioritize the DB overall average over the single previous hour to match machine_report and layout_dashboard exactly.
+            const prevOverallCt = cached?.overall?.avgCycleTime || 0;
+            const overallAvgCt = totalOutputForCt > 0 
+                ? sumCtWeighted / totalOutputForCt 
+                : (prevOverallCt > 0 ? prevOverallCt : targetCtOverall);
 
             // Target & Achieve (from cache — no MSSQL)
             // Note: targetEntry and targets are already defined above for CT fallback
@@ -473,39 +495,27 @@ async function fastPollAndEmit() {
                     runTimeSeconds = totalOutput * avgToUse;
                 }
 
-                let outputForOee = totalOutput;
                 // 🆕 [Step 3d] NG total = RAM (past Cron-confirmed) + pending (bridge) + InfluxDB (current hour)
                 const pastNg = cacheService.getNgPastHours(machineName);
                 const pendingNg = autoNgCache.pendingPrevHour[machineName] || 0;
                 const currentHourNg = autoNgCache.data[machineName] || 0;
                 const ngQty = pastNg + pendingNg + currentHourNg;
 
-                if (mCacheConfig.ng_mode === "over_reject") {
-                    outputForOee = Math.max(0, totalOutput - ngQty);
-                }
-
-                let availability = calcAvailability(runTimeSeconds, excludedSeconds, totalSeconds);
-                let performance = calcPerformance(outputForOee, idealCT, runTimeSeconds);
-
-                let quality = outputForOee > 0 && mCacheConfig.ng_mode !== "over_reject"
-                    ? ((outputForOee - ngQty) / outputForOee) * 100
-                    : 100;
-
-                if (mCacheConfig.ng_mode === "over_reject") {
-                    quality = 100;
-                } else {
-                    if (quality < 0) quality = 0;
-                }
-
-                let oeeValue = (availability > 0 && performance > 0 && quality > 0)
-                    ? (availability / 100) * (performance / 100) * (quality / 100) * 100
-                    : 0;
+                const availability = calcAvailability(runTimeSeconds, excludedSeconds, totalSeconds);
+                const { performance, quality, oeeValue } = calcAutoOeeMetrics({
+                    totalOutput,
+                    ngQty,
+                    availability,
+                    idealCT,
+                    runTimeSeconds,
+                    ngMode: mCacheConfig.ng_mode,
+                });
 
                 const autoOeePayload = {
                     availability: parseFloat(availability.toFixed(2)),
-                    performance: parseFloat(performance.toFixed(2)),
-                    quality: parseFloat(quality.toFixed(2)),
-                    oee: parseFloat(oeeValue.toFixed(2)),
+                    performance,
+                    quality,
+                    oee: oeeValue,
                     over_reject_qty: mCacheConfig.ng_mode === "over_reject" ? ngQty : undefined,
                     ngQty: mCacheConfig.ng_mode === "over_reject" ? 0 : ngQty,
                     oeeMode: "auto"
@@ -758,10 +768,9 @@ async function _slowPollAndEmitInner() {
                 const currentHourNg = autoNgCache.data[machineName] || 0; // Fast Loop อัปเดตทุก 10s อยู่แล้ว
                 ngQty = pastNg + pendingNg + currentHourNg;
                 
-                let outputForOee = totalOutput;
                 if (mCacheConfig.ng_mode === "over_reject") {
                     // หักลบของเสียออกจากยอดเป้าหมายสำหรับ Performance
-                    outputForOee = Math.max(0, totalOutput - ngQty);
+                    const outputForOee = Math.max(0, totalOutput - ngQty);
                     performance = calcPerformance(outputForOee, idealCT, runTimeSeconds);
                     quality = 100; // ล็อคให้ Quality เป็น 100% เสมอ
                 } else {

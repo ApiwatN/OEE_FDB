@@ -77,6 +77,8 @@ const lastProcessedTime = {};
 let lastStatusRecoveredAt = 0;
 const STATUS_RECOVERED_DEBOUNCE_MS = 30 * 60 * 1000; // 30 min
 const LATE_DATA_MAX_HOURS = 6; // max backfill window (hours) — 12h is overkill for normal late-data scenarios
+// 🔒 Minimum date for all backfill functions — do NOT touch data before this date (manually repaired)
+const BACKFILL_MIN_DATE = new Date('2026-04-23T00:00:00.000Z');
 
 /**
  * Start all cron jobs
@@ -1063,6 +1065,12 @@ async function backfillStartup(days = 5) {
             const targetDate = new Date(dateStr);
             const isToday = (dateStr === todayStr);
 
+            // Guard: do not backfill data before minimum allowed date
+            if (targetDate < BACKFILL_MIN_DATE) {
+                console.log(`   ⏭️ [Backfill] Skip ${dateStr} (before BACKFILL_MIN_DATE)`);
+                continue;
+            }
+
             // ── Step 2: Load existing MSSQL rows for this date (3 queries total) ──
             const [dbOutputRows, dbCtRows, dbEffRows] = await Promise.all([
                 prisma.tb_output_actual.findMany({ where: { date: targetDate } }),
@@ -1453,11 +1461,17 @@ async function upsertOeeHourly() {
 
                     if (isActive) {
                         // Sum actual output
-                        totalOutput += (outputRow ? (outputRow[`actual_${h}`] || 0) : 0);
-                        
-                        // Add live influx data if this is the active current hour
-                        if (h === currentHourStr && currentData && currentData.output_count > 0) {
-                            totalOutput += currentData.output_count;
+                        // 🔧 Fix: current hour → prefer InfluxDB (live) INSTEAD OF MSSQL (not yet flushed)
+                        //         past hours → use MSSQL (already summarized by hourly cron)
+                        //         This prevents double-counting when both MSSQL and Influx have the same hour's data
+                        if (h === currentHourStr) {
+                            // Current active hour: use Influx live count OR fallback to MSSQL if Influx returns 0
+                            const influxCount = (currentData && currentData.output_count > 0) ? currentData.output_count : 0;
+                            const mssqlCount = outputRow ? (outputRow[`actual_${h}`] || 0) : 0;
+                            totalOutput += influxCount > 0 ? influxCount : mssqlCount;
+                        } else {
+                            // Past hours: use MSSQL summarized data
+                            totalOutput += (outputRow ? (outputRow[`actual_${h}`] || 0) : 0);
                         }
 
                         // Add runtime
@@ -1575,6 +1589,12 @@ async function backfillOeeStartup(days = 5) {
             const dateStr = shiftDate.toISOString().split("T")[0];
             const targetDate = new Date(dateStr);
 
+            // Guard: do not backfill OEE before minimum allowed date
+            if (targetDate < BACKFILL_MIN_DATE) {
+                console.log(`   ⏭️ [OEE Backfill] Skip ${dateStr} (before BACKFILL_MIN_DATE)`);
+                continue;
+            }
+
             // Shift boundaries
             const year = parseInt(dateStr.substring(0, 4));
             const month = parseInt(dateStr.substring(5, 7)) - 1;
@@ -1619,8 +1639,12 @@ async function backfillOeeStartup(days = 5) {
                 prisma.tb_output_target.findMany({ where: { date: targetDate } }),
                 prisma.tb_machine_ng.findMany({ where: { date: targetDate } })
             ]);
-            const outputMap = {};
-            for (const row of allOutputRows) outputMap[row.machine_name] = row;
+            // 🔧 Fix: group all rows per machine (multi-model) instead of overwriting with single row
+            const outputMap = {}; // { machineName: [rows] }
+            for (const row of allOutputRows) {
+                if (!outputMap[row.machine_name]) outputMap[row.machine_name] = [];
+                outputMap[row.machine_name].push(row);
+            }
             const targetMap = {};
             for (const row of allTargetRows) targetMap[row.machine_name] = row;
             const ngMap = {};
@@ -1637,7 +1661,7 @@ async function backfillOeeStartup(days = 5) {
             for (const machineName of machineNames) {
                 try {
                     const mcRecords = mcStatusByMachine[machineName] || [];
-                    const outputRow = outputMap[machineName];
+                    const outputRows = outputMap[machineName] || []; // 🔧 now an array of all model rows
                     const targetRow = targetMap[machineName];
 
                     let runTimeSeconds = 0;
@@ -1653,7 +1677,14 @@ async function backfillOeeStartup(days = 5) {
                         const isActive = !targetRow || (targetRow[`target_${h}`] > 0);
                         
                         if (isActive) {
-                            totalOutput += (outputRow ? (outputRow[`actual_${h}`] || 0) : 0);
+                            // 🔧 Fix: per-hour sum with multi-model fallback (same as oeeCalcService)
+                            const realForHour = outputRows.filter(r => r.model_name !== '--' && (r[`actual_${h}`] || 0) > 0);
+                            if (realForHour.length > 0) {
+                                totalOutput += realForHour.reduce((acc, r) => acc + (r[`actual_${h}`] || 0), 0);
+                            } else {
+                                const dashRow = outputRows.find(r => r.model_name === '--');
+                                totalOutput += dashRow ? (dashRow[`actual_${h}`] || 0) : 0;
+                            }
                             const hStart = new Date(shiftStart.getTime() + j * 3600000);
                             const hEnd = new Date(hStart.getTime() + 3600000);
                             const { runTimeSeconds: rTime, excludedSeconds: eTime } = calcMcStatusDurations(mcRecords, hStart, hEnd);
@@ -1978,6 +2009,13 @@ async function backfillNgStartup(days = 5) {
             shiftDate.setUTCDate(shiftDate.getUTCDate() - i);
             const dateStr = getShiftDateUTC(shiftDate);
 
+            // Guard: do not backfill NG before minimum allowed date
+            const ngTargetDate = new Date(dateStr);
+            if (ngTargetDate < BACKFILL_MIN_DATE) {
+                console.log(`   ⏭️ [NG Backfill] Skip ${dateStr} (before BACKFILL_MIN_DATE)`);
+                continue;
+            }
+
             const startOfShift = new Date(dateStr + "T00:00:00.000Z");
             let endOfShift;
 
@@ -2084,6 +2122,11 @@ async function backfillEventsStartup(days = 5) {
         const now = new Date();
         const start = new Date(now);
         start.setUTCDate(start.getUTCDate() - days);
+        // Guard: clamp start to minimum allowed backfill date
+        if (start < BACKFILL_MIN_DATE) {
+            console.log(`   ⏭️ [Events Backfill] Clamped start from ${start.toISOString()} to BACKFILL_MIN_DATE`);
+            start.setTime(BACKFILL_MIN_DATE.getTime());
+        }
         await syncEventsFromInfluxDb(start, now);
     } catch (err) {
         console.error("❌ Events startup backfill failed:", err.message);
@@ -2157,6 +2200,12 @@ async function backfillRuntimeAvailStartup(days = 3) {
         shiftDate.setUTCDate(shiftDate.getUTCDate() - i);
         const dateStr = shiftDate.toISOString().split("T")[0];
         const targetDate = new Date(dateStr);
+
+        // Guard: do not recalculate runtime/availability before minimum allowed date
+        if (targetDate < BACKFILL_MIN_DATE) {
+            console.log(`   ⏭️ [RuntimeAvail Backfill] Skip ${dateStr} (before BACKFILL_MIN_DATE)`);
+            continue;
+        }
 
         // ดึงรายชื่อเครื่องที่มีข้อมูลในวันนั้น
         const outputRows = await prisma.tb_output_actual.findMany({

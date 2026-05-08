@@ -180,7 +180,8 @@ const initializeMqtt = async (emitToRoomFn, broadcastFn) => {
                             // เพื่อให้ Stopwatch เริ่มนับวินาทีใหม่จาก status นี้ได้เลย
                             try {
                                 const memOeeService = require('./memoryOeeService');
-                                memOeeService.processStatusChange(machineName, statusStr, thaiDataTime);
+                                // 🆕 Pass dataTime (Pure UTC) to memoryOeeService
+                                memOeeService.processStatusChange(machineName, statusStr, dataTime);
                             } catch (memErr) {
                                 console.error(`[MQTT] memoryOeeService.processStatusChange error (${machineName}):`, memErr.message);
                             }

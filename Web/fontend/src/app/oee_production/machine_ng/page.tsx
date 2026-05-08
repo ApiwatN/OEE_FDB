@@ -1,14 +1,70 @@
 "use client";
-import React, { Suspense, useEffect, useState, useRef, useMemo } from "react";
-import { useSearchParams } from "next/navigation";
+import React, { Suspense, useCallback, useEffect, useState, useMemo } from "react";
 import axios from "axios";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc";
 dayjs.extend(utc);
 import * as XLSX from "xlsx-js-style";
-import { io as socketIO } from "socket.io-client";
+import { useDashboardSocket } from "@/app/hooks/useDashboardSocket";
 import config from "@/app/config";
 import LoadingSpinner from "@/app/components/LoadingSpinner";
+
+type CellValue = string | number | boolean | null | undefined;
+type StationValues = Record<string, number>;
+type NgDailyData = Record<string, CellValue | StationValues> & {
+    has_production?: boolean;
+    stations: StationValues;
+    Machine_Output?: CellValue;
+    Total_Output?: CellValue;
+    All?: CellValue;
+    Visual_NG?: CellValue;
+    Over_Reject?: CellValue;
+    Over_Reject_Percent?: CellValue;
+};
+type ModelInfo = {
+    model_type?: string;
+    model_name?: string;
+    process_name?: string;
+};
+type MachineNgReport = {
+    machine_name: string;
+    machine_type?: string;
+    oee_mode?: string;
+    ng_mode?: string;
+    model_info: ModelInfo;
+    dailyData: Record<string, NgDailyData>;
+    stations: string[];
+    holidays?: string[];
+};
+type MachineGroup = {
+    type: string;
+    machines: MachineNgReport[];
+    stations: string[];
+    summaryData: Record<string, NgDailyData>;
+    modelTypes: Set<string>;
+    modelNames: Set<string>;
+    processes: Set<string>;
+    allStations: Set<string>;
+    modelTypesArr?: string;
+    modelNamesArr?: string;
+    processesArr?: string;
+    ng_mode?: string;
+};
+type RealtimeDailyPayload = {
+    totalOutput?: number;
+    ngQty?: number;
+};
+type RealtimePayload = {
+    shiftDate?: string;
+    machines?: Record<string, { daily?: RealtimeDailyPayload }>;
+};
+type RowDefinition = {
+    label: string;
+    key: string;
+    isStation: boolean;
+    isPercent: boolean;
+    showZero: boolean;
+};
 
 export default function MachineNgPage() {
     return (
@@ -32,172 +88,121 @@ export default function MachineNgPage() {
 }
 
 function MachineNgReportPage() {
-    const searchParams = useSearchParams();
-
-    // ==========================
-    // 🔹 State & Filters
-    // ==========================
     const [areas, setAreas] = useState<string[]>([]);
     const [types, setTypes] = useState<string[]>([]);
-
-    // Default Month: Current Month
     const [selectedMonth, setSelectedMonth] = useState(dayjs().format("YYYY-MM"));
-
     const [selectedArea, setSelectedArea] = useState("all");
     const [selectedType, setSelectedType] = useState("all");
-
-    const [reportData, setReportData] = useState<any[]>([]);
+    const [reportData, setReportData] = useState<MachineNgReport[]>([]);
     const [loading, setLoading] = useState(false);
-    const [countdown, setCountdown] = useState(5 * 60); // 5 minutes in seconds
-    const [serverTimeStr, setServerTimeStr] = useState("");
-    const [socketConnected, setSocketConnected] = useState(false);
+    const [countdown, setCountdown] = useState(5 * 60);
 
-
-    // ==========================
-    // 🔸 Init
-    // ==========================
     useEffect(() => {
         const init = async () => {
             const fetchedAreas = await fetchAreas();
             if (!fetchedAreas || fetchedAreas.length === 0) return;
 
-            // Load Filters from LocalStorage
             const localArea = localStorage.getItem("report_filter_area");
-            const targetArea = localArea && localArea !== "all" && fetchedAreas.includes(localArea) 
-                             ? localArea : fetchedAreas[0];
+            const targetArea = localArea && localArea !== "all" && fetchedAreas.includes(localArea)
+                ? localArea
+                : fetchedAreas[0];
 
             setSelectedArea(targetArea);
 
             const fetchedTypes = await fetchTypes(targetArea);
             const localType = localStorage.getItem("report_filter_type");
-            const targetType = localType && localType !== "all" && fetchedTypes.includes(localType) 
-                             ? localType : (fetchedTypes.length > 0 ? fetchedTypes[0] : "all");
+            const targetType = localType && localType !== "all" && fetchedTypes.includes(localType)
+                ? localType
+                : (fetchedTypes.length > 0 ? fetchedTypes[0] : "all");
 
             setSelectedType(targetType);
-
-            // Fetch Report
-            await fetchReport(selectedMonth, targetArea, targetType);
+            await fetchReport(dayjs().format("YYYY-MM"), targetArea, targetType);
         };
         init();
     }, []);
 
-    // ==========================
-    // 🔸 Auto Refresh (every 5 minutes) with Countdown
-    // ==========================
     useEffect(() => {
-        const REFRESH_INTERVAL = 5 * 60; // 5 minutes in seconds
-        setCountdown(REFRESH_INTERVAL); // Reset countdown when filters change
+        const REFRESH_INTERVAL = 5 * 60;
+        setCountdown(REFRESH_INTERVAL);
 
-        // Countdown timer (every 1 second)
         const countdownId = setInterval(() => {
             setCountdown(prev => {
                 if (prev <= 1) {
-                    // Time to refresh — silent merge to avoid blink
-                    console.log("[Auto Refresh] Silent merge refresh...");
                     fetchReportSilent(selectedMonth, selectedArea, selectedType);
-                    return REFRESH_INTERVAL; // Reset countdown
+                    return REFRESH_INTERVAL;
                 }
                 return prev - 1;
             });
         }, 1000);
 
-        // Cleanup interval on unmount
         return () => clearInterval(countdownId);
     }, [selectedMonth, selectedArea, selectedType]);
 
-    // ==========================
-    // 🔸 Socket.IO Real-time (output, eff, ct, availability, performance)
-    // ==========================
-    useEffect(() => {
-        const socket = socketIO(config.apiServer, { transports: ["websocket", "polling"] });
+    const handleRealtimeUpdate = useCallback((data: RealtimePayload) => {
+        const isCurrentMonth = dayjs(selectedMonth).format("YYYY-MM") === dayjs().format("YYYY-MM");
+        if (!isCurrentMonth) return;
 
-        socket.on("connect", () => {
-            setSocketConnected(true);
-            // 🏠 Join dashboard room (ดูทุกเครื่อง)
-            socket.emit("joinRoom", "dashboard");
-        });
-        socket.on("disconnect", () => setSocketConnected(false));
+        const shiftDate = data?.shiftDate;
+        const socketMachines = data?.machines;
+        if (!shiftDate || !socketMachines) return;
 
-        // Clock
-        socket.on("server_time", (isoStr: string) => {
-            const t = new Date(isoStr);
-            setServerTimeStr(t.toLocaleTimeString("en-GB", { hour12: false, timeZone: "Asia/Bangkok" }));
-        });
+        setReportData(prev => {
+            if (prev.length === 0) return prev;
+            return prev.map(machine => {
+                const socketData = socketMachines[machine.machine_name];
+                if (!socketData?.daily) return machine;
 
-        // Fast production update ทุก 2 วินาที — Output, Eff, CT
-        // We might not need this for NG report, but it's good to keep structure similar if we needed it
+                const isAuto = machine.oee_mode === "auto";
+                if (!isAuto) return machine;
 
-        // Slow status update ทุก 5 นาที — Availability, Performance, Quality, OEE
-        socket.on("realtime_update", (data: any) => {
-            const isCurrentMonth = dayjs(selectedMonth).format("YYYY-MM") === dayjs().format("YYYY-MM");
-            if (!isCurrentMonth) return;
+                const updatedDailyData = { ...machine.dailyData };
+                const existing = updatedDailyData[shiftDate] || { stations: {} };
+                const allQty = Number(existing.All || 0);
+                const machineOutput = socketData.daily.totalOutput ?? (existing.Machine_Output !== "-" ? Number(existing.Machine_Output || 0) : 0);
 
-            const shiftDate = data?.shiftDate;
-            const socketMachines = data?.machines;
-            if (!shiftDate || !socketMachines) return;
+                if (machine.ng_mode === "over_reject") {
+                    const overReject = allQty;
+                    const totalOutput = Math.max(0, machineOutput - overReject);
+                    const overRejectPercent = machineOutput > 0 ? parseFloat(((overReject / machineOutput) * 100).toFixed(2)) : 0;
+                    updatedDailyData[shiftDate] = {
+                        ...existing,
+                        has_production: existing.has_production ?? true,
+                        Machine_Output: machineOutput,
+                        Total_Output: totalOutput,
+                        Over_Reject: overReject,
+                        Over_Reject_Percent: overRejectPercent,
+                        Visual_NG: null,
+                    };
+                } else {
+                    const visualNg = socketData.daily.ngQty ?? 0;
+                    const overReject = Math.max(0, allQty - visualNg);
+                    const overRejectPercent = machineOutput > 0 ? parseFloat(((overReject / machineOutput) * 100).toFixed(2)) : 0;
+                    updatedDailyData[shiftDate] = {
+                        ...existing,
+                        has_production: existing.has_production ?? true,
+                        Machine_Output: machineOutput,
+                        Total_Output: machineOutput,
+                        Visual_NG: visualNg,
+                        Over_Reject: overReject,
+                        Over_Reject_Percent: overRejectPercent,
+                    };
+                }
 
-            setReportData(prev => {
-                if (prev.length === 0) return prev;
-                return prev.map(machine => {
-                    const socketData = socketMachines[machine.machine_name];
-                    if (!socketData?.daily) return machine;
-
-                    const isAuto = machine.oee_mode === "auto";
-                    if (!isAuto) return machine; // Only update Auto mode
-
-                    const updatedDailyData = { ...machine.dailyData };
-                    const existing = updatedDailyData[shiftDate] || {};
-
-                    const allQty = existing.All || 0;
-                    const machineOutput = socketData.daily.totalOutput ?? (existing.Machine_Output !== "-" ? existing.Machine_Output : 0);
-
-                    if (machine.ng_mode === "over_reject") {
-                        // ABR: NG = All station NG (Over Reject)
-                        const overReject = allQty;
-                        const totalOutput = Math.max(0, machineOutput - overReject);
-                        const overRejectPercent = machineOutput > 0 ? parseFloat(((overReject / machineOutput) * 100).toFixed(2)) : 0;
-                        updatedDailyData[shiftDate] = {
-                            ...existing,
-                            has_production: existing.has_production ?? true,
-                            Machine_Output: machineOutput,
-                            Total_Output: totalOutput,
-                            Over_Reject: overReject,
-                            Over_Reject_Percent: overRejectPercent,
-                            Visual_NG: null,
-                        };
-                    } else {
-                        // AHV / default: Visual NG mode
-                        const visualNg = socketData.daily.ngQty ?? 0;
-                        const overReject = Math.max(0, allQty - visualNg);
-                        const overRejectPercent = machineOutput > 0 ? parseFloat(((overReject / machineOutput) * 100).toFixed(2)) : 0;
-                        updatedDailyData[shiftDate] = {
-                            ...existing,
-                            has_production: existing.has_production ?? true,
-                            Machine_Output: machineOutput,
-                            Total_Output: machineOutput,
-                            Visual_NG: visualNg,
-                            Over_Reject: overReject,
-                            Over_Reject_Percent: overRejectPercent,
-                        };
-                    }
-
-                    return { ...machine, dailyData: updatedDailyData };
-                });
+                return { ...machine, dailyData: updatedDailyData };
             });
         });
-
-        return () => {
-            socket.off("server_time");
-            socket.off("realtime_update");
-            socket.disconnect();
-        };
     }, [selectedMonth]);
+
+    const dashboardEvents = useMemo(() => [
+        { event: "realtime_update", handler: handleRealtimeUpdate },
+    ], [handleRealtimeUpdate]);
+    const { socketConnected, serverTimeStr } = useDashboardSocket<RealtimePayload>({ events: dashboardEvents });
 
     // ==========================
     // 🔸 API Calls
     // ==========================
     const fetchAreas = async () => {
-        try { const res = await axios.get(`${config.apiServer}/api/machine/listArea`); const arr = res.data.results.map((r: any) => r.machine_area); setAreas(arr); return arr; } catch (e) { console.error(e); return []; }
+        try { const res = await axios.get<{ results: { machine_area: string }[] }>(`${config.apiServer}/api/machine/listArea`); const arr = res.data.results.map((r) => r.machine_area); setAreas(arr); return arr; } catch (e) { console.error(e); return []; }
     };
     const fetchTypes = async (area: string) => {
         try { if (area === "all" || !area) { setTypes([]); return []; } const res = await axios.get(`${config.apiServer}/api/machine/listType/${area}`); const arr = res.data.results; setTypes(arr); return arr; } catch (e) { console.error(e); return []; }
@@ -223,8 +228,8 @@ function MachineNgReportPage() {
             const res = await axios.get(`${config.apiServer}/api/report/machine-ng-report`, {
                 params: { month, area, type }
             });
-            const fresh: any[] = res.data.results || [];
-            const freshMap = new Map(fresh.map((m: any) => [m.machine_name, m]));
+            const fresh: MachineNgReport[] = res.data.results || [];
+            const freshMap = new Map(fresh.map((m) => [m.machine_name, m]));
             setReportData(prev => prev.map(machine => {
                 const updated = freshMap.get(machine.machine_name);
                 if (!updated) return machine;
@@ -265,7 +270,7 @@ function MachineNgReportPage() {
     // ==========================
     // 🔸 Data Grouping (By Machine Type)
     // ==========================
-    const isDayEmpty = (dailyData: Record<string, any>, day: number, month: string): boolean => {
+    const isDayEmpty = (dailyData: Record<string, NgDailyData>, day: number, month: string): boolean => {
         const dateKey = `${month}-${String(day).padStart(2, '0')}`;
         const data = dailyData[dateKey];
         if (!data) return true;
@@ -273,16 +278,18 @@ function MachineNgReportPage() {
     };
 
     const groupedReportData = useMemo(() => {
-        const groups: any[] = [];
-        const typeMap = new Map();
+        const groups: MachineGroup[] = [];
+        const typeMap = new Map<string, MachineGroup>();
 
         reportData.forEach(machine => {
             const type = machine.machine_type || "Unknown";
             if (!typeMap.has(type)) {
-                typeMap.set(type, { type, machines: [], modelTypes: new Set(), modelNames: new Set(), processes: new Set(), allStations: new Set() });
-                groups.push(typeMap.get(type));
+                const group: MachineGroup = { type, machines: [], stations: [], summaryData: {}, modelTypes: new Set(), modelNames: new Set(), processes: new Set(), allStations: new Set() };
+                typeMap.set(type, group);
+                groups.push(group);
             }
             const g = typeMap.get(type);
+            if (!g) return;
             g.machines.push(machine);
             if (machine.model_info?.model_type && machine.model_info.model_type !== "-") g.modelTypes.add(machine.model_info.model_type);
             
@@ -297,17 +304,17 @@ function MachineNgReportPage() {
             g.stations = Array.from(g.allStations);
             // Determine ng_mode from first machine in group (all same type)
             g.ng_mode = g.machines[0]?.ng_mode || "visual_ng";
-            const summaryData: any = {};
+            const summaryData: Record<string, NgDailyData> = {};
 
             for (let d = 1; d <= 31; d++) {
                 const dateKey = `${selectedMonth}-${String(d).padStart(2, '0')}`;
-                const dayData: any = { has_production: false, stations: {} };
+                const dayData: NgDailyData = { has_production: false, stations: {} };
 
                 let sumTotalOutput = 0, sumAll = 0, sumVisualNg = 0, sumOverReject = 0, sumMachineOutput = 0;
                 
                 g.stations.forEach((st: string) => dayData.stations[st] = 0);
 
-                g.machines.forEach((m: any) => {
+                g.machines.forEach((m) => {
                     const data = m.dailyData[dateKey];
                     if (!data) return;
                     
@@ -363,7 +370,7 @@ function MachineNgReportPage() {
         if (!reportData || reportData.length === 0) return;
 
         const wb = XLSX.utils.book_new();
-        const wsData: any[][] = [];
+        const wsData: unknown[][] = [];
         const merges: XLSX.Range[] = [];
 
         // 0. Summary Rows (4 rows) - Topic in Col 1, Value in Col 2
@@ -388,11 +395,11 @@ function MachineNgReportPage() {
 
         groupedReportData.forEach((group) => {
             // Render specific machines in group
-            group.machines.forEach((machine: any) => {
+            group.machines.forEach((machine) => {
                 const { machine_name, model_info, dailyData, stations } = machine;
                 
                 const mNgMode = machine.ng_mode || "visual_ng";
-                const rows: { label: string; key: string; isStation: boolean; isPercent: boolean, showZero: boolean }[] = [];
+                const rows: RowDefinition[] = [];
                 stations.forEach((st: string) => rows.push({ label: st, key: st, isStation: true, isPercent: false, showZero: false }));
                 if (mNgMode === "over_reject") {
                     rows.push({ label: "Machine Output", key: "Machine_Output", isStation: false, isPercent: false, showZero: true });
@@ -416,7 +423,7 @@ function MachineNgReportPage() {
                 }
 
                 rows.forEach((r) => {
-                    const rowData: any[] = [
+                    const rowData: unknown[] = [
                         machine_name,
                         model_info?.model_type || "-",
                         model_info?.model_name || "-",
@@ -439,7 +446,7 @@ function MachineNgReportPage() {
                         const isFuture = dayjs(dateKey).isAfter(dayjs(), 'day');
                         const hasProduction = dData && dData.has_production;
 
-                        let cellVal: any = "";
+                        let cellVal: CellValue = "";
                         
                         if (isFuture || !hasProduction) {
                              cellVal = "";
@@ -462,7 +469,7 @@ function MachineNgReportPage() {
             });
 
             // Render Group Summary Row
-            const rows: { label: string; key: string; isStation: boolean; isPercent: boolean, showZero: boolean }[] = [];
+            const rows: RowDefinition[] = [];
             group.stations.forEach((st: string) => rows.push({ label: st, key: st, isStation: true, isPercent: false, showZero: false }));
             if (group.ng_mode === "over_reject") {
                 rows.push({ label: "Machine Output", key: "Machine_Output", isStation: false, isPercent: false, showZero: true });
@@ -485,7 +492,7 @@ function MachineNgReportPage() {
             }
 
             rows.forEach((r) => {
-                const rowData: any[] = [
+                const rowData: unknown[] = [
                     `${group.type}-ALL`,
                     group.modelTypesArr,
                     group.modelNamesArr,
@@ -506,7 +513,7 @@ function MachineNgReportPage() {
                     const isFuture = dayjs(dateKey).isAfter(dayjs(), 'day');
                     const hasProduction = dData && dData.has_production;
 
-                    let cellVal: any = "";
+                    let cellVal: CellValue = "";
                     if (isFuture || !hasProduction) {
                          cellVal = "";
                     } else if (val === "-") {
@@ -622,7 +629,7 @@ function MachineNgReportPage() {
     // ==========================
     // 🔸 Row Total Calculator
     // ==========================
-    const getRowTotal = (dailyData: any, key: string, isStation: boolean, ngMode: string = "visual_ng") => {
+    const getRowTotal = (dailyData: Record<string, NgDailyData>, key: string, isStation: boolean, ngMode: string = "visual_ng") => {
         let sumOutput = 0;
         let sumReject = 0;
         let sum = 0;
@@ -640,7 +647,7 @@ function MachineNgReportPage() {
             const overReject = data["Over_Reject"];
             if (overReject && !isNaN(Number(overReject))) sumReject += Number(overReject);
 
-            let val = isStation ? (data.stations ? data.stations[key] : undefined) : data[key];
+            const val = isStation ? (data.stations ? data.stations[key] : undefined) : data[key];
             if (val !== undefined && val !== null && val !== "" && val !== "-") {
                 const num = Number(val);
                 if (!isNaN(num)) sum += num;
@@ -671,12 +678,12 @@ function MachineNgReportPage() {
     };
 
     // Helper: Check if a specific day is a holiday for a machine
-    const isHoliday = (machine: any, day: number): boolean => {
+    const isHoliday = (machine: Pick<MachineNgReport, "holidays">, day: number): boolean => {
         const dateKey = `${selectedMonth}-${String(day).padStart(2, '0')}`;
         return machine.holidays?.includes(dateKey) || false;
     };
 
-    const renderCell = (val: any, isPercent: boolean = false, showZero: boolean = false) => {
+    const renderCell = (val: CellValue, isPercent: boolean = false, showZero: boolean = false) => {
         if (val === undefined || val === null) return "\u00A0";
         if (typeof val === "string" && val === "-") return "-"; // Handle manual visual ng case
         if (val === 0 && !showZero) return "\u00A0";
@@ -776,7 +783,7 @@ function MachineNgReportPage() {
                                     return (
                                         <React.Fragment key={`group-${group.type}-${gIdx}`}>
                                             {/* Machines in Group */}
-                                            {group.machines.map((machine: any, mIdx: number) => {
+                                            {group.machines.map((machine) => {
                                                 const { machine_name, model_info, dailyData, stations } = machine;
                                                 const machineNgMode = machine.ng_mode || "visual_ng";
                                                 const mRows: { label: string; key: string; isStation: boolean; isPercent: boolean, showZero: boolean }[] = [];

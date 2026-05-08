@@ -2,6 +2,7 @@ const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const { queryNgCount, queryAllMachinesNgCount } = require("../services/influxService");
 const { getShiftDateUTC } = require("../utils/timeUtils");
+const { calcManualNgMetrics } = require("../services/oeeCalcService");
 
 module.exports = {
     /**
@@ -156,19 +157,15 @@ module.exports = {
             const availability = existing?.availability || 0;
             const performance = existing?.performance || 0;
 
-            // Calculate quality & OEE
-            const quality = totalOutput > 0 ? ((totalOutput - ngVal) / totalOutput) * 100 : 0;
-            const oeeValue = (availability > 0 && performance > 0 && quality > 0)
-                ? (availability / 100) * (performance / 100) * (quality / 100) * 100
-                : 0;
+            const { quality, oeeValue } = calcManualNgMetrics(totalOutput, ngVal, availability, performance);
 
             // Upsert
             await prisma.tb_oee.upsert({
                 where: { machine_name_date: { machine_name, date: targetDate } },
                 update: {
                     ng_qty: ngVal,
-                    quality: parseFloat(quality.toFixed(2)),
-                    oee_value: parseFloat(oeeValue.toFixed(2)),
+                    quality,
+                    oee_value: oeeValue,
                 },
                 create: {
                     machine_name,
@@ -176,8 +173,8 @@ module.exports = {
                     availability,
                     performance,
                     ng_qty: ngVal,
-                    quality: parseFloat(quality.toFixed(2)),
-                    oee_value: parseFloat(oeeValue.toFixed(2)),
+                    quality,
+                    oee_value: oeeValue,
                 },
             });
 
@@ -200,10 +197,10 @@ module.exports = {
                     date: date,
                     total_output: totalOutput,
                     ng_qty: ngVal,
-                    quality: parseFloat(quality.toFixed(2)),
+                    quality,
                     availability,
                     performance,
-                    oee_value: parseFloat(oeeValue.toFixed(2)),
+                    oee_value: oeeValue,
                 },
             });
         } catch (err) {
@@ -247,32 +244,29 @@ module.exports = {
                     const availability = existing?.availability || 0;
                     const performance = existing?.performance || 0;
 
-                    const quality = totalOutput > 0 ? ((totalOutput - ngVal) / totalOutput) * 100 : 0;
-                    const oeeValue = (availability > 0 && performance > 0 && quality > 0)
-                        ? (availability / 100) * (performance / 100) * (quality / 100) * 100
-                        : 0;
+                    const { quality, oeeValue } = calcManualNgMetrics(totalOutput, ngVal, availability, performance);
 
                     await prisma.tb_oee.upsert({
                         where: { machine_name_date: { machine_name, date: targetDate } },
                         update: {
                             ng_qty: ngVal,
-                            quality: parseFloat(quality.toFixed(2)),
-                            oee_value: parseFloat(oeeValue.toFixed(2)),
+                            quality,
+                            oee_value: oeeValue,
                         },
                         create: {
                             machine_name, date: targetDate,
                             availability, performance,
                             ng_qty: ngVal,
-                            quality: parseFloat(quality.toFixed(2)),
-                            oee_value: parseFloat(oeeValue.toFixed(2)),
+                            quality,
+                            oee_value: oeeValue,
                         },
                     });
 
                     results.push({
                         date, total_output: totalOutput, ng_qty: ngVal,
-                        quality: parseFloat(quality.toFixed(2)),
+                        quality,
                         availability, performance,
-                        oee_value: parseFloat(oeeValue.toFixed(2)),
+                        oee_value: oeeValue,
                     });
                 } catch (itemErr) {
                     console.error(`Batch NG error for date ${item.date}:`, itemErr.message);
@@ -408,32 +402,29 @@ module.exports = {
                     const availability = existing?.availability || 0;
                     const performance = existing?.performance || 0;
 
-                    const quality = totalOutput > 0 ? ((totalOutput - ngVal) / totalOutput) * 100 : 0;
-                    const oeeValue = (availability > 0 && performance > 0 && quality > 0)
-                        ? (availability / 100) * (performance / 100) * (quality / 100) * 100
-                        : 0;
+                    const { quality, oeeValue } = calcManualNgMetrics(totalOutput, ngVal, availability, performance);
 
                     await prisma.tb_oee.upsert({
                         where: { machine_name_date: { machine_name, date: targetDate } },
                         update: {
                             ng_qty: ngVal,
-                            quality: parseFloat(quality.toFixed(2)),
-                            oee_value: parseFloat(oeeValue.toFixed(2)),
+                            quality,
+                            oee_value: oeeValue,
                         },
                         create: {
                             machine_name, date: targetDate,
                             availability, performance,
                             ng_qty: ngVal,
-                            quality: parseFloat(quality.toFixed(2)),
-                            oee_value: parseFloat(oeeValue.toFixed(2)),
+                            quality,
+                            oee_value: oeeValue,
                         },
                     });
 
                     results.push({
                         machine_name, total_output: totalOutput, ng_qty: ngVal,
-                        quality: parseFloat(quality.toFixed(2)),
+                        quality,
                         availability, performance,
-                        oee_value: parseFloat(oeeValue.toFixed(2)),
+                        oee_value: oeeValue,
                     });
                 } catch (itemErr) {
                     console.error(`Multi-machine NG error for ${item.machine_name}:`, itemErr.message);

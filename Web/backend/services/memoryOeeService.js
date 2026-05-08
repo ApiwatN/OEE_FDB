@@ -54,7 +54,7 @@ function createBlankState() {
  *
  * @param {string} machine     - ชื่อเครื่อง
  * @param {string} newStatus   - สถานะใหม่ เช่น "Run_Time", "Plan_Stop"
- * @param {Date}   datetime    - เวลาที่สถานะเปลี่ยน (Thai Local Time)
+ * @param {Date}   datetime    - เวลาที่สถานะเปลี่ยน (Pure UTC)
  */
 function processStatusChange(machine, newStatus, datetime) {
     try {
@@ -64,8 +64,17 @@ function processStatusChange(machine, newStatus, datetime) {
         // ตรวจ shift rollover (ถ้าวันใหม่มาถึงให้ reset)
         const eventShiftDate = getShiftDateFromThai(eventTime);
         if (state.shiftDate && state.shiftDate !== eventShiftDate) {
-            // Shift ใหม่ → reset ถังทั้งหมด
+            // 1. จำสถานะข้ามวัน (Carry-over status)
+            const carryOverStatus = state.lastStatus;
+            
+            // 2. รีเซ็ตถังข้อมูลทั้งหมด
             _resetState(state, eventShiftDate);
+            
+            // 3. นำสถานะข้ามวันกลับมาใส่ โดยให้เริ่มนับที่เวลา 00:00 UTC ของกะใหม่
+            if (carryOverStatus) {
+                state.lastStatus = carryOverStatus;
+                state.lastStatusTime = getShiftStartFromDate(eventShiftDate);
+            }
         }
         if (!state.shiftDate) {
             state.shiftDate = eventShiftDate;
@@ -92,7 +101,7 @@ function processStatusChange(machine, newStatus, datetime) {
  * ไม่ทำลาย state — แค่เอาวินาทีที่ยังกำลังเดินอยู่มาคำนวณรวม "เสมือน"
  *
  * @param {string} machine
- * @param {Date}   now      - เวลา Thai Local Time ปัจจุบัน
+ * @param {Date}   now      - เวลา Pure UTC ปัจจุบัน
  * @returns {{ runTimeSec: number, excludedSec: number, totalSec: number }}
  */
 function getDurationsNow(machine, now) {
@@ -102,15 +111,14 @@ function getDurationsNow(machine, now) {
     }
 
     const nowTime = now instanceof Date ? now : new Date(now);
-    // แปลง nowTime (UTC) เป็นหน้าตาของเวลา Local Thai (+7) เพื่อเปรียบเทียบกับ lastStatusTime ที่มาจาก MSSQL (ซึ่งเก็บเป็น Thai Time ฝัง UTC)
-    const nowThai = new Date(nowTime.getTime() + 7 * 60 * 60 * 1000);
 
     // คำนวณ segment ที่ยังเดินอยู่โดยไม่แตะ state
     let virtualRunSec = state.runTimeSec;
     let virtualExcludedSec = state.excludedSec;
 
     if (state.lastStatusTime !== null) {
-        const tickingSec = Math.max(0, (nowThai - state.lastStatusTime) / 1000);
+        // 🆕 ใช้ nowTime (Pure UTC) ลบกับ lastStatusTime (Pure UTC) โดยตรง (Zero Deficit)
+        const tickingSec = Math.max(0, (nowTime - state.lastStatusTime) / 1000);
         if (state.lastStatus === RUNNING_STATUS) {
             virtualRunSec += tickingSec;
         } else if (isExcludedStatus(state.lastStatus)) {
@@ -118,9 +126,9 @@ function getDurationsNow(machine, now) {
         }
     }
 
-    // totalSec = เวลาตั้งแต่เริ่ม shift (07:00 Thai)
-    const shiftStartThai = getShiftStartFromDate(state.shiftDate);
-    const totalSec = Math.max(0, (nowThai - shiftStartThai) / 1000);
+    // totalSec = เวลาตั้งแต่เริ่ม shift (Pure UTC 00:00:00Z)
+    const shiftStartUtc = getShiftStartFromDate(state.shiftDate);
+    const totalSec = Math.max(0, (nowTime - shiftStartUtc) / 1000);
 
     return {
         runTimeSec: virtualRunSec,
@@ -230,7 +238,8 @@ async function hydrateFromMssql(shiftDate) {
                 } else {
                     // segment สุดท้าย: เก็บไว้เป็น "กำลังเดินอยู่" (lastStatus/lastStatusTime)
                     state.lastStatus = rec.MCStatus;
-                    state.lastStatusTime = segStart;
+                    // 🆕 Convert Fake UTC (from Prisma's Local Time) back to Pure UTC by subtracting 7 hours
+                    state.lastStatusTime = new Date(segStart.getTime() - 7 * 60 * 60 * 1000);
                 }
             }
 
@@ -304,17 +313,15 @@ function getShiftDateFromThai(thaiDate) {
 }
 
 /**
- * สร้าง shift start time (07:00 Thai Local) จาก shiftDate string
+ * สร้าง shift start time (00:00 UTC = 07:00 Thai Local) จาก shiftDate string
  * @param {string} shiftDate - "YYYY-MM-DD"
  * @returns {Date}
  */
 function getShiftStartFromDate(shiftDate) {
     if (!shiftDate) return new Date(0);
     const [year, month, day] = shiftDate.split('-').map(Number);
-    // nowThai ใน getDurationsNow() ถูก represent เป็น "Thai time ในร่าง UTC object"
-    // เช่น 09:43 TH → new Date("2026-04-20T09:43:00Z")
-    // ดังนั้น shift start 07:00 TH ต้องเป็น new Date("2026-04-20T07:00:00Z") ✅
-    return new Date(Date.UTC(year, month - 1, day, 7, 0, 0));
+    // Shift เริ่ม 07:00 Thai time -> 00:00 UTC
+    return new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
 }
 
 module.exports = {

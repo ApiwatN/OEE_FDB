@@ -37,6 +37,27 @@ Thumbs.db
 *.tmp
 *.temp
 
+# Local data workbooks
+Data.xlsx
+~$*.xlsx
+
+# Local backend diagnostic scripts
+Web/backend/check*.js
+Web/backend/fix_*.js
+Web/backend/patch_*.js
+Web/backend/scratch_*.js
+Web/backend/test_*.js
+Web/backend/scripts/check_*.js
+Web/backend/scripts/debug_*.js
+Web/backend/scripts/diag_*.js
+Web/backend/scripts/fix_*.js
+Web/backend/scripts/list_*.js
+Web/backend/scripts/query_*.js
+Web/backend/scripts/recalc_*.js
+Web/backend/scripts/scratch_*.js
+Web/backend/scripts/sync_*.js
+Web/backend/scripts/test_*.js
+
 # Large files and excluded directories
 GetData/ABR_Data/telegraf-1.33.0/telegraf.exe
 automated_test/

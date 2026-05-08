@@ -52,7 +52,6 @@
         "fixed_<number>": "Fix เป้าหมายเป็นตัวเลขตายตัว (เช่น ABR ไม่คำนึงถึง Eff ที่กรอก ให้ยึด 85 เป็นเป้าหมายตายตัวสำหรับกราฟ Availability)"
     },
     "availability_targets": {
-        "default": "eff_target",
-        "ABR": 100
+        "default": "eff_target"
     }
 }

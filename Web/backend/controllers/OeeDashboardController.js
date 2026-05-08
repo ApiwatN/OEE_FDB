@@ -5,6 +5,11 @@ const fs = require("fs");
 const sharp = require("sharp");
 const cacheService = require("../services/cacheService");
 const influxService = require("../services/influxService");
+const {
+    buildPseudoActualRow,
+    sumActualByHour,
+    applyCurrentHourInfluxOverride,
+} = require("../services/actualOutputService");
 const { getShiftDateUTC, getCurrentHourBoundaries, utcHourToThColumn } = require("../utils/timeUtils");
 const { calcAvailability, calcMcStatusDurations, getMachineRunTimeMode, getCTCalcMode, getTargetDeductMode, getAvailabilityTargetConfig } = require("../services/oeeCalcService");
 
@@ -162,12 +167,7 @@ module.exports = {
             let outputActualDBArray = [];
             const cachedData = isToday ? cacheService.getFullDay(machine_name) : null;
             if (cachedData) {
-                // Build a pseudo-DB row from cache
-                const outputActualDB = { machine_name, date: targetDate };
-                for (const h of SHIFT_HOURS) {
-                    outputActualDB[`actual_${h}`] = cachedData.output[`actual_${h}`] || 0;
-                }
-                outputActualDBArray = [outputActualDB];
+                outputActualDBArray = [buildPseudoActualRow(machine_name, targetDate, cachedData)];
             } else {
                 // Keep all rows (both real model and "--") — per-hour fallback applied in SUM loop below
                 outputActualDBArray = await prisma.tb_output_actual.findMany({
@@ -178,17 +178,11 @@ module.exports = {
             // ✅ Fix: current hour → InfluxDB เป็น source of truth (ต้องอยู่นอก else เพื่อให้ทำงานทั้งกรณี cache และ MSSQL)
             if (isToday) {
                 try {
-                    const now2 = new Date();
-                    const { start, thColumn } = getCurrentHourBoundaries(now2);
-                    const field = `actual_${thColumn}`;
-                    const influxData = await influxService.queryMachineForHour(machine_name, start, now2);
-                    if (influxData && influxData.output_count > 0) {
-                        if (outputActualDBArray.length === 0) {
-                             outputActualDBArray = [{ machine_name, date: targetDate }];
-                        }
-                        // Assume current hour overrides total in the first pseudo-row to maintain sums if cache is used
-                        outputActualDBArray[0][field] = influxData.output_count;
-                    }
+                    outputActualDBArray = await applyCurrentHourInfluxOverride(outputActualDBArray, {
+                        influxService,
+                        machineName: machine_name,
+                        date: targetDate,
+                    });
                 } catch (e) { /* non-critical — keep cache/MSSQL value */ }
             }
 
@@ -215,21 +209,14 @@ module.exports = {
             let outputTargetDayTotal = 0;     // Target ทั้งวัน
             let outputActualSum = 0;          // Actual รวม
             let validSeconds = 0;             // วินาทีทำงาน (เฉพาะที่มี Target)
+            const actualByHour = sumActualByHour(outputActualDBArray, SHIFT_HOURS);
 
             // Loop ตามชั่วโมงกะ (07 - 06)
             for (let i = 0; i < SHIFT_HOURS.length; i++) {
                 const hStr = SHIFT_HOURS[i];
                 const targetVal = outputTargetDB[`target_${hStr}`] || 0;
                 
-                let actualVal = 0;
-                // Per-hour fallback: real model wins; "--" used only if no real model produced output this hour
-                const realForHour = outputActualDBArray.filter(r => r.model_name !== "--" && (r[`actual_${hStr}`] || 0) > 0);
-                if (realForHour.length > 0) {
-                    actualVal = realForHour.reduce((acc, row) => acc + (row[`actual_${hStr}`] || 0), 0);
-                } else {
-                    const dashRow = outputActualDBArray.find(r => r.model_name === "--");
-                    actualVal = dashRow ? (dashRow[`actual_${hStr}`] || 0) : 0;
-                }
+                const actualVal = actualByHour[`actual_${hStr}`] || 0;
 
                 // 1. ผลรวม Actual ทั้งหมด
                 outputActualSum += actualVal;
@@ -545,11 +532,7 @@ module.exports = {
             let outputActualDBArray = [];
             const cachedData = isToday ? cacheService.getFullDay(machine_name) : null;
             if (cachedData) {
-                const outputActualDB = { machine_name, date: targetDate };
-                for (const h of SHIFT_HOURS) {
-                    outputActualDB[`actual_${h}`] = cachedData.output[`actual_${h}`] || 0;
-                }
-                outputActualDBArray = [outputActualDB];
+                outputActualDBArray = [buildPseudoActualRow(machine_name, targetDate, cachedData)];
             } else {
                 // Keep all rows — per-hour fallback applied in SUM loop below
                 outputActualDBArray = await prisma.tb_output_actual.findMany({
@@ -560,16 +543,11 @@ module.exports = {
             // ✅ Fix: current hour → InfluxDB เป็น source of truth
             if (isToday) {
                 try {
-                    const now = new Date();
-                    const { start, thColumn } = getCurrentHourBoundaries(now);
-                    const field = `actual_${thColumn}`;
-                    const influxData = await influxService.queryMachineForHour(machine_name, start, now);
-                    if (influxData && influxData.output_count > 0) {
-                        if (outputActualDBArray.length === 0) {
-                             outputActualDBArray = [{ machine_name, date: targetDate }];
-                        }
-                        outputActualDBArray[0][field] = influxData.output_count;
-                    }
+                    outputActualDBArray = await applyCurrentHourInfluxOverride(outputActualDBArray, {
+                        influxService,
+                        machineName: machine_name,
+                        date: targetDate,
+                    });
                 } catch (e) { /* non-critical — keep cache/MSSQL value */ }
             }
 
@@ -580,18 +558,11 @@ module.exports = {
 
             let accActual = 0;
             let accTarget = 0;
+            const actualByHour = sumActualByHour(outputActualDBArray, SHIFT_HOURS);
 
             for (const h of SHIFT_HOURS) {
                 // Actual
-                let act = 0;
-                // Per-hour fallback: real model wins; "--" used only if no real model output this hour
-                const realForH = outputActualDBArray.filter(r => r.model_name !== "--" && (r[`actual_${h}`] || 0) > 0);
-                if (realForH.length > 0) {
-                    act = realForH.reduce((acc, row) => acc + (row[`actual_${h}`] || 0), 0);
-                } else {
-                    const dashRow = outputActualDBArray.find(r => r.model_name === "--");
-                    act = dashRow ? (dashRow[`actual_${h}`] || 0) : 0;
-                }
+                const act = actualByHour[`actual_${h}`] || 0;
                 
                 accActual += act;
                 outputActual.push(act);
